@@ -32,15 +32,44 @@ agent-inbox report start "$TASK_ID" "opencode" "$PWD" "$TASK_TITLE" --pid $$ --p
 agent-inbox monitor "$TASK_ID" $$ >/dev/null 2>&1 &
 MONITOR_PID=$!
 
-# Run actual opencode command with all args, preserving all I/O
-# Use direct execution (not exec) so we can capture exit code
-"$OPENCODE_BIN" "$@"
-EXIT_CODE=$?
+# Use `script` to record opencode output into a temp file while preserving the
+# PTY so the interactive TUI works correctly.  The typescript file captures all
+# terminal output including ANSI escape codes; we strip those later.
+OUTPUT_FILE=$(mktemp /tmp/opencode-output-XXXXXX.log)
 
-# Kill monitor (it may have already detected completion and exited)
+if command -v script >/dev/null 2>&1; then
+    # -q: quiet (no start/end banners)
+    # -e: propagate exit code of the child command
+    # -c: command to run
+    # -f: flush output after each write (important for real-time capture)
+    script -q -e -f -c "\"$OPENCODE_BIN\" $(printf '%q ' "$@")" "$OUTPUT_FILE"
+    EXIT_CODE=$?
+else
+    # Fallback: run normally without output capture
+    "$OPENCODE_BIN" "$@"
+    EXIT_CODE=$?
+fi
+
+# Kill monitor
 kill $MONITOR_PID 2>/dev/null || true
 
-# Report completion (in case monitor didn't catch it, or we beat it)
+# Report completion
 agent-inbox report complete "$TASK_ID" --exit-code "$EXIT_CODE" 2>/dev/null || true
+
+# Send Telegram notification with the last output from opencode.
+# Strip ANSI escape sequences, then take the last 4096 chars.
+if [ -f "$OUTPUT_FILE" ] && command -v agent-inbox >/dev/null 2>&1; then
+    # Strip ANSI codes with sed (works without perl/python)
+    CLEAN_OUTPUT=$(sed 's/\x1b\[[0-9;]*[mGKHFABCDST]//g; s/\x1b\[[0-9;]*[Jn]//g; s/\r//g' "$OUTPUT_FILE" 2>/dev/null || true)
+
+    if [ -n "$CLEAN_OUTPUT" ]; then
+        agent-inbox notify --task-id "$TASK_ID" --message "$CLEAN_OUTPUT" 2>/dev/null || true
+    else
+        agent-inbox notify --task-id "$TASK_ID" --message "(no output captured)" 2>/dev/null || true
+    fi
+fi
+
+# Clean up temp file
+rm -f "$OUTPUT_FILE"
 
 exit $EXIT_CODE

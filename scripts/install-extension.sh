@@ -1,6 +1,8 @@
 #!/bin/bash
 set -e
 
+REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
 echo "Installing Agent Inbox Browser Extension..."
 echo ""
 
@@ -21,15 +23,15 @@ echo ""
 
 # Build agent-bridge binary
 echo "Building agent-bridge binary..."
-cargo build --release --bin agent-bridge
+cargo build --release --manifest-path "$REPO_DIR/Cargo.toml" --bin agent-bridge
 
 # Install agent-bridge
 if [ -w "/usr/local/bin" ]; then
-    cp target/release/agent-bridge /usr/local/bin/
+    cp "$REPO_DIR/target/release/agent-bridge" /usr/local/bin/
     echo "✓ Installed agent-bridge to /usr/local/bin/"
 else
     echo "Installing agent-bridge requires sudo..."
-    sudo cp target/release/agent-bridge /usr/local/bin/
+    sudo cp "$REPO_DIR/target/release/agent-bridge" /usr/local/bin/
     echo "✓ Installed agent-bridge to /usr/local/bin/ (with sudo)"
 fi
 
@@ -39,7 +41,7 @@ echo "  agent-bridge location: $AGENT_BRIDGE_PATH"
 
 # Update manifest with actual path
 sed "s|/usr/local/bin/agent-bridge|$AGENT_BRIDGE_PATH|g" \
-    extension/com.agent_tasks.bridge.json > /tmp/com.agent_tasks.bridge.json
+    "$REPO_DIR/extension/com.agent_tasks.bridge.json" > /tmp/com.agent_tasks.bridge.json
 
 # Install native messaging manifest
 if [ "$BROWSER" == "chrome" ]; then
@@ -67,7 +69,7 @@ echo "1. Open Chrome/Chromium:"
 echo "   - Navigate to: chrome://extensions"
 echo "   - Enable 'Developer mode' (toggle in top-right)"
 echo "   - Click 'Load unpacked'"
-echo "   - Select directory: $(pwd)/extension"
+echo "   - Select directory: $REPO_DIR/extension"
 echo ""
 echo "2. Copy the Extension ID:"
 echo "   - After loading, you'll see an ID like: abcdefghijklmnopqrstuvwxyz123456"
@@ -89,7 +91,7 @@ echo ""
 echo "For Firefox:"
 echo "   - Navigate to: about:debugging#/runtime/this-firefox"
 echo "   - Click 'Load Temporary Add-on'"
-echo "   - Select: $(pwd)/extension/manifest.json"
+echo "   - Select: $REPO_DIR/extension/manifest.json"
 echo ""
 echo "Troubleshooting:"
 echo "   - Check extension console: chrome://extensions -> Agent Inbox -> 'background page'"

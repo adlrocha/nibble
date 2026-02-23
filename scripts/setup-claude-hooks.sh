@@ -51,8 +51,20 @@ if [ -f "$CLAUDE_SETTINGS_FILE" ]; then
                 "hooks": [
                   {
                     "type": "command",
-                    "command": "if [ -n \"$AGENT_TASK_ID\" ]; then agent-inbox report complete \"$AGENT_TASK_ID\" && notify-send '\''Claude Code'\'' '\''Finished generating'\'' 2>/dev/null; fi",
-                    "timeout": 5
+                    "command": "if [ -n \"$AGENT_TASK_ID\" ]; then INPUT=$(cat); agent-inbox report complete \"$AGENT_TASK_ID\" 2>/dev/null; notify-send '\''Claude Code'\'' '\''Finished generating'\'' 2>/dev/null; if command -v jq >/dev/null 2>&1; then MSG=$(printf '\''%s'\'' \"$INPUT\" | jq -r '\''.last_assistant_message // \"(no message)\"'\''); else MSG=\"(install jq to see last message)\"; fi; agent-inbox notify --task-id \"$AGENT_TASK_ID\" --message \"$MSG\" 2>/dev/null; fi",
+                    "timeout": 15
+                  }
+                ]
+              }
+            ],
+            "Notification": [
+              {
+                "matcher": "permission_prompt",
+                "hooks": [
+                  {
+                    "type": "command",
+                    "command": "if [ -n \"$AGENT_TASK_ID\" ]; then INPUT=$(cat); if command -v jq >/dev/null 2>&1; then MSG=$(printf '\''%s'\'' \"$INPUT\" | jq -r '\''.message // \"Permission required\"'\''); else MSG=\"Permission required (install jq for details)\"; fi; agent-inbox notify --task-id \"$AGENT_TASK_ID\" --message \"$MSG\" --attention 2>/dev/null; fi",
+                    "timeout": 10
                   }
                 ]
               }
@@ -104,8 +116,20 @@ else
         "hooks": [
           {
             "type": "command",
-            "command": "if [ -n \"$AGENT_TASK_ID\" ]; then agent-inbox report complete \"$AGENT_TASK_ID\" && notify-send 'Claude Code' 'Finished generating' 2>/dev/null; fi",
-            "timeout": 5
+            "command": "if [ -n \"$AGENT_TASK_ID\" ]; then INPUT=$(cat); agent-inbox report complete \"$AGENT_TASK_ID\" 2>/dev/null; notify-send 'Claude Code' 'Finished generating' 2>/dev/null; if command -v jq >/dev/null 2>&1; then MSG=$(printf '%s' \"$INPUT\" | jq -r '.last_assistant_message // \"(no message)\"'); else MSG=\"(install jq to see last message)\"; fi; agent-inbox notify --task-id \"$AGENT_TASK_ID\" --message \"$MSG\" 2>/dev/null; fi",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "permission_prompt",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -n \"$AGENT_TASK_ID\" ]; then INPUT=$(cat); if command -v jq >/dev/null 2>&1; then MSG=$(printf '%s' \"$INPUT\" | jq -r '.message // \"Permission required\"'); else MSG=\"Permission required (install jq for details)\"; fi; agent-inbox notify --task-id \"$AGENT_TASK_ID\" --message \"$MSG\" --attention 2>/dev/null; fi",
+            "timeout": 10
           }
         ]
       }
@@ -130,8 +154,9 @@ echo ""
 echo "Claude Code hooks installed successfully!"
 echo ""
 echo "Hooks configured:"
-echo "  - UserPromptSubmit: marks task as 'running' when you send a message"
-echo "  - Stop: marks task as 'completed' + shows notification when Claude finishes"
-echo "  - SessionEnd: marks task as 'exited' when you exit Claude Code"
+echo "  - UserPromptSubmit:  marks task as 'running' when you send a message"
+echo "  - Stop:              marks task as 'completed' + Telegram notification with last message"
+echo "  - Notification:      Telegram 🚨 alert when Claude needs a permission decision"
+echo "  - SessionEnd:        marks task as 'exited' when you exit Claude Code"
 echo ""
 echo "NOTE: You need to restart Claude Code for hooks to take effect."

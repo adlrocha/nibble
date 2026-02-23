@@ -67,6 +67,22 @@ pub enum Commands {
         /// Process ID to monitor
         pid: i32,
     },
+
+    /// Send a Telegram notification (used by hooks and wrappers)
+    Notify {
+        /// Message body to send (agent last output or permission request)
+        #[arg(short, long)]
+        message: String,
+
+        /// Optional task ID to attach context (agent type, title, elapsed time)
+        #[arg(short, long)]
+        task_id: Option<String>,
+
+        /// Mark this as an attention-required notification (permission request, question, etc.)
+        /// Uses a distinct visual style so it stands out from regular completion notifications.
+        #[arg(long)]
+        attention: bool,
+    },
 }
 
 #[derive(Subcommand)]

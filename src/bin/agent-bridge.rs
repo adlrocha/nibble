@@ -1,7 +1,5 @@
-/**
- * Native messaging host for browser extension
- * Receives task updates from extension and writes to agent-inbox database
- */
+//! Native messaging host for browser extension.
+//! Receives task updates from extension and writes to agent-inbox database.
 
 use agent_inbox::db::{default_db_path, Database};
 use agent_inbox::models::{Task, TaskContext, TaskStatus};

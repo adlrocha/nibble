@@ -3,6 +3,7 @@ use chrono::{TimeZone, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use crate::models::{Task, TaskContext, TaskStatus};
 
@@ -222,7 +223,7 @@ impl Database {
         let cutoff = Utc::now().timestamp() - older_than_secs;
 
         let affected = self.conn.execute(
-            "DELETE FROM tasks WHERE status = 'completed' AND completed_at < ?1",
+            "DELETE FROM tasks WHERE status IN ('completed', 'exited') AND completed_at < ?1",
             params![cutoff],
         )?;
 
@@ -427,6 +428,31 @@ mod tests {
         assert_eq!(deleted, 0);
 
         // But should delete if we look back far enough (negative time = future)
+        let deleted = db.cleanup_old_completed(-1).unwrap();
+        assert_eq!(deleted, 1);
+    }
+
+    #[test]
+    fn test_cleanup_old_exited() {
+        let (db, _temp) = create_test_db();
+
+        let mut task = Task::new(
+            "test-exited".to_string(),
+            "claude_code".to_string(),
+            "Exited task".to_string(),
+            None,
+            None,
+        );
+
+        // Create an exited task
+        task.set_exited(Some(0));
+        db.insert_task(&task).unwrap();
+
+        // Should not delete tasks exited less than 1 second ago
+        let deleted = db.cleanup_old_completed(1).unwrap();
+        assert_eq!(deleted, 0);
+
+        // Should delete exited tasks when retention threshold is exceeded
         let deleted = db.cleanup_old_completed(-1).unwrap();
         assert_eq!(deleted, 1);
     }

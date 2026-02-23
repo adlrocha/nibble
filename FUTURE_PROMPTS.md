@@ -1,0 +1,2 @@
+- The agent-inbox keeps the status around when claude code or opencode haven't been gracefully killed. I think we should get a cron that verifies if the PID is still running and kills it if not to avoid polluting the database.
+- Implement Telegram notifications for gemini and claude in the web?

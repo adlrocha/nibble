@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::str::FromStr;
 
 /// Task status - simplified to 3 states for reliability
 /// - Running: Agent is actively generating output
@@ -21,8 +22,12 @@ impl TaskStatus {
             TaskStatus::Exited => "exited",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Result<Self, String> {
+impl FromStr for TaskStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "running" => Ok(TaskStatus::Running),
             "completed" => Ok(TaskStatus::Completed),

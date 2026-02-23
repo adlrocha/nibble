@@ -7,6 +7,7 @@ A CLI-first notification system that tracks tasks across multiple LLM/coding age
 - **Unified Task Tracking**: Track tasks across different AI agents in one place
 - **3-State Model**: Simple, reliable status tracking (Running → Completed → Exited)
 - **Desktop Notifications**: Get notified when agents finish generating
+- **Telegram Notifications**: Receive the agent's last message on your phone when it needs your attention
 - **Transparent Wrappers**: Auto-track CLI agents without changing your workflow
 - **Browser Extension**: Track Claude.ai and Gemini conversations
 - **Repo-Aware**: Shows git repo and branch in task titles for CLI agents
@@ -24,58 +25,100 @@ A CLI-first notification system that tracks tasks across multiple LLM/coding age
 ### Prerequisites
 
 - Rust 1.70+ (for building)
+- `jq` (for hook message extraction — `pacman -S jq` / `apt install jq`)
 - Linux (tested on Arch Linux)
 
-### Build and Install
+### Install / Upgrade
+
+A single script handles everything: build, binaries, wrappers, and Claude Code hooks.
 
 ```bash
-cd /path/to/agent-notifications
+git clone <repo-url>
+cd agent-inbox
 
-# Build
-cargo build --release
+# First-time install or upgrade
+./install.sh
 
-# Install binaries
-cp target/release/agent-inbox ~/.local/bin/
-cp target/release/agent-bridge ~/.local/bin/
+# Install + set up Telegram bot in one go
+./install.sh --telegram
 ```
 
-## Setup Scripts
-
-### 1. Claude Code Wrapper
-
-The wrapper enables automatic task tracking for Claude Code CLI:
+After running, add aliases to your `~/.zshrc` or `~/.bashrc` if the script reports them missing:
 
 ```bash
-# Copy wrapper to your path
-mkdir -p ~/.agent-tasks/wrappers
-cp wrappers/claude-wrapper ~/.agent-tasks/wrappers/
-
-# Add alias to your shell RC (~/.bashrc or ~/.zshrc)
 alias claude='~/.agent-tasks/wrappers/claude-wrapper'
-
-# Reload shell
-source ~/.bashrc
+alias opencode='~/.agent-tasks/wrappers/opencode-wrapper'
 ```
 
-The wrapper:
-- Creates a task when Claude starts
-- Exports `AGENT_TASK_ID` for hooks to use
-- Shows `[repo:branch]` in task title when in a git repo
+Then reload your shell and **restart Claude Code** for hooks to take effect.
 
-### 2. Claude Code Hooks
+What `install.sh` does:
+1. Builds release binaries with `cargo build --release`
+2. Installs `agent-inbox` and `agent-bridge` to `~/.local/bin/`
+3. Copies updated wrappers to `~/.agent-tasks/wrappers/`
+4. Removes stale hooks from `~/.claude/settings.json` and reinstalls the latest version
+5. Skips Telegram setup unless `--telegram` is passed
 
-Run the setup script to install hooks globally:
+### Telegram Notifications (optional)
+
+Get notified on your phone whenever Claude Code or OpenCode finishes a turn or needs a permission decision, with the agent's last message included so you know what it's waiting on.
+
+The easiest way to set this up is via `install.sh`:
 
 ```bash
-./scripts/setup-claude-hooks.sh
+./install.sh --telegram
 ```
 
-This installs hooks to `~/.claude/settings.json` that:
-- **UserPromptSubmit**: Mark task as "running" when you send a prompt
-- **Stop**: Mark task as "completed" + desktop notification when Claude finishes
-- **SessionEnd**: Mark task as "exited" when you exit Claude Code
+Or run the setup script directly:
 
-**Note**: Restart Claude Code after installing hooks for them to take effect.
+```bash
+./scripts/setup-telegram.sh
+```
+
+The script will:
+1. Walk you through creating a bot via @BotFather in Telegram
+2. Auto-detect your chat ID
+3. Write `~/.agent-tasks/config.toml`
+4. Send a test message to confirm everything works
+
+**Config file** (`~/.agent-tasks/config.toml`):
+
+```toml
+[telegram]
+enabled = true
+bot_token = "123456789:ABCdefGHIjklMNOpqrSTUvwxYZ"
+chat_id = "123456789"
+```
+
+Set `enabled = false` to temporarily disable notifications without removing the config.
+
+**Message format — turn finished:**
+
+```
+🤖 Claude Code
+📁 agent-inbox · main
+⏱ 4m 32s
+────────────────────────────
+I've finished refactoring the auth module. Here's what I changed: ...
+```
+
+**Message format — permission / attention needed:**
+
+```
+🚨 Needs your attention
+🤖 Claude Code
+📁 agent-inbox · main
+⏱ 2m 10s
+────────────────────────────
+Claude needs permission to run: npm install
+```
+
+If the agent output exceeds 4096 characters, only the last 4096 are sent (with a truncation notice) so you always see the most recent output.
+
+**How it works per agent:**
+
+- **Claude Code**: The `Stop` hook reads `last_assistant_message` from stdin and sends it. The `Notification` hook fires on `permission_prompt` events and sends a `🚨` alert with the permission description.
+- **OpenCode**: The wrapper records terminal output with `script` (preserving the interactive TUI), strips ANSI codes on exit, and sends the result.
 
 ### 3. Auto-Reset on Login/Restart
 
@@ -172,14 +215,34 @@ agent-inbox report complete "$TASK_ID"
 agent-inbox report exited "$TASK_ID" --exit-code 0
 ```
 
+### Sending Notifications Manually
+
+```bash
+# Normal completion notification (with task context)
+agent-inbox notify --task-id "$TASK_ID" --message "Agent output here"
+
+# Attention-required notification — shows 🚨 banner (permission, question, etc.)
+agent-inbox notify --task-id "$TASK_ID" --message "Do you want to proceed?" --attention
+
+# Without task context
+agent-inbox notify --message "Something needs your attention" --attention
+```
+
+If Telegram is not configured the command exits cleanly with a warning — it will not break hooks or wrappers.
+
 ## Scripts Reference
 
 | Script | Purpose |
 |--------|---------|
-| `scripts/setup-claude-hooks.sh` | Install Claude Code hooks globally (~/.claude/settings.json) |
+| `install.sh` | **One-command install / upgrade** — build, binaries, wrappers, hooks. Pass `--telegram` to also run Telegram setup |
+| `scripts/setup-telegram.sh` | Interactive Telegram bot setup — writes `~/.agent-tasks/config.toml` |
+| `scripts/setup-claude-hooks.sh` | Install Claude Code hooks globally (`~/.claude/settings.json`) |
 | `scripts/setup-auto-reset.sh` | Install systemd service for auto-reset on login |
+| `scripts/setup-wrappers.sh` | Install wrappers and add shell aliases automatically |
+| `scripts/install-extension.sh` | Build and install the browser extension native messaging host |
+| `scripts/fix-native-messaging.sh` | Interactive fix for browser native messaging configuration |
 | `wrappers/claude-wrapper` | Wrapper script for Claude Code CLI |
-| `wrappers/opencode-wrapper` | Wrapper script for OpenCode CLI |
+| `wrappers/opencode-wrapper` | Wrapper script for OpenCode CLI (records output for notifications) |
 
 ## Architecture
 
@@ -194,23 +257,40 @@ agent-inbox report exited "$TASK_ID" --exit-code 0
 │  (wrapper+hooks) │  │  (extension)     │  │  (extension)     │
 └────────┬─────────┘  └────────┬─────────┘  └────────┬─────────┘
          │                     │                     │
-         │                     ▼                     │
-         │            ┌──────────────────┐           │
-         │            │  agent-bridge    │           │
-         │            │  (native msg)    │           │
+┌────────────────┐              ▼                     │
+│  OpenCode      │    ┌──────────────────┐           │
+│  (wrapper)     │    │  agent-bridge    │           │
+└────────┬───────┘    │  (native msg)    │           │
          │            └────────┬─────────┘           │
          │                     │                     │
          ▼                     ▼                     ▼
 ┌──────────────────────────────────────────────────────────────┐
 │                      agent-inbox CLI                          │
-└──────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-                    ┌──────────────────┐
-                    │    SQLite DB     │
-                    │ ~/.agent-tasks/  │
-                    └──────────────────┘
+│   report / notify / list / watch / reset / ...               │
+└───────────────────────┬──────────────────────────────────────┘
+                        │
+            ┌───────────┴───────────┐
+            ▼                       ▼
+  ┌──────────────────┐    ┌──────────────────────┐
+  │    SQLite DB     │    │   Telegram Bot API   │
+  │ ~/.agent-tasks/  │    │  (on Stop / session  │
+  │   tasks.db       │    │   end — sends last   │
+  └──────────────────┘    │   agent message)     │
+                          └──────────────────────┘
+                                     │
+                                     ▼
+                             📱 Your phone
 ```
+
+**Notification flow (Claude Code):**
+1. Claude Code fires the `Stop` hook with `last_assistant_message` on stdin
+2. Hook calls `agent-inbox report complete` then `agent-inbox notify --message "$MSG"`
+3. `agent-inbox notify` reads `~/.agent-tasks/config.toml`, prepends task context, sends to Telegram
+
+**Notification flow (OpenCode):**
+1. Wrapper runs OpenCode inside `script` to capture PTY output
+2. On exit, ANSI codes are stripped and the output is passed to `agent-inbox notify`
+3. Same Telegram send path as above
 
 ## Development
 

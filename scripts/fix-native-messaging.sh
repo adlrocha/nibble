@@ -1,6 +1,8 @@
 #!/bin/bash
 # Fix native messaging configuration
 
+REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
 echo "=== Agent Inbox Native Messaging Fix ==="
 echo ""
 
@@ -41,13 +43,14 @@ echo ""
 echo "Step 2: Create/Update Native Messaging Manifest"
 echo "-----------------------------------------------"
 
+AGENT_BRIDGE_PATH="$HOME/.local/bin/agent-bridge"
 MANIFEST_FILE="$NATIVE_DIR/com.agent_tasks.bridge.json"
 
 cat > "$MANIFEST_FILE" << EOF
 {
   "name": "com.agent_tasks.bridge",
   "description": "Native messaging host for Agent Inbox extension",
-  "path": "/usr/local/bin/agent-bridge",
+  "path": "$AGENT_BRIDGE_PATH",
   "type": "stdio",
   "allowed_origins": [
     "chrome-extension://$EXT_ID/"
@@ -62,19 +65,20 @@ echo ""
 echo "Step 3: Verify agent-bridge Binary"
 echo "-----------------------------------"
 
-if [ ! -f "/usr/local/bin/agent-bridge" ]; then
-  echo "WARNING: /usr/local/bin/agent-bridge not found!"
+if [ ! -f "$AGENT_BRIDGE_PATH" ]; then
+  echo "WARNING: $AGENT_BRIDGE_PATH not found!"
   echo "Installing..."
 
-  if [ -f "target/release/agent-bridge" ]; then
-    sudo cp target/release/agent-bridge /usr/local/bin/
-    echo "✓ Installed agent-bridge"
+  if [ -f "$REPO_DIR/target/release/agent-bridge" ]; then
+    cp "$REPO_DIR/target/release/agent-bridge" "$AGENT_BRIDGE_PATH"
+    chmod +x "$AGENT_BRIDGE_PATH"
+    echo "✓ Installed agent-bridge to $AGENT_BRIDGE_PATH"
   else
     echo "ERROR: Build agent-bridge first with: cargo build --release"
     exit 1
   fi
 else
-  echo "✓ agent-bridge found at /usr/local/bin/agent-bridge"
+  echo "✓ agent-bridge found at $AGENT_BRIDGE_PATH"
 fi
 
 echo ""
@@ -83,7 +87,7 @@ echo "-----------------------------"
 echo "Testing if agent-bridge can receive messages..."
 
 # Test by echoing a test message
-echo '{"type":"test","message":"hello"}' | /usr/local/bin/agent-bridge 2>&1 | head -n 5
+echo '{"type":"test","message":"hello"}' | "$AGENT_BRIDGE_PATH" 2>&1 | head -n 5
 
 echo ""
 echo "=== Setup Complete ==="

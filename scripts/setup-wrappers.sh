@@ -1,6 +1,8 @@
 #!/bin/bash
 set -e
 
+REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
 echo "Setting up agent-inbox wrappers..."
 echo ""
 
@@ -33,8 +35,8 @@ mkdir -p "$WRAPPER_DIR"
 
 # Copy wrapper scripts
 echo "Installing wrapper scripts..."
-for wrapper in wrappers/*-wrapper; do
-    if [ -f "$wrapper" ] && [ "$wrapper" != "wrappers/TEMPLATE-wrapper" ]; then
+for wrapper in "$REPO_DIR/wrappers/"*-wrapper; do
+    if [ -f "$wrapper" ] && [ "$wrapper" != "$REPO_DIR/wrappers/TEMPLATE-wrapper" ]; then
         wrapper_name=$(basename "$wrapper")
         cp "$wrapper" "$WRAPPER_DIR/"
         chmod +x "$WRAPPER_DIR/$wrapper_name"
@@ -125,5 +127,5 @@ echo "Test it:"
 echo "  1. Run a wrapped command: claude --help"
 echo "  2. Check agent-inbox: agent-inbox list --all"
 echo ""
-echo "To wrap additional agents, see: wrappers/TEMPLATE-wrapper"
+echo "To wrap additional agents, see: $REPO_DIR/wrappers/TEMPLATE-wrapper"
 echo ""
