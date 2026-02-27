@@ -68,6 +68,88 @@ pub enum Commands {
         pid: i32,
     },
 
+    /// Manage sandboxed Claude Code agents (proxies to agent-sandbox)
+    ///
+    /// All arguments are forwarded directly to `agent-sandbox`.
+    /// Run `agent-inbox sandbox --help` or `agent-sandbox --help` for full usage.
+    ///
+    /// Examples:
+    ///   agent-inbox sandbox /path/to/repo
+    ///   agent-inbox sandbox list
+    ///   agent-inbox sandbox attach <task-id>
+    ///   agent-inbox sandbox kill <task-id>
+    ///   agent-inbox sandbox resume
+    ///   agent-inbox sandbox --build-only
+    ///   agent-inbox sandbox --rebuild
+    #[command(allow_hyphen_values = true)]
+    Sandbox {
+        /// Arguments forwarded to agent-sandbox
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    // ── Internal sandbox subcommands (called by agent-sandbox script) ──────────
+
+    /// [internal] Spawn a sandboxed agent
+    #[command(hide = true, name = "_sandbox_spawn")]
+    SandboxSpawn {
+        repo_path: String,
+        #[arg(short, long)]
+        task: Option<String>,
+        #[arg(long, default_value = "agent-inbox-sandbox:latest")]
+        image: String,
+    },
+
+    /// [internal] List sandboxes
+    #[command(hide = true, name = "_sandbox_list")]
+    SandboxList,
+
+    /// [internal] Attach to a sandbox's Claude tmux session
+    #[command(hide = true, name = "_sandbox_attach")]
+    SandboxAttach {
+        task_id: String,
+        /// Start a fresh session instead of resuming the last conversation
+        #[arg(long)]
+        fresh: bool,
+    },
+
+    /// [internal] Kill a sandbox
+    #[command(hide = true, name = "_sandbox_kill")]
+    SandboxKill {
+        /// Task ID to kill (omit when --all is set)
+        task_id: Option<String>,
+        /// Kill all running sandbox containers
+        #[arg(long)]
+        all: bool,
+    },
+
+    /// [internal] Resume sandboxes after reboot
+    #[command(hide = true, name = "_sandbox_resume")]
+    SandboxResume {
+        #[arg(short, long)]
+        all: bool,
+    },
+
+    /// [internal] Build the sandbox image
+    #[command(hide = true, name = "_sandbox_build")]
+    SandboxBuild {
+        #[arg(long, default_value = "agent-inbox-sandbox:latest")]
+        image: String,
+        #[arg(long)]
+        rebuild: bool,
+    },
+
+    /// Inject a message into a running sandbox agent (bypasses Telegram)
+    Inject {
+        /// Task ID of the agent to inject into
+        task_id: String,
+        /// Message to send
+        message: String,
+    },
+
+    /// Run the Telegram long-polling daemon (routes phone replies back to agents)
+    Listen,
+
     /// Send a Telegram notification (used by hooks and wrappers)
     Notify {
         /// Message body to send (agent last output or permission request)
@@ -108,6 +190,14 @@ pub enum ReportAction {
         /// Parent process ID
         #[arg(long)]
         ppid: Option<i32>,
+
+        /// Zellij pane ID (set automatically when running inside zellij)
+        #[arg(long)]
+        zellij_pane_id: Option<u32>,
+
+        /// Claude Code session ID (set by the Stop hook for resume support)
+        #[arg(long)]
+        session_id: Option<String>,
     },
 
     /// Report task completion
@@ -134,5 +224,14 @@ pub enum ReportAction {
         /// Exit code
         #[arg(long)]
         exit_code: Option<i32>,
+    },
+
+    /// Update the Claude session ID for an existing task (called by the Stop hook)
+    SessionId {
+        /// Task ID
+        task_id: String,
+
+        /// Claude Code session ID from the hook JSON
+        session_id: String,
     },
 }

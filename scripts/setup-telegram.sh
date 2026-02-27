@@ -64,6 +64,7 @@ UPDATES=$(curl -s "https://api.telegram.org/bot${BOT_TOKEN}/getUpdates")
 if echo "$UPDATES" | grep -q '"ok":true'; then
     if command -v jq >/dev/null 2>&1; then
         CHAT_ID=$(echo "$UPDATES" | jq -r '.result[-1].message.chat.id // empty' 2>/dev/null)
+        USERNAME=$(echo "$UPDATES" | jq -r '.result[-1].message.from.username // empty' 2>/dev/null)
     else
         # Fallback: extract with grep/sed (less reliable but works without jq)
         CHAT_ID=$(echo "$UPDATES" | grep -o '"id":[0-9-]*' | head -1 | sed 's/"id"://')
@@ -72,9 +73,13 @@ fi
 
 if [ -n "$CHAT_ID" ] && [ "$CHAT_ID" != "null" ]; then
     echo -e "  ${GREEN}Detected chat ID: ${CHAT_ID}${NC}"
-    read -r -p "  Use this chat ID? [Y/n]: " CONFIRM
+    if [ -n "$USERNAME" ] && [ "$USERNAME" != "null" ]; then
+        echo -e "  ${GREEN}Detected username: @${USERNAME}${NC}"
+    fi
+    read -r -p "  Use these details? [Y/n]: " CONFIRM
     if [[ "$CONFIRM" =~ ^[Nn] ]]; then
         CHAT_ID=""
+        USERNAME=""
     fi
 fi
 
@@ -87,6 +92,16 @@ if [ -z "$CHAT_ID" ] || [ "$CHAT_ID" = "null" ]; then
     read -r -p "  Chat ID: " CHAT_ID
 fi
 
+# Prompt for username if not auto-detected (strongly recommended)
+if [ -z "$USERNAME" ] || [ "$USERNAME" = "null" ]; then
+    echo ""
+    echo "  Your Telegram username adds a second layer of security."
+    echo "  Only messages from this username will be accepted by the bot."
+    read -r -p "  Your Telegram username (without @, or Enter to skip): " USERNAME
+fi
+# Strip leading @ if user typed it
+USERNAME="${USERNAME#@}"
+
 echo ""
 
 # ── Step 4: Write config ──────────────────────────────────────────────────────
@@ -95,12 +110,15 @@ echo ""
 
 mkdir -p "$CONFIG_DIR"
 
-cat > "$CONFIG_FILE" << EOF
-[telegram]
-enabled = true
-bot_token = "$BOT_TOKEN"
-chat_id = "$CHAT_ID"
-EOF
+{
+    echo '[telegram]'
+    echo 'enabled = true'
+    echo "bot_token = \"$BOT_TOKEN\""
+    echo "chat_id = \"$CHAT_ID\""
+    if [ -n "$USERNAME" ]; then
+        echo "allowed_username = \"$USERNAME\""
+    fi
+} > "$CONFIG_FILE"
 
 echo -e "  ${GREEN}Config written to: $CONFIG_FILE${NC}"
 echo ""

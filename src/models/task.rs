@@ -3,6 +3,71 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::str::FromStr;
 
+/// Type of sandbox environment
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxType {
+    /// No sandbox - runs directly on host
+    #[default]
+    None,
+    /// Rootless Podman container
+    Podman,
+}
+
+impl SandboxType {
+    pub fn as_str(&self) -> &str {
+        match self {
+            SandboxType::None => "none",
+            SandboxType::Podman => "podman",
+        }
+    }
+}
+
+impl std::str::FromStr for SandboxType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "none" => Ok(SandboxType::None),
+            "podman" => Ok(SandboxType::Podman),
+            _ => Err(format!("Invalid sandbox type: {}", s)),
+        }
+    }
+}
+
+/// Configuration for sandbox environment
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxConfig {
+    /// Container image to use
+    pub image: String,
+    /// Port ranges to expose (e.g., "3000-3100,8000-8100")
+    pub port_ranges: Vec<String>,
+    /// Environment variables to pass to container
+    pub env_vars: HashMap<String, String>,
+    /// Whether to run in privileged mode (more flexible, less isolated)
+    pub privileged: bool,
+    /// CPU limit (e.g., "2" for 2 cores)
+    pub cpu_limit: Option<String>,
+    /// Memory limit (e.g., "4g" for 4GB)
+    pub memory_limit: Option<String>,
+    /// Additional volume mounts (host_path:container_path)
+    pub extra_volumes: Vec<String>,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            image: "agent-inbox-sandbox:latest".to_string(),
+            port_ranges: vec!["3000-3100".to_string(), "8000-8100".to_string()],
+            env_vars: HashMap::new(),
+            privileged: true, // Default to privileged for flexibility
+            cpu_limit: None,
+            memory_limit: None,
+            extra_volumes: vec![],
+        }
+    }
+}
+
 /// Task status - simplified to 3 states for reliability
 /// - Running: Agent is actively generating output
 /// - Completed: Agent finished generating, waiting for user input
@@ -66,6 +131,11 @@ pub struct Task {
     pub exit_code: Option<i32>,
     pub context: Option<TaskContext>,
     pub metadata: Option<HashMap<String, serde_json::Value>>,
+    // Sandbox fields (new in schema v3)
+    pub container_id: Option<String>,
+    #[serde(default)]
+    pub sandbox_type: SandboxType,
+    pub sandbox_config: Option<SandboxConfig>,
 }
 
 impl Task {
@@ -93,6 +163,10 @@ impl Task {
             exit_code: None,
             context: None,
             metadata: None,
+            // Sandbox fields default to None/none
+            container_id: None,
+            sandbox_type: SandboxType::None,
+            sandbox_config: None,
         }
     }
 

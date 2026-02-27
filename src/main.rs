@@ -1,3 +1,4 @@
+mod agent_input;
 mod cli;
 mod config;
 mod db;
@@ -5,14 +6,18 @@ mod display;
 mod models;
 mod monitor;
 mod notifications;
+mod sandbox;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use cli::{Cli, Commands, ReportAction};
 use db::Database;
-use models::{Task, TaskContext, TaskStatus};
-use std::str::FromStr;
+use models::{SandboxConfig, SandboxType, Task, TaskContext, TaskStatus};
+use sandbox::podman::PodmanSandbox;
+use sandbox::Sandbox;
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::str::FromStr;
 use std::thread;
 use std::time::Duration;
 
@@ -26,8 +31,9 @@ fn main() -> Result<()> {
     let db_path = db::default_db_path();
     let db = Database::open(&db_path).context("Failed to open database")?;
 
-    // Run cleanup on every invocation
-    let _ = db.cleanup_old_completed(3600); // 1 hour default
+    // Run cleanup on every invocation (1 hour retention)
+    let _ = db.cleanup_old_completed(3600);
+    let _ = db.cleanup_old_bot_messages(3600);
 
     match cli.command {
         None => {
@@ -141,15 +147,24 @@ fn main() -> Result<()> {
                 title,
                 pid,
                 ppid,
+                zellij_pane_id,
+                session_id,
             } => {
                 let mut task = Task::new(task_id, agent_type, title, pid, ppid);
 
-                // Add context
+                let mut extra = HashMap::new();
+                if let Some(pane_id) = zellij_pane_id {
+                    extra.insert(
+                        "zellij_pane_id".to_string(),
+                        serde_json::Value::Number(pane_id.into()),
+                    );
+                }
+
                 task.context = Some(TaskContext {
                     url: None,
                     project_path: Some(cwd),
-                    session_id: None,
-                    extra: HashMap::new(),
+                    session_id,
+                    extra,
                 });
 
                 db.insert_task(&task)?;
@@ -192,6 +207,20 @@ fn main() -> Result<()> {
                 db.update_task(&task)?;
                 println!("Task exited: {}", task_id);
             }
+            ReportAction::SessionId { task_id, session_id } => {
+                let mut task = db
+                    .get_task_by_id(&task_id)?
+                    .ok_or_else(|| anyhow::anyhow!("Task not found: {}", task_id))?;
+
+                let ctx = task.context.get_or_insert_with(|| TaskContext {
+                    url: None,
+                    project_path: None,
+                    session_id: None,
+                    extra: HashMap::new(),
+                });
+                ctx.session_id = Some(session_id);
+                db.update_task(&task)?;
+            }
         },
         Some(Commands::Monitor { task_id, pid }) => {
             // Create a monitor and start monitoring
@@ -213,13 +242,386 @@ fn main() -> Result<()> {
             // Build the notification text: header with task context + message body.
             let text = build_notification_text(&db, task_id.as_deref(), &message, attention)?;
 
-            notifications::telegram::send(&cfg.telegram, &text)
-                .context("Failed to send Telegram notification")?;
+            let msg_id = if let Some(ref tid) = task_id {
+                // Always attach a Reply button so the user can respond from Telegram.
+                notifications::telegram::send_with_reply_button(&cfg.telegram, &text, tid)
+                    .context("Failed to send Telegram notification")?
+            } else {
+                notifications::telegram::send(&cfg.telegram, &text)
+                    .context("Failed to send Telegram notification")?
+            };
+
+            // Record the Telegram message_id → task_id mapping so the listener
+            // can route phone replies back to the right agent session.
+            if let Some(ref tid) = task_id {
+                let _ = db.insert_bot_message(msg_id, tid);
+            }
+        }
+        Some(Commands::Sandbox { args }) => {
+            // Proxy to agent-sandbox so `agent-inbox sandbox *` and `agent-sandbox *` are identical.
+            let err = std::os::unix::process::CommandExt::exec(
+                std::process::Command::new("agent-sandbox").args(&args),
+            );
+            anyhow::bail!("Failed to exec agent-sandbox: {}", err);
+        }
+
+        // ── Internal sandbox subcommands (invoked by agent-sandbox script) ────
+
+        Some(Commands::SandboxSpawn { repo_path, task, image }) => {
+            cmd_sandbox_spawn(&db, repo_path, task, image)?;
+        }
+        Some(Commands::SandboxList) => {
+            cmd_sandbox_list(&db)?;
+        }
+        Some(Commands::SandboxAttach { task_id, fresh }) => {
+            cmd_sandbox_attach(&db, task_id, fresh)?;
+        }
+        Some(Commands::SandboxKill { task_id, all }) => {
+            if all {
+                cmd_sandbox_kill_all(&db)?;
+            } else {
+                let id = task_id.ok_or_else(|| anyhow::anyhow!("Provide a task ID or --all"))?;
+                cmd_sandbox_kill(&db, id)?;
+            }
+        }
+        Some(Commands::SandboxResume { all }) => {
+            cmd_sandbox_resume(&db, all)?;
+        }
+        Some(Commands::SandboxBuild { image, rebuild }) => {
+            let sandbox = PodmanSandbox::new();
+            sandbox.ensure_image_with_opts(&image, rebuild)?;
+            println!("Sandbox image ready.");
+        }
+        Some(Commands::Inject { task_id, message }) => {
+            let task = db
+                .get_task_by_id(&task_id)?
+                .ok_or_else(|| anyhow::anyhow!("Task not found: {}", task_id))?;
+            agent_input::inject(&task, &message)?;
+            println!("Message injected into task {}", task_id);
+        }
+
+        Some(Commands::Listen) => {
+            let cfg = config::load().unwrap_or_default();
+
+            if !cfg.telegram.is_configured() {
+                anyhow::bail!(
+                    "Telegram is not configured. Run scripts/setup-telegram.sh first."
+                );
+            }
+
+            notifications::telegram_listener::run(&db, &cfg.telegram)?;
         }
     }
 
     Ok(())
 }
+
+// ── Sandbox command handlers ──────────────────────────────────────────────────
+
+/// Spawn a sandboxed Claude Code agent.
+fn cmd_sandbox_spawn(
+    db: &Database,
+    repo_path: String,
+    task_desc: Option<String>,
+    image: String,
+) -> Result<()> {
+    let repo = PathBuf::from(&repo_path);
+    if !repo.exists() {
+        anyhow::bail!("Repository path does not exist: {}", repo_path);
+    }
+
+    let sandbox = PodmanSandbox::new();
+    if !sandbox.is_available()? {
+        anyhow::bail!("Podman is not installed. Run ./install.sh to set it up.");
+    }
+
+    sandbox.ensure_image_with_opts(&image, false)?;
+
+    let task_id = uuid::Uuid::new_v4().to_string();
+
+    let mut env_vars = HashMap::new();
+    for key in &["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "HOME", "CLAUDE_CONFIG_DIR"] {
+        if let Ok(val) = std::env::var(key) {
+            env_vars.insert(key.to_string(), val);
+        }
+    }
+
+    let config = SandboxConfig { image, env_vars, ..SandboxConfig::default() };
+
+    println!("Spawning sandbox for '{}'…", repo_path);
+    let info = sandbox.spawn(&task_id, &repo, &config)?;
+
+    // Restore .claude.json from backup if missing.
+    // This propagates the host Claude login into the container so the user
+    // doesn't have to re-authenticate inside the sandbox.
+    let restore_result = std::process::Command::new("podman")
+        .args([
+            "exec", &info.id,
+            "/bin/bash", "-c",
+            r#"if [ ! -f /home/node/.claude/.claude.json ]; then
+                 backup=$(ls /home/node/.claude/backups/.claude.json.backup.* 2>/dev/null | sort -t. -k6 -n | tail -1)
+                 if [ -n "$backup" ]; then
+                   cp "$backup" /home/node/.claude/.claude.json && echo "restored"
+                 fi
+               fi"#,
+        ])
+        .output();
+    if let Ok(out) = restore_result {
+        if String::from_utf8_lossy(&out.stdout).contains("restored") {
+            println!("  Auth:      restored .claude.json from backup");
+        }
+    }
+
+    let repo_name = repo
+        .canonicalize()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+        .unwrap_or_else(|| repo_path.clone());
+
+    let title = task_desc.unwrap_or_else(|| format!("[{}:sandbox]", repo_name));
+
+    let mut task = Task::new(task_id.clone(), "claude_code".to_string(), title, None, None);
+    task.sandbox_type = SandboxType::Podman;
+    task.container_id = Some(info.id.clone());
+    task.sandbox_config = Some(config);
+    task.context = Some(TaskContext {
+        url: None,
+        project_path: Some(repo_path.clone()),
+        session_id: None,
+        extra: HashMap::new(),
+    });
+    db.insert_task(&task)?;
+
+    let abs_repo_path = repo
+        .canonicalize()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or(repo_path);
+    db.upsert_container_state(&task_id, &info.name, &abs_repo_path)?;
+
+    let short_id = &task_id[..task_id.len().min(8)];
+    println!("\nSandbox started:");
+    println!("  Task ID:   {} ({})", short_id, task_id);
+    println!("  Container: {}", info.name);
+    println!("  Repo:      {}", abs_repo_path);
+    println!();
+    println!("Attach to the Claude session:");
+    println!("  agent-sandbox attach {}", short_id);
+    println!("  agent-sandbox attach {} --fresh   (start a new conversation)", short_id);
+    println!("  (The container keeps running after you exit — re-attach any time)");
+
+    Ok(())
+}
+
+/// List all tracked sandboxes, auto-cleaning gone entries.
+fn cmd_sandbox_list(db: &Database) -> Result<()> {
+    let states = db.list_container_states()?;
+
+    if states.is_empty() {
+        println!("No sandbox containers found.");
+        println!("Start one with:  agent-sandbox <repo_path>");
+        return Ok(());
+    }
+
+    let sandbox = PodmanSandbox::new();
+
+    println!("{:<20} {:<18} {:<10} {}", "TASK ID", "STARTED", "STATUS", "REPO");
+    println!("{}", "─".repeat(80));
+
+    let mut any_gone = false;
+    for (task_id, container_name, repo_path, _created) in &states {
+        let status = match sandbox.status(container_name) {
+            Ok(sandbox::ContainerStatus::Running) => "running",
+            Ok(sandbox::ContainerStatus::Stopped) => "stopped",
+            Ok(sandbox::ContainerStatus::Paused)  => "paused",
+            _ => {
+                any_gone = true;
+                let _ = db.delete_container_state(task_id);
+                continue; // skip gone entries silently
+            }
+        };
+
+        // Parse timestamp from name: agent-inbox-YYYYMMDD-HHMM-shortid
+        let started = container_name
+            .strip_prefix("agent-inbox-")
+            .and_then(|s| {
+                let parts: Vec<&str> = s.splitn(3, '-').collect();
+                if parts.len() >= 2 {
+                    let date = parts[0];
+                    let time = parts[1];
+                    if date.len() == 8 && time.len() == 4 {
+                        return Some(format!(
+                            "{}-{}-{} {}:{}",
+                            &date[..4], &date[4..6], &date[6..8],
+                            &time[..2], &time[2..4]
+                        ));
+                    }
+                }
+                None
+            })
+            .unwrap_or_else(|| container_name.chars().take(17).collect());
+
+        let short_id = &task_id[..task_id.len().min(8)];
+        println!("{:<20} {:<18} {:<10} {}", short_id, started, status, repo_path);
+    }
+
+    if any_gone {
+        println!("\n(Gone containers were removed from tracking.)");
+    }
+
+    Ok(())
+}
+
+/// Attach to the Claude session inside a running sandbox.
+///
+/// By default tries `--continue` to resume the last conversation.
+/// Falls back to a fresh session automatically if no conversation exists.
+/// Pass `fresh = true` to always start a new session.
+fn cmd_sandbox_attach(db: &Database, task_id: String, fresh: bool) -> Result<()> {
+    let task = db
+        .get_task_by_id(&task_id)?
+        .ok_or_else(|| anyhow::anyhow!("Task not found: {}", task_id))?;
+
+    if task.sandbox_type != SandboxType::Podman {
+        anyhow::bail!("Task {} is not a sandbox task", task_id);
+    }
+
+    let container_id = task
+        .container_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("Task {} has no container_id", task_id))?;
+
+    let sandbox = PodmanSandbox::new();
+    match sandbox.status(container_id)? {
+        sandbox::ContainerStatus::Running => {}
+        _ => anyhow::bail!("Container {} is not running", container_id),
+    }
+
+    let claude = "/home/node/.local/bin/claude --dangerously-skip-permissions";
+    let shell_cmd = if fresh {
+        format!("cd /workspace && {claude}")
+    } else {
+        format!("cd /workspace && {claude} --continue 2>&1 || {claude}")
+    };
+
+    eprintln!("Attaching to sandbox {}…", container_id);
+    eprintln!("(Exit Claude or press Ctrl+C to detach — the container keeps running)");
+
+    let err = std::os::unix::process::CommandExt::exec(
+        std::process::Command::new("podman")
+            .args([
+                "exec", "-it",
+                "-e", "TERM=xterm-256color",
+                "-e", "PATH=/home/node/.local/bin:/usr/local/bin:/usr/bin:/bin",
+                "-e", "CLAUDE_CONFIG_DIR=/home/node/.claude",
+                "-w", "/workspace",
+                container_id,
+                "/bin/bash", "-c", &shell_cmd,
+            ]),
+    );
+    anyhow::bail!("Failed to exec podman: {}", err)
+}
+
+/// Kill a sandbox container and mark its task as exited.
+fn cmd_sandbox_kill(db: &Database, task_id: String) -> Result<()> {
+    let mut task = db
+        .get_task_by_id(&task_id)?
+        .ok_or_else(|| anyhow::anyhow!("Task not found: {}", task_id))?;
+
+    if task.sandbox_type != SandboxType::Podman {
+        anyhow::bail!("Task {} is not a sandbox task", task_id);
+    }
+
+    let container_id = task
+        .container_id
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("Task {} has no container_id", task_id))?;
+
+    PodmanSandbox::new().kill(&container_id)?;
+    task.set_exited(None);
+    db.update_task(&task)?;
+    db.delete_container_state(&task_id)?;
+
+    println!("Killed sandbox {} (task {})", container_id, task_id);
+    Ok(())
+}
+
+/// Kill all running sandbox containers.
+fn cmd_sandbox_kill_all(db: &Database) -> Result<()> {
+    let sandbox = PodmanSandbox::new();
+    let states = db.list_container_states()?;
+
+    if states.is_empty() {
+        println!("No sandbox agents to kill.");
+        return Ok(());
+    }
+
+    let mut killed = 0;
+    for (task_id, container_name, _, _) in &states {
+        match sandbox.kill(container_name) {
+            Ok(()) => {
+                if let Ok(Some(mut task)) = db.get_task_by_id(task_id) {
+                    task.set_exited(None);
+                    let _ = db.update_task(&task);
+                }
+                let _ = db.delete_container_state(task_id);
+                println!("Killed {}", container_name);
+                killed += 1;
+            }
+            Err(e) => eprintln!("Failed to kill {}: {}", container_name, e),
+        }
+    }
+
+    println!("Killed {} sandbox(es)", killed);
+    Ok(())
+}
+
+/// Re-sync sandbox state with running containers after a reboot.
+fn cmd_sandbox_resume(db: &Database, all: bool) -> Result<()> {
+    if !all {
+        eprintln!("Use --all to resume all recoverable sandbox agents.");
+        return Ok(());
+    }
+
+    let sandbox = PodmanSandbox::new();
+    let states = db.list_container_states()?;
+
+    if states.is_empty() {
+        println!("No sandbox agents to resume.");
+        return Ok(());
+    }
+
+    let mut resumed = 0;
+    let mut stale = 0;
+
+    for (task_id, container_name, repo_path, _) in &states {
+        match sandbox.status(container_name) {
+            Ok(sandbox::ContainerStatus::Running) => {
+                if let Ok(Some(mut task)) = db.get_task_by_id(task_id) {
+                    if task.status != TaskStatus::Running {
+                        task.set_running();
+                        let _ = db.update_task(&task);
+                    }
+                }
+                println!("  Running: {} ({})", container_name, task_id);
+                resumed += 1;
+            }
+            _ => {
+                if let Ok(Some(mut task)) = db.get_task_by_id(task_id) {
+                    task.set_exited(None);
+                    let _ = db.update_task(&task);
+                }
+                let _ = db.delete_container_state(task_id);
+                println!("  Cleaned: {} (gone, repo: {})", container_name, repo_path);
+                stale += 1;
+            }
+        }
+    }
+
+    println!("\n{} running, {} stale cleaned up.", resumed, stale);
+    Ok(())
+}
+
+// ── Notification helpers ──────────────────────────────────────────────────────
 
 /// Build the full notification text sent to Telegram.
 ///

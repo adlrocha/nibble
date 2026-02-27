@@ -2,6 +2,11 @@
 # Wrapper for Claude Code CLI to track tasks in agent-inbox
 # Creates task and exports AGENT_TASK_ID for hooks to use
 # Hooks handle: running (UserPromptSubmit), completed (Stop), exited (SessionEnd)
+#
+# Usage:
+#   claude [args...]           -- normal interactive mode (permission prompts active)
+#   claude --remote [args...]  -- unattended mode: skips all permission prompts so
+#                                 you can interact purely via Telegram
 
 # agent-inbox binary location
 AGENT_INBOX="${AGENT_INBOX_BIN:-$HOME/.local/bin/agent-inbox}"
@@ -13,6 +18,17 @@ if [ -z "$CLAUDE_BIN" ]; then
     echo "Error: Could not find original claude binary" >&2
     exit 1
 fi
+
+# Parse --remote flag (consumed here, not passed to claude)
+REMOTE_MODE=false
+CLAUDE_ARGS=()
+for arg in "$@"; do
+    if [ "$arg" = "--remote" ]; then
+        REMOTE_MODE=true
+    else
+        CLAUDE_ARGS+=("$arg")
+    fi
+done
 
 # Generate unique task ID and export for hooks
 export AGENT_TASK_ID=$(uuidgen)
@@ -40,8 +56,23 @@ fi
 # Truncate to 100 chars
 TASK_TITLE="${TASK_TITLE:0:100}"
 
+# Build extra flags for report start
+EXTRA_FLAGS=""
+# Pass zellij pane ID if running inside zellij
+if [ -n "$ZELLIJ" ] && [ -n "$ZELLIJ_PANE_ID" ]; then
+    EXTRA_FLAGS="$EXTRA_FLAGS --zellij-pane-id $ZELLIJ_PANE_ID"
+fi
+
 # Register task as 'running'
-agent-inbox report start "$AGENT_TASK_ID" "claude_code" "$PWD" "$TASK_TITLE" 2>/dev/null || true
+# shellcheck disable=SC2086
+agent-inbox report start "$AGENT_TASK_ID" "claude_code" "$PWD" "$TASK_TITLE" \
+    --pid $$ --ppid $PPID $EXTRA_FLAGS 2>/dev/null || true
 
 # Run claude - hooks handle status updates
-exec "$CLAUDE_BIN" "$@"
+if [ "$REMOTE_MODE" = true ]; then
+    # Unattended mode: skip all permission prompts so the session can run
+    # without keyboard interaction. Interact via Telegram Reply instead.
+    exec "$CLAUDE_BIN" --dangerously-skip-permissions "${CLAUDE_ARGS[@]}"
+else
+    exec "$CLAUDE_BIN" "${CLAUDE_ARGS[@]}"
+fi

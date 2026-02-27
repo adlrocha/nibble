@@ -1,171 +1,174 @@
 # Agent Inbox
 
-A CLI-first notification system that tracks tasks across multiple LLM/coding agents (Claude Web, Gemini Web, Claude Code, OpenCode, etc.) and provides a simple inbox-style dashboard to view tasks requiring attention.
+A CLI tool that runs Claude Code agents inside isolated Podman sandboxes, monitors their status, sends Telegram notifications when they need your attention, and lets you reply from your phone to unblock them — all without touching your keyboard.
 
 ## Features
 
-- **Unified Task Tracking**: Track tasks across different AI agents in one place
-- **3-State Model**: Simple, reliable status tracking (Running → Completed → Exited)
-- **Desktop Notifications**: Get notified when agents finish generating
-- **Telegram Notifications**: Receive the agent's last message on your phone when it needs your attention
-- **Transparent Wrappers**: Auto-track CLI agents without changing your workflow
-- **Browser Extension**: Track Claude.ai and Gemini conversations
-- **Repo-Aware**: Shows git repo and branch in task titles for CLI agents
-- **Auto-Reset on Restart**: Clears stale tasks automatically on login
-- **SQLite Backend**: Fast, reliable, and concurrent-safe storage
+- **Podman Sandboxes**: Run agents in rootless containers — repo mounted read-write, ports exposed, full dev flexibility inside
+- **Telegram Notifications**: Receive the agent's last message on your phone when it finishes or needs a decision
+- **Telegram Replies**: Reply to notifications from your phone to unblock agents (input injected via named pipe)
+- **Auto-Resume**: Sandbox agents are tracked across host reboots
+- **Unified Task Tracking**: Track sandboxed and non-sandboxed agents in one dashboard
+- **3-State Model**: Running → Completed → Exited
+- **SQLite Backend**: Fast, reliable, concurrent-safe storage
 
-## Task States
+## How it Works
 
-- **Running**: Agent is actively generating output
-- **Completed**: Agent finished generating, waiting for user input
-- **Exited**: Agent/tab closed or process terminated
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                          HOST SYSTEM                                │
+│                                                                     │
+│  agent-inbox CLI          SQLite DB           Telegram Listener     │
+│  ─────────────            ─────────           ────────────────      │
+│  sandbox / kill           tasks.db            long-polls Telegram   │
+│  list / watch             container_state     routes replies to     │
+│  resume                                       container via pipe    │
+│         │                                              ▲            │
+│         │ podman run                                   │            │
+│         ▼                                              │            │
+│  ┌──────────────────────────────────────┐              │            │
+│  │  Podman Container                    │              │            │
+│  │                                      │              │            │
+│  │  claude-code ←── input-forwarder ────┼──── podman exec ──────── │
+│  │                  (reads named pipe)  │                           │
+│  │  /workspace  (repo mounted RW)       │                           │
+│  │  ports 3000-3100, 8000-8100 open     │                           │
+│  └──────────────────────────────────────┘                           │
+└─────────────────────────────────────────────────────────────────────┘
+                         │
+                         ▼
+               📱 Telegram (your phone)
+```
+
+**Notification flow**: Claude Code `Stop` hook → `agent-inbox notify` → Telegram message with Reply button
+
+**Reply flow**: Telegram reply → listener daemon → `podman exec` → `/tmp/agent-input.pipe` → `input-forwarder.sh` → Claude's TTY
 
 ## Installation
 
 ### Prerequisites
 
-- Rust 1.70+ (for building)
-- `jq` (for hook message extraction — `pacman -S jq` / `apt install jq`)
-- Linux (tested on Arch Linux)
+- Rust 1.70+ (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`)
+- `jq` (`pacman -S jq` / `apt install jq` / `brew install jq`)
+- Linux (tested on Arch Linux; macOS works for non-sandbox mode)
 
-### Install / Upgrade
+Podman is installed automatically by `install.sh` if not present.
 
-A single script handles everything: build, binaries, wrappers, and Claude Code hooks.
+### Install
 
 ```bash
 git clone <repo-url>
 cd agent-inbox
 
-# First-time install or upgrade
+# Full install (builds binary, installs podman if needed, builds sandbox image)
 ./install.sh
 
-# Install + set up Telegram bot in one go
+# Also set up Telegram notifications
 ./install.sh --telegram
+
+# Also start the reply listener daemon
+./install.sh --telegram --listen
 ```
 
-After running, add aliases to your `~/.zshrc` or `~/.bashrc` if the script reports them missing:
+After install, add aliases to your shell if prompted:
 
 ```bash
+# ~/.zshrc or ~/.bashrc
 alias claude='~/.agent-tasks/wrappers/claude-wrapper'
-alias opencode='~/.agent-tasks/wrappers/opencode-wrapper'
 ```
-
-Then reload your shell and **restart Claude Code** for hooks to take effect.
 
 What `install.sh` does:
-1. Builds release binaries with `cargo build --release`
-2. Installs `agent-inbox` and `agent-bridge` to `~/.local/bin/`
-3. Copies updated wrappers to `~/.agent-tasks/wrappers/`
-4. Removes stale hooks from `~/.claude/settings.json` and reinstalls the latest version
-5. Skips Telegram setup unless `--telegram` is passed
+1. Installs Podman if not present (apt / dnf / pacman / brew)
+2. Builds release binaries with `cargo build --release`
+3. Installs `agent-inbox`, `agent-bridge`, and `agent-sandbox` to `~/.local/bin/`
+4. Copies wrappers to `~/.agent-tasks/wrappers/`
+5. Installs Claude Code hooks to `~/.claude/settings.json`
+6. Builds the sandbox image (`agent-inbox-sandbox:latest` — node:20-slim + claude-code)
+7. Enables `agent-inbox-resume.service` (systemd user service, resumes agents on reboot)
+8. Optionally sets up Telegram and the reply listener daemon
 
-### Telegram Notifications (optional)
+---
 
-Get notified on your phone whenever Claude Code or OpenCode finishes a turn or needs a permission decision, with the agent's last message included so you know what it's waiting on.
+## Sandbox Usage
 
-The easiest way to set this up is via `install.sh`:
-
-```bash
-./install.sh --telegram
-```
-
-Or run the setup script directly:
+### Start an agent
 
 ```bash
-./scripts/setup-telegram.sh
+# Quickest way — use the convenience script
+agent-sandbox /path/to/repo
+agent-sandbox /path/to/repo "Fix the authentication bug"
+
+# Or directly via agent-inbox
+agent-inbox sandbox /path/to/repo
+agent-inbox sandbox /path/to/repo --task "Fix the authentication bug"
+
+# Build/refresh the sandbox image only (no agent)
+agent-sandbox --build-only
 ```
 
-The script will:
-1. Walk you through creating a bot via @BotFather in Telegram
-2. Auto-detect your chat ID
-3. Write `~/.agent-tasks/config.toml`
-4. Send a test message to confirm everything works
+On first run the sandbox image is built (~2-3 min). Subsequent spawns are fast.
 
-**Config file** (`~/.agent-tasks/config.toml`):
+The container gets:
+- Your repo mounted read-write at `/workspace`
+- `ANTHROPIC_API_KEY` and other configured env vars forwarded from host
+- Ports `3000-3100` and `8000-8100` available on the host
+- Full privileged mode inside (install anything with `apt`, `npm`, `pip`, etc.)
+- Dependency caches (`~/.npm`, `~/.npm-global`) persisted across restarts
 
-```toml
-[telegram]
-enabled = true
-bot_token = "123456789:ABCdefGHIjklMNOpqrSTUvwxYZ"
-chat_id = "123456789"
-```
-
-Set `enabled = false` to temporarily disable notifications without removing the config.
-
-**Message format — turn finished:**
-
-```
-🤖 Claude Code
-📁 agent-inbox · main
-⏱ 4m 32s
-────────────────────────────
-I've finished refactoring the auth module. Here's what I changed: ...
-```
-
-**Message format — permission / attention needed:**
-
-```
-🚨 Needs your attention
-🤖 Claude Code
-📁 agent-inbox · main
-⏱ 2m 10s
-────────────────────────────
-Claude needs permission to run: npm install
-```
-
-If the agent output exceeds 4096 characters, only the last 4096 are sent (with a truncation notice) so you always see the most recent output.
-
-**How it works per agent:**
-
-- **Claude Code**: The `Stop` hook reads `last_assistant_message` from stdin and sends it. The `Notification` hook fires on `permission_prompt` events and sends a `🚨` alert with the permission description.
-- **OpenCode**: The wrapper records terminal output with `script` (preserving the interactive TUI), strips ANSI codes on exit, and sends the result.
-
-### 3. Auto-Reset on Login/Restart
-
-Automatically clear stale tasks when you log in:
+### List open sandboxes
 
 ```bash
-./scripts/setup-auto-reset.sh
+agent-sandbox list
+# or
+agent-inbox sandboxes
 ```
 
-This creates a systemd user service that runs `agent-inbox reset --force` on each login.
+Output:
+```
+TASK ID                CONTAINER                        STATUS     REPO
+──────────────────────────────────────────────────────────────────────────────────────────
+a1b2c3d4e5f6g7h8i9    agent-inbox-a1b2c3d4e5f6g7h8     running    /home/you/projects/myapp
+```
 
-To disable: `systemctl --user disable agent-inbox-reset.service`
+### Attach to a running sandbox
 
-### 4. Browser Extension (Claude.ai & Gemini)
-
-To track web-based agents:
+Drop into an interactive bash shell inside the container. The Claude Code agent keeps running — attaching and detaching doesn't interrupt it.
 
 ```bash
-# 1. Load extension in browser
-#    - Go to chrome://extensions (or brave://extensions)
-#    - Enable "Developer mode"
-#    - Click "Load unpacked" and select the `extension/` directory
-
-# 2. Get extension ID from the extensions page
-
-# 3. Update native messaging manifest
-mkdir -p ~/.config/BraveSoftware/Brave-Browser/NativeMessagingHosts/
-# (or ~/.config/google-chrome/NativeMessagingHosts/ for Chrome)
-
-cat > ~/.config/BraveSoftware/Brave-Browser/NativeMessagingHosts/com.agent_tasks.bridge.json << EOF
-{
-  "name": "com.agent_tasks.bridge",
-  "description": "Native messaging host for Agent Inbox extension",
-  "path": "$HOME/.local/bin/agent-bridge",
-  "type": "stdio",
-  "allowed_origins": [
-    "chrome-extension://YOUR_EXTENSION_ID/"
-  ]
-}
-EOF
-
-# 4. Reload the extension
+agent-sandbox attach <task-id>
+# or
+agent-inbox attach <task-id>
 ```
 
-## Usage
+Detach with `exit` or `Ctrl+D`.
 
-### Basic Commands
+### Watch logs
+
+```bash
+podman logs -f agent-inbox-<task-id>
+```
+
+### Kill a sandbox
+
+```bash
+agent-inbox kill <task-id>
+```
+
+Stops the container and marks the task as exited.
+
+### Resume after reboot
+
+Run automatically on login via systemd, or manually:
+
+```bash
+agent-sandbox --resume
+# or
+agent-inbox resume --all
+```
+
+---
+
+## Monitoring
 
 ```bash
 # Show running tasks (default)
@@ -174,135 +177,151 @@ agent-inbox
 # List all tasks
 agent-inbox list --all
 
-# List tasks by status
+# Filter by status
 agent-inbox list --status running
 agent-inbox list --status completed
 agent-inbox list --status exited
 
-# Show detailed task information
-agent-inbox show <task-id>
-
-# Clear a specific task
-agent-inbox clear <task-id>
-
-# Clear all completed and exited tasks
-agent-inbox clear-all
-
-# Force clear ALL tasks (useful when stuck)
-agent-inbox reset --force
-
-# Watch tasks in real-time (refreshes every 2s)
+# Live dashboard (refreshes every 2s)
 agent-inbox watch
 
-# Manual cleanup of old completed tasks
-agent-inbox cleanup --retention-secs 3600
+# Detailed view of one task
+agent-inbox show <task-id>
+
+# Clean up completed/exited tasks
+agent-inbox clear-all
+agent-inbox reset --force   # wipe everything
 ```
 
-### Manual Task Reporting
+---
+
+## Telegram Setup
+
+### Notifications
 
 ```bash
-# Start a task
-TASK_ID=$(uuidgen)
-agent-inbox report start "$TASK_ID" "claude_code" "$PWD" "My task description"
-
-# Mark task as running (generating)
-agent-inbox report running "$TASK_ID"
-
-# Mark task as completed (finished generating)
-agent-inbox report complete "$TASK_ID"
-
-# Mark task as exited (process terminated)
-agent-inbox report exited "$TASK_ID" --exit-code 0
+./install.sh --telegram
 ```
 
-### Sending Notifications Manually
+The setup script walks you through creating a bot via @BotFather and writes `~/.agent-tasks/config.toml`:
+
+```toml
+[telegram]
+enabled = true
+bot_token = "123456789:ABCdefGHIjklMNOpqrSTUvwxYZ"
+chat_id   = "123456789"
+# allowed_username = "yourusername"   # optional extra auth
+```
+
+**Message format:**
+
+```
+🤖 Claude Code
+📁 myapp · main
+⏱ 4m 32s
+────────────────────────────
+I've finished the refactor. Here's what changed: ...
+```
+
+```
+🚨 Needs your attention
+🤖 Claude Code
+📁 myapp · main
+⏱ 2m 10s
+────────────────────────────
+Claude needs permission to run: npm install
+```
+
+### Reply listener (send messages to agents from phone)
 
 ```bash
-# Normal completion notification (with task context)
-agent-inbox notify --task-id "$TASK_ID" --message "Agent output here"
-
-# Attention-required notification — shows 🚨 banner (permission, question, etc.)
-agent-inbox notify --task-id "$TASK_ID" --message "Do you want to proceed?" --attention
-
-# Without task context
-agent-inbox notify --message "Something needs your attention" --attention
+./install.sh --listen
 ```
 
-If Telegram is not configured the command exits cleanly with a warning — it will not break hooks or wrappers.
+This installs a systemd user service (`agent-inbox-listen.service`) that long-polls Telegram. Every notification has a **↩ Reply** button — tap it, type your message, and it gets injected into the agent inside its container.
+
+```bash
+# Daemon management
+systemctl --user status agent-inbox-listen
+journalctl --user -u agent-inbox-listen -f
+```
+
+You can also inject directly from the terminal (bypasses Telegram):
+
+```bash
+agent-inbox inject <task-id> "Yes, proceed with the migration"
+```
+
+---
+
+## Sandbox Security Model
+
+Sandboxes use **rootless Podman** — containers run as your user, so even a full container escape grants no root access on the host. The goal is to protect your host from:
+
+- Claude Code modifying files outside the repo
+- Prompt injection attacks that could run arbitrary host commands
+- Accidental `rm -rf` or other destructive operations on the host
+
+Inside the container, agents have full privileges (install packages, run anything). This is intentional — it's a dev environment, and flexibility matters more than internal isolation.
+
+Network is host-mode, so services started inside the container (e.g. `npm run dev` on port 3000) are immediately accessible on the host.
+
+---
+
+## Task States
+
+| State | Meaning |
+|-------|---------|
+| **Running** | Agent is actively generating output |
+| **Completed** | Agent finished, waiting for user input |
+| **Exited** | Container stopped or process terminated |
+
+---
 
 ## Scripts Reference
 
-| Script | Purpose |
-|--------|---------|
-| `install.sh` | **One-command install / upgrade** — build, binaries, wrappers, hooks. Pass `--telegram` to also run Telegram setup |
-| `scripts/setup-telegram.sh` | Interactive Telegram bot setup — writes `~/.agent-tasks/config.toml` |
-| `scripts/setup-claude-hooks.sh` | Install Claude Code hooks globally (`~/.claude/settings.json`) |
-| `scripts/setup-auto-reset.sh` | Install systemd service for auto-reset on login |
-| `scripts/setup-wrappers.sh` | Install wrappers and add shell aliases automatically |
-| `scripts/install-extension.sh` | Build and install the browser extension native messaging host |
-| `scripts/fix-native-messaging.sh` | Interactive fix for browser native messaging configuration |
-| `wrappers/claude-wrapper` | Wrapper script for Claude Code CLI |
-| `wrappers/opencode-wrapper` | Wrapper script for OpenCode CLI (records output for notifications) |
+| Script / Command | Purpose |
+|-----------------|---------|
+| `install.sh` | One-command install / upgrade |
+| `install.sh --telegram` | Also set up Telegram bot |
+| `install.sh --listen` | Also start reply listener daemon |
+| `agent-sandbox <repo>` | Start a sandboxed agent |
+| `agent-sandbox list` | List open sandboxes |
+| `agent-sandbox attach <id>` | Attach interactive shell to sandbox |
+| `agent-sandbox --resume` | Resume agents after reboot |
+| `agent-sandbox --build-only` | Rebuild sandbox image |
+| `scripts/setup-telegram.sh` | Interactive Telegram bot setup |
+| `scripts/setup-claude-hooks.sh` | Install Claude Code hooks |
+| `scripts/setup-listen.sh` | Install reply listener systemd service |
 
-## Architecture
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│                        User                                   │
-└──────────────────────────────────────────────────────────────┘
-          │                    │                    │
-          ▼                    ▼                    ▼
-┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
-│  Claude Code     │  │  Claude.ai       │  │  Gemini          │
-│  (wrapper+hooks) │  │  (extension)     │  │  (extension)     │
-└────────┬─────────┘  └────────┬─────────┘  └────────┬─────────┘
-         │                     │                     │
-┌────────────────┐              ▼                     │
-│  OpenCode      │    ┌──────────────────┐           │
-│  (wrapper)     │    │  agent-bridge    │           │
-└────────┬───────┘    │  (native msg)    │           │
-         │            └────────┬─────────┘           │
-         │                     │                     │
-         ▼                     ▼                     ▼
-┌──────────────────────────────────────────────────────────────┐
-│                      agent-inbox CLI                          │
-│   report / notify / list / watch / reset / ...               │
-└───────────────────────┬──────────────────────────────────────┘
-                        │
-            ┌───────────┴───────────┐
-            ▼                       ▼
-  ┌──────────────────┐    ┌──────────────────────┐
-  │    SQLite DB     │    │   Telegram Bot API   │
-  │ ~/.agent-tasks/  │    │  (on Stop / session  │
-  │   tasks.db       │    │   end — sends last   │
-  └──────────────────┘    │   agent message)     │
-                          └──────────────────────┘
-                                     │
-                                     ▼
-                             📱 Your phone
-```
-
-**Notification flow (Claude Code):**
-1. Claude Code fires the `Stop` hook with `last_assistant_message` on stdin
-2. Hook calls `agent-inbox report complete` then `agent-inbox notify --message "$MSG"`
-3. `agent-inbox notify` reads `~/.agent-tasks/config.toml`, prepends task context, sends to Telegram
-
-**Notification flow (OpenCode):**
-1. Wrapper runs OpenCode inside `script` to capture PTY output
-2. On exit, ANSI codes are stripped and the output is passed to `agent-inbox notify`
-3. Same Telegram send path as above
+---
 
 ## Development
 
 ```bash
-# Run tests
-cargo test
-
-# Build for development
-cargo build
-
-# Build release
+cargo test          # run all tests (58 unit tests)
+cargo build         # dev build
 cargo build --release
+```
+
+### Project structure
+
+```
+src/
+├── main.rs                  # CLI entry point, all command handlers
+├── cli/mod.rs               # clap argument definitions
+├── models/task.rs           # Task, TaskStatus, SandboxType, SandboxConfig
+├── db/mod.rs                # SQLite operations, schema migrations (v3)
+├── sandbox/
+│   ├── mod.rs               # Sandbox trait, ContainerInfo, helpers
+│   └── podman.rs            # Podman implementation + Dockerfile + input-forwarder script
+├── agent_input.rs           # Input injection (container pipe or host PTY)
+├── notifications/
+│   ├── telegram.rs          # Send Telegram messages
+│   └── telegram_listener.rs # Long-polling daemon, reply routing
+├── config.rs                # TOML config loader
+├── display/mod.rs           # Terminal task list rendering
+└── monitor/mod.rs           # Process liveness monitoring
 ```
 
 ## License

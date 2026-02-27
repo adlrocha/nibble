@@ -25,9 +25,11 @@ die()  { echo -e "  ${RED}✗${NC} $1" >&2; exit 1; }
 
 # ── Parse flags ───────────────────────────────────────────────────────────────
 RUN_TELEGRAM=false
+RUN_LISTEN=false
 for arg in "$@"; do
     case "$arg" in
         --telegram) RUN_TELEGRAM=true ;;
+        --listen)   RUN_LISTEN=true ;;
         *) die "Unknown argument: $arg" ;;
     esac
 done
@@ -44,6 +46,38 @@ command -v jq >/dev/null 2>&1 \
     && ok "jq found" \
     || warn "jq not found — hooks will not extract message bodies. Install jq for full functionality."
 
+# ── Podman (required for sandbox) ─────────────────────────────────────────────
+if command -v podman >/dev/null 2>&1; then
+    ok "podman ($(podman --version))"
+else
+    warn "podman not found — attempting to install…"
+    if command -v apt-get >/dev/null 2>&1; then
+        sudo apt-get update -qq && sudo apt-get install -y podman \
+            || die "Failed to install podman via apt-get. Install manually: https://podman.io/docs/installation"
+    elif command -v dnf >/dev/null 2>&1; then
+        sudo dnf install -y podman \
+            || die "Failed to install podman via dnf."
+    elif command -v pacman >/dev/null 2>&1; then
+        sudo pacman -S --noconfirm podman \
+            || die "Failed to install podman via pacman."
+    elif command -v brew >/dev/null 2>&1; then
+        brew install podman \
+            || die "Failed to install podman via brew."
+    else
+        die "Cannot auto-install podman. Visit https://podman.io/docs/installation"
+    fi
+    ok "podman installed ($(podman --version))"
+fi
+
+# Warn if podman is not in rootless mode (not a hard failure)
+PODMAN_ROOTLESS=$(podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null || echo "unknown")
+if [ "$PODMAN_ROOTLESS" = "true" ]; then
+    ok "podman running rootless (good)"
+else
+    warn "podman is NOT rootless. For better security configure rootless mode:"
+    warn "  https://github.com/containers/podman/blob/main/docs/tutorials/rootless_tutorial.md"
+fi
+
 mkdir -p "$BIN_DIR" "$WRAPPERS_DIR"
 
 # ── 2. Build ──────────────────────────────────────────────────────────────────
@@ -52,10 +86,37 @@ step "Building release binaries"
 cargo build --release --manifest-path "$REPO_DIR/Cargo.toml" \
     || die "Cargo build failed"
 
-ok "Build succeeded"
+ok "Build succeeded (host binary)"
+
+# Also build a statically linked musl binary for use inside sandbox containers.
+# The host binary is linked against the host glibc which may not be available
+# inside the container (e.g. Arch host vs Debian container).
+if command -v musl-gcc >/dev/null 2>&1; then
+    RUSTFLAGS="-C target-feature=+crt-static" \
+        cargo build --release \
+            --manifest-path "$REPO_DIR/Cargo.toml" \
+            --target x86_64-unknown-linux-musl \
+        && cp "$REPO_DIR/target/x86_64-unknown-linux-musl/release/agent-inbox" \
+              "$BIN_DIR/agent-inbox-musl" \
+        && chmod +x "$BIN_DIR/agent-inbox-musl" \
+        && ok "agent-inbox-musl (static, for containers)" \
+        || warn "musl build failed — container hooks won't send Telegram notifications"
+else
+    warn "musl-gcc not found — skipping static build (install: sudo pacman -S musl)"
+    warn "Container hooks won't send Telegram notifications until this is built."
+    warn "After installing musl, re-run: ./install.sh"
+fi
 
 # ── 3. Install binaries ───────────────────────────────────────────────────────
 step "Installing binaries to $BIN_DIR"
+
+# Stop the listener service before overwriting the binary (avoids "Text file busy").
+LISTENER_WAS_ACTIVE=false
+if systemctl --user is-active --quiet agent-inbox-listen.service 2>/dev/null; then
+    LISTENER_WAS_ACTIVE=true
+    systemctl --user stop agent-inbox-listen.service
+    ok "Stopped agent-inbox-listen.service for upgrade"
+fi
 
 cp "$REPO_DIR/target/release/agent-inbox" "$BIN_DIR/agent-inbox"
 chmod +x "$BIN_DIR/agent-inbox"
@@ -64,6 +125,12 @@ ok "agent-inbox"
 cp "$REPO_DIR/target/release/agent-bridge" "$BIN_DIR/agent-bridge"
 chmod +x "$BIN_DIR/agent-bridge"
 ok "agent-bridge"
+
+# Restart the listener if it was running before.
+if [ "$LISTENER_WAS_ACTIVE" = true ]; then
+    systemctl --user start agent-inbox-listen.service
+    ok "Restarted agent-inbox-listen.service"
+fi
 
 # Warn if BIN_DIR is not on PATH
 if ! echo "$PATH" | tr ':' '\n' | grep -qx "$BIN_DIR"; then
@@ -105,7 +172,177 @@ else
     warn "  alias opencode='$WRAPPERS_DIR/opencode-wrapper'"
 fi
 
-# ── 5. Claude Code hooks ──────────────────────────────────────────────────────
+# ── 5. Sandbox image ─────────────────────────────────────────────────────────
+step "Building sandbox image (node:20-slim + claude-code)"
+
+if agent-inbox sandbox --build-only 2>/dev/null; then
+    ok "Sandbox image ready: agent-inbox-sandbox:latest"
+else
+    warn "Sandbox image build failed or agent-inbox not yet in PATH."
+    warn "Run after install:  agent-inbox sandbox --build-only"
+fi
+
+# ── 5a. Install agent-sandbox convenience script ──────────────────────────────
+cat > "$BIN_DIR/agent-sandbox" << 'SCRIPT'
+#!/bin/bash
+# agent-sandbox — manage sandboxed Claude Code agents
+#
+# Claude runs inside a rootless Podman container with:
+#   - A persistent tmux session named 'claude' (attach/detach without losing work)
+#   - Full read/write access to the repo at /workspace
+#   - Host network so ports 3000-3100 and 8000-8100 are accessible on the host
+#   - ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL forwarded from the host environment
+#   - ~/.claude mounted so credentials are shared with the host Claude instance
+#   - Input injection via 'tmux send-keys' for Telegram replies
+
+set -e
+
+AGENT_INBOX="agent-inbox"
+IMAGE="agent-inbox-sandbox:latest"
+
+usage() {
+    cat <<'EOF'
+agent-sandbox — run Claude Code agents in isolated Podman containers
+
+USAGE
+  agent-sandbox <repo_path> [task_description]   Spawn a new agent
+  agent-sandbox <command> [args]
+
+COMMANDS
+  <repo_path>        Spawn a sandboxed Claude Code agent for the repo.
+                     Claude starts automatically with --dangerously-skip-permissions
+                     inside a tmux session. Optionally pass a task description.
+
+  attach <task-id>          Attach to Claude inside a running sandbox.
+                            Resumes the last conversation automatically.
+  attach <task-id> --fresh  Start a fresh Claude session instead of resuming.
+
+  list               List all sandboxes and their status.
+
+  kill <task-id>     Stop a running sandbox and remove it.
+  kill --all         Stop and remove all running sandboxes.
+
+  resume             Re-sync sandbox state after a host reboot.
+                     (Also runs automatically via systemd on login.)
+
+  --build-only       Build or refresh the sandbox base image without starting an agent.
+
+  --rebuild          Force a clean rebuild of the sandbox base image.
+
+  --help, -h         Show this help message.
+
+EXAMPLES
+  agent-sandbox ~/projects/myapp
+  agent-sandbox ~/projects/myapp "Fix the login bug"
+  agent-sandbox list
+  agent-sandbox attach a1b2c3
+  agent-sandbox kill a1b2c3
+  agent-sandbox resume
+  agent-sandbox --build-only
+  agent-sandbox --rebuild
+
+WORKFLOW
+  1. Start a sandbox:    agent-sandbox ~/projects/myapp
+  2. Attach to Claude:   agent-sandbox attach <task-id>
+  3. Detach safely:      Ctrl+X D
+  4. Re-attach later:    agent-sandbox attach <task-id>
+  5. Done:               agent-sandbox kill <task-id>
+
+TELEGRAM INJECTION
+  Replies sent from Telegram are injected via 'tmux send-keys' inside the container.
+  Start the listener:    agent-inbox listen
+EOF
+}
+
+require_task_id() {
+    local cmd="$1"
+    local task_id="${2:-}"
+    if [ -z "$task_id" ]; then
+        echo "Error: $cmd requires a task-id" >&2
+        echo "Usage: agent-sandbox $cmd <task-id>" >&2
+        echo "       agent-sandbox list    # to see task IDs" >&2
+        exit 1
+    fi
+    echo "$task_id"
+}
+
+# ── dispatch ──────────────────────────────────────────────────────────────────
+
+if [ $# -eq 0 ] || [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+    usage
+    exit 0
+fi
+
+if [ "$1" = "--build-only" ]; then
+    exec "$AGENT_INBOX" _sandbox_build
+fi
+
+if [ "$1" = "--rebuild" ]; then
+    exec "$AGENT_INBOX" _sandbox_build --rebuild
+fi
+
+if [ "$1" = "--resume" ] || [ "$1" = "resume" ]; then
+    exec "$AGENT_INBOX" _sandbox_resume --all
+fi
+
+if [ "$1" = "--list" ] || [ "$1" = "list" ]; then
+    exec "$AGENT_INBOX" _sandbox_list
+fi
+
+if [ "$1" = "attach" ]; then
+    TASK_ID=$(require_task_id attach "${2:-}")
+    FRESH_FLAG=""
+    [ "${3:-}" = "--fresh" ] && FRESH_FLAG="--fresh"
+    exec "$AGENT_INBOX" _sandbox_attach "$TASK_ID" $FRESH_FLAG
+fi
+
+if [ "$1" = "kill" ]; then
+    if [ "${2:-}" = "--all" ]; then
+        exec "$AGENT_INBOX" _sandbox_kill --all
+    fi
+    TASK_ID=$(require_task_id kill "${2:-}")
+    exec "$AGENT_INBOX" _sandbox_kill "$TASK_ID"
+fi
+
+# Default: spawn a new sandbox for the given repo path
+REPO_PATH="$1"
+TASK_DESC="${2:-}"
+
+if [ -n "$TASK_DESC" ]; then
+    exec "$AGENT_INBOX" _sandbox_spawn "$REPO_PATH" --task "$TASK_DESC"
+else
+    exec "$AGENT_INBOX" _sandbox_spawn "$REPO_PATH"
+fi
+SCRIPT
+chmod +x "$BIN_DIR/agent-sandbox"
+ok "agent-sandbox convenience script installed"
+
+# ── 5b. Install systemd auto-resume service ───────────────────────────────────
+SYSTEMD_DIR="$HOME/.config/systemd/user"
+mkdir -p "$SYSTEMD_DIR"
+cat > "$SYSTEMD_DIR/agent-inbox-resume.service" << UNIT
+[Unit]
+Description=Agent Inbox — resume sandbox agents after reboot
+After=default.target
+
+[Service]
+Type=oneshot
+ExecStart=$BIN_DIR/agent-inbox resume --all
+RemainAfterExit=yes
+
+[Install]
+WantedBy=default.target
+UNIT
+
+if systemctl --user daemon-reload 2>/dev/null; then
+    systemctl --user enable agent-inbox-resume.service 2>/dev/null \
+        && ok "Auto-resume service enabled (agent-inbox-resume.service)" \
+        || warn "Could not enable auto-resume service. Enable manually: systemctl --user enable agent-inbox-resume.service"
+else
+    warn "systemd user session not available. Auto-resume on reboot won't work."
+fi
+
+# ── 6. Claude Code hooks ──────────────────────────────────────────────────────
 step "Installing Claude Code hooks"
 
 mkdir -p "$HOME/.claude"
@@ -141,10 +378,35 @@ else
     fi
 fi
 
-# ── 7. Done ───────────────────────────────────────────────────────────────────
+# ── 7. Telegram listener daemon (optional) ────────────────────────────────────
+if [ "$RUN_LISTEN" = true ]; then
+    step "Setting up Telegram reply listener (systemd service)"
+    bash "$REPO_DIR/scripts/setup-listen.sh"
+else
+    # Offer the hint only when Telegram is already configured but listener isn't running.
+    CONFIG_FILE="$HOME/.agent-tasks/config.toml"
+    if grep -q "enabled = true" "$CONFIG_FILE" 2>/dev/null; then
+        if ! systemctl --user is-active --quiet agent-inbox-listen.service 2>/dev/null; then
+            echo ""
+            warn "Telegram reply listener not running. Enable with:"
+            warn "  ./install.sh --listen"
+        else
+            ok "Telegram reply listener already running"
+        fi
+    fi
+fi
+
+# ── 8. Done ───────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}${GREEN}Done!${NC} Restart Claude Code for hooks to take effect."
 echo ""
-echo "  Verify:  agent-inbox --help"
-echo "  Test:    agent-inbox notify --message 'install test' --attention"
+echo "  Verify:      agent-inbox --help"
+echo "  Test notify: agent-inbox notify --message 'install test' --attention"
+echo ""
+echo -e "${BOLD}Sandbox usage:${NC}"
+echo "  Start agent:  agent-sandbox /path/to/repo"
+echo "  List agents:  agent-inbox list"
+echo "  Watch agents: agent-inbox watch"
+echo "  Kill agent:   agent-inbox kill <task-id>"
+echo "  Attach shell: podman exec -it agent-inbox-<task-id> bash"
 echo ""

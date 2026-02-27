@@ -25,6 +25,12 @@ pub struct TelegramConfig {
     /// Chat ID to send notifications to (user or group chat).
     #[serde(default)]
     pub chat_id: String,
+
+    /// Telegram username (without @) that is allowed to interact with the bot.
+    /// When set, the listener rejects any message whose sender username does not
+    /// match, providing a second layer of protection on top of the chat_id check.
+    #[serde(default)]
+    pub allowed_username: String,
 }
 
 impl TelegramConfig {
@@ -92,6 +98,7 @@ mod tests {
             enabled: true,
             bot_token: "token".to_string(),
             chat_id: "123".to_string(),
+            allowed_username: String::new(),
         };
         assert!(cfg.is_configured());
     }
@@ -102,6 +109,7 @@ mod tests {
             enabled: false,
             bot_token: "token".to_string(),
             chat_id: "123".to_string(),
+            allowed_username: String::new(),
         };
         assert!(!cfg.is_configured());
     }
@@ -112,6 +120,7 @@ mod tests {
             enabled: true,
             bot_token: String::new(),
             chat_id: "123".to_string(),
+            allowed_username: String::new(),
         };
         assert!(!cfg.is_configured());
     }
@@ -128,6 +137,21 @@ chat_id = "456789"
         assert!(config.telegram.is_configured());
         assert_eq!(config.telegram.bot_token, "123:ABC");
         assert_eq!(config.telegram.chat_id, "456789");
+        // allowed_username is optional — defaults to empty string
+        assert_eq!(config.telegram.allowed_username, "");
+    }
+
+    #[test]
+    fn test_parse_toml_with_username() {
+        let toml_str = r#"
+[telegram]
+enabled = true
+bot_token = "123:ABC"
+chat_id = "456789"
+allowed_username = "adlrocha"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.telegram.allowed_username, "adlrocha");
     }
 
     #[test]
