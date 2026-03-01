@@ -2,19 +2,19 @@
 //!
 //! Two strategies are supported:
 //!
-//! 1. **Sandbox (Podman) injection** — preferred for containerised agents.
-//!    Uses `podman exec <container> tmux send-keys -t claude '<msg>' Enter`
-//!    which delivers the message directly to the Claude tmux session inside
-//!    the container.  Reliable, no PTY scanning needed.
+//! 1. **Sandbox (Podman) injection** — for containerised agents.
+//!    Scans host `/proc` for the `podman exec` process that is currently
+//!    attached to the container (i.e. running `bash -c claude ...`), then
+//!    writes directly to that process's PTY master fd.  This works because
+//!    `podman exec -it` allocates a PTY on the host; we just find and write
+//!    to it.  If nobody is attached the inject fails with a clear error.
 //!
-//! 2. **PTY master injection** — legacy fallback for non-sandboxed agents.
+//! 2. **PTY master injection** — for non-sandboxed agents.
 //!    Writes bytes directly to the PTY master fd via `/proc/{pid}/fd/*`.
-//!    This requires the agent to be running on the host with an accessible PTY.
 //!
 //! `inject` automatically selects the right strategy based on `task.sandbox_type`.
 
 use anyhow::{bail, Context, Result};
-use std::process::Command;
 
 use crate::models::{SandboxType, Task};
 
@@ -46,37 +46,69 @@ pub fn inject(task: &Task, message: &str) -> Result<()> {
 
 // ── Container injection ───────────────────────────────────────────────────────
 
-/// Send `message` to the Claude tmux session inside the container via
-/// `podman exec <container> tmux send-keys -t claude '<message>' Enter`.
+/// Inject `message` into the Claude session running inside a Podman container.
 ///
-/// tmux send-keys is safe and reliable: it delivers the text directly to the
-/// running pane without any PTY scanning or named-pipe machinery.
+/// Strategy:
+/// 1. Kill any active interactive attach sessions (conmon --exec-attach) for
+///    this container, to avoid conflicting conversations.
+/// 2. Run `claude --continue` non-interactively via `podman exec -i`, piping
+///    the message through stdin. Claude handles piped stdin fine and produces
+///    a single response turn.
 fn inject_via_container(container_id: &str, message: &str) -> Result<()> {
-    // Validate container_id to prevent shell injection.
-    if !container_id.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
-        bail!("Invalid container_id: '{}'", container_id);
-    }
+    let short = &container_id[..container_id.len().min(12)];
 
-    let output = Command::new("podman")
+    // Kill any interactive attach sessions so there's no conflict.
+    kill_exec_attach_sessions(short);
+
+    // Run claude non-interactively with the message on stdin.
+    let claude = "/home/node/.local/bin/claude";
+    let mut child = std::process::Command::new("podman")
         .args([
-            "exec",
+            "exec", "-i",
+            "-e", "TERM=xterm-256color",
+            "-e", "PATH=/home/node/.local/bin:/usr/local/bin:/usr/bin:/bin",
+            "-e", "CLAUDE_CONFIG_DIR=/home/node/.claude",
+            "-w", "/workspace",
             container_id,
-            "/usr/bin/tmux",
-            "send-keys",
-            "-t",
-            "claude",
-            message,
-            "Enter",
+            claude,
+            "--continue",
+            "--dangerously-skip-permissions",
         ])
-        .output()
-        .context("Failed to run podman exec tmux send-keys")?;
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .context("Failed to spawn podman exec for inject")?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("tmux send-keys failed: {}", stderr.trim());
+    use std::io::Write;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(message.as_bytes())
+            .context("Failed to write message to claude stdin")?;
+        // stdin drops here, closing the pipe — Claude sees EOF and processes the turn.
     }
 
+    child.wait().context("podman exec inject did not exit cleanly")?;
     Ok(())
+}
+
+/// Kill all active `podman exec -it` (conmon --exec-attach) sessions for the
+/// given container, so that a remote inject doesn't conflict with a local
+/// interactive session on the same repo.
+fn kill_exec_attach_sessions(container_id_prefix: &str) {
+    for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else { continue };
+        let Ok(cmdline) = std::fs::read_to_string(format!("/proc/{}/cmdline", pid)) else { continue };
+        if cmdline.contains("conmon")
+            && cmdline.contains("exec-attach")
+            && cmdline.contains(container_id_prefix)
+        {
+            // SIGTERM — lets conmon clean up its PTY and exit gracefully.
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGTERM);
+            }
+        }
+    }
 }
 
 // ── Implementation ────────────────────────────────────────────────────────────
@@ -91,7 +123,12 @@ fn inject_via_pty_master(pid: i32, bytes: &[u8]) -> Result<()> {
         .with_context(|| format!("Could not find PTY master for pts/{}", pts_num))?;
 
     let path = format!("/proc/{}/fd/{}", master_pid, master_fd);
-    std::fs::write(&path, bytes)
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .and_then(|mut f| f.write_all(bytes))
         .with_context(|| format!("Failed to write to PTY master {}", path))
 }
 

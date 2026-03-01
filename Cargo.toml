@@ -29,5 +29,6 @@ thiserror = "2.0"
 ureq = { version = "2.12", features = ["json"] }
 toml = "0.8"
 tempfile = "3.13"
+libc = "0.2.182"
 
 [dev-dependencies]

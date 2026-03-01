@@ -219,8 +219,9 @@ COMMANDS
 
   list               List all sandboxes and their status.
 
-  kill <task-id>     Stop a running sandbox and remove it.
-  kill --all         Stop and remove all running sandboxes.
+  inject <task-id> <message>   Inject a message into the attached Claude session.
+  kill <task-id>               Stop a running sandbox and remove it.
+  kill --all                   Stop and remove all running sandboxes.
 
   resume             Re-sync sandbox state after a host reboot.
                      (Also runs automatically via systemd on login.)
@@ -294,6 +295,17 @@ if [ "$1" = "attach" ]; then
     FRESH_FLAG=""
     [ "${3:-}" = "--fresh" ] && FRESH_FLAG="--fresh"
     exec "$AGENT_INBOX" _sandbox_attach "$TASK_ID" $FRESH_FLAG
+fi
+
+if [ "$1" = "inject" ]; then
+    TASK_ID=$(require_task_id inject "${2:-}")
+    MESSAGE="${3:-}"
+    if [ -z "$MESSAGE" ]; then
+        echo "Error: inject requires a message" >&2
+        echo "Usage: agent-sandbox inject <task-id> <message>" >&2
+        exit 1
+    fi
+    exec "$AGENT_INBOX" inject "$TASK_ID" "$MESSAGE"
 fi
 
 if [ "$1" = "kill" ]; then
