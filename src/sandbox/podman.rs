@@ -362,6 +362,23 @@ impl Sandbox for PodmanSandbox {
             ));
         }
 
+        // Mount host SSH keys read-only so the sandbox can push/pull from GitHub.
+        // Read-only prevents the container from modifying key files, but note that
+        // key material is still readable inside the container — avoid mounting your
+        // primary keys if prompt-injection attacks are a concern.
+        let ssh_dir = home_dir.join(".ssh");
+        if ssh_dir.exists() {
+            args.push("-v".to_string());
+            args.push(format!("{}:/home/node/.ssh:ro", ssh_dir.display()));
+        }
+
+        // Mount host gitconfig read-only so git identity and settings carry over.
+        let gitconfig = home_dir.join(".gitconfig");
+        if gitconfig.exists() {
+            args.push("-v".to_string());
+            args.push(format!("{}:/home/node/.gitconfig:ro", gitconfig.display()));
+        }
+
         args.push(config.image.clone());
 
         // Container PID 1 is just sleep infinity — keeps the container alive.

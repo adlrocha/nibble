@@ -179,6 +179,11 @@ fn handle_message(
 
     eprintln!("[listen] Text message from {from_id}: {:?}", &text[..text.len().min(80)]);
 
+    // Priority 0: /sandboxes command — list running sandboxes with reply buttons.
+    if text.trim() == "/sandboxes" {
+        return handle_sandboxes_command(config, db, chat_id);
+    }
+
     // Priority 1: pending-reply state persisted in DB (survives daemon restarts).
     let pending_key = format!("{}{}", PENDING_REPLY_PREFIX, chat_id);
     if let Ok(Some(task_id)) = db.kv_get(&pending_key) {
@@ -208,6 +213,34 @@ fn handle_message(
         "ℹ️ Reply to a task notification to send a message to that agent.",
     )?;
 
+    Ok(())
+}
+
+fn handle_sandboxes_command(
+    config: &TelegramConfig,
+    db: &Database,
+    _chat_id: i64,
+) -> Result<()> {
+    use crate::models::{SandboxType, TaskStatus};
+
+    let tasks = db.list_tasks(Some(TaskStatus::Running))?;
+
+    // Only show Podman-sandboxed tasks — injection only works for those.
+    let sandboxed: Vec<_> = tasks
+        .iter()
+        .filter(|t| t.sandbox_type == SandboxType::Podman)
+        .collect();
+
+    // Build (task_id, repo_label) pairs — use the last component of the title path.
+    let sandboxes: Vec<(&str, &str)> = sandboxed
+        .iter()
+        .map(|t| {
+            let repo = t.title.rsplit('/').next().unwrap_or(&t.title);
+            (t.task_id.as_str(), repo)
+        })
+        .collect();
+
+    telegram::send_sandbox_list(config, &sandboxes)?;
     Ok(())
 }
 

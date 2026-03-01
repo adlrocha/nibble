@@ -44,6 +44,44 @@ pub fn send_with_reply_button(config: &TelegramConfig, text: &str, task_id: &str
     post_message(config, &payload)
 }
 
+/// Send a list of running sandboxes, each with a "↩ Reply" inline button.
+///
+/// Each row in the inline keyboard corresponds to one sandbox task.
+pub fn send_sandbox_list(
+    config: &TelegramConfig,
+    sandboxes: &[(&str, &str)], // (task_id, repo_label)
+) -> Result<i64> {
+    if sandboxes.is_empty() {
+        return send(config, "🤖 No running sandboxes.");
+    }
+
+    let rows: Vec<Vec<serde_json::Value>> = sandboxes
+        .iter()
+        .map(|(task_id, repo)| {
+            vec![serde_json::json!({
+                "text": format!("↩ {} ({})", repo, &task_id[..task_id.len().min(8)]),
+                "callback_data": format!("reply:{}", task_id),
+            })]
+        })
+        .collect();
+
+    let lines: Vec<String> = sandboxes
+        .iter()
+        .map(|(task_id, repo)| format!("• <code>{}</code>  {}", &task_id[..task_id.len().min(8)], repo))
+        .collect();
+
+    let text = format!("🤖 <b>Running sandboxes</b>\n\n{}\n\nTap a button to send a message.", lines.join("\n"));
+
+    let payload = serde_json::json!({
+        "chat_id": config.chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": true,
+        "reply_markup": { "inline_keyboard": rows },
+    });
+    post_message(config, &payload)
+}
+
 /// Acknowledge a callback query (removes the button-loading spinner on the client).
 ///
 /// Must be called after every callback_query update, even when taking no visible action.
