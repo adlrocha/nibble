@@ -139,6 +139,10 @@ fn main() -> Result<()> {
             let deleted = db.cleanup_old_completed(retention_secs)?;
             println!("Cleaned up {} old completed tasks", deleted);
         }
+        Some(Commands::Prune) => {
+            let pruned = prune_stale_tasks(&db)?;
+            println!("Pruned {} stale task(s)", pruned);
+        }
         Some(Commands::Report { action }) => match action {
             ReportAction::Start {
                 task_id,
@@ -206,6 +210,26 @@ fn main() -> Result<()> {
                 task.set_exited(exit_code);
                 db.update_task(&task)?;
                 println!("Task exited: {}", task_id);
+
+                // Send exit notification only when the Stop hook did NOT already
+                // send a response notification (i.e. attention_reason is unset).
+                // When attention_reason IS set the Stop hook ran cleanly and
+                // already delivered the real response — this path is a crash/kill.
+                let cfg = config::load().unwrap_or_default();
+                if cfg.telegram.is_configured() && task.attention_reason.is_none() {
+                    let text = build_notification_text(&db, Some(&task_id), "⚠️ Session ended unexpectedly.", false)?;
+                    let _ = notifications::telegram::send_with_reply_button(&cfg.telegram, &text, &task_id)
+                        .map(|msg_id| db.insert_bot_message(msg_id, &task_id));
+                }
+            }
+            ReportAction::LastMessage { task_id, message } => {
+                let mut task = db
+                    .get_task_by_id(&task_id)?
+                    .ok_or_else(|| anyhow::anyhow!("Task not found: {}", task_id))?;
+
+                // Store on attention_reason so it's available when the exit notification fires.
+                task.attention_reason = Some(message);
+                db.update_task(&task)?;
             }
             ReportAction::SessionId { task_id, session_id } => {
                 let mut task = db
@@ -309,6 +333,10 @@ fn main() -> Result<()> {
                 );
             }
 
+            // Run an initial prune before entering the listener loop so stale
+            // tasks from a previous crash or reboot are cleaned up immediately.
+            let _ = prune_stale_tasks(&db);
+
             notifications::telegram_listener::run(&db, &cfg.telegram)?;
         }
     }
@@ -337,23 +365,36 @@ fn find_latest_session_for_repo(repo_path: &str) -> Option<String> {
         .unwrap_or_else(|_| std::path::PathBuf::from(repo_path));
     let encoded = abs_path.to_string_lossy().replace('/', "-");
 
-    let session_dir = projects_dir.join(&encoded);
-    if !session_dir.exists() {
+    // Also check the container-side path: the sandbox always mounts the repo at
+    // /workspace, so container sessions are stored under "-workspace" regardless
+    // of the host repo path.  We need to check both dirs and pick the newest.
+    let candidate_dirs: Vec<_> = [encoded.as_str(), "-workspace"]
+        .iter()
+        .map(|enc| projects_dir.join(enc))
+        .filter(|d| d.exists())
+        .collect();
+
+    if candidate_dirs.is_empty() {
         return None;
     }
 
-    // Find the most recently modified .jsonl file in that directory.
-    std::fs::read_dir(&session_dir)
-        .ok()?
-        .filter_map(|entry| {
-            let entry = entry.ok()?;
-            let path = entry.path();
-            if path.extension()?.to_str()? != "jsonl" {
-                return None;
-            }
-            let mtime = entry.metadata().ok()?.modified().ok()?;
-            let stem = path.file_stem()?.to_string_lossy().to_string();
-            Some((mtime, stem))
+    // Find the most recently modified .jsonl file across all candidate dirs.
+    candidate_dirs
+        .iter()
+        .flat_map(|dir| {
+            std::fs::read_dir(dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|entry| {
+                    let path = entry.path();
+                    if path.extension()?.to_str()? != "jsonl" {
+                        return None;
+                    }
+                    let mtime = entry.metadata().ok()?.modified().ok()?;
+                    let stem = path.file_stem()?.to_string_lossy().to_string();
+                    Some((mtime, stem))
+                })
         })
         .max_by_key(|(mtime, _)| *mtime)
         .map(|(_, stem)| stem)
@@ -630,6 +671,19 @@ fn cmd_sandbox_kill(db: &Database, task_id: String) -> Result<()> {
     db.delete_container_state(&task_id)?;
 
     println!("Killed sandbox {} (task {})", container_id, task_id);
+
+    // Notify via Telegram that the sandbox was stopped.
+    let cfg = config::load().unwrap_or_default();
+    if cfg.telegram.is_configured() {
+        let msg = task.attention_reason
+            .as_deref()
+            .unwrap_or("(sandbox killed)")
+            .to_string();
+        let text = build_notification_text(db, Some(&task_id), &msg, false)?;
+        let _ = notifications::telegram::send_with_reply_button(&cfg.telegram, &text, &task_id)
+            .map(|msg_id| db.insert_bot_message(msg_id, &task_id));
+    }
+
     Ok(())
 }
 
@@ -643,6 +697,7 @@ fn cmd_sandbox_kill_all(db: &Database) -> Result<()> {
         return Ok(());
     }
 
+    let cfg = config::load().unwrap_or_default();
     let mut killed = 0;
     for (task_id, container_name, _, _) in &states {
         match sandbox.kill(container_name) {
@@ -650,6 +705,17 @@ fn cmd_sandbox_kill_all(db: &Database) -> Result<()> {
                 if let Ok(Some(mut task)) = db.get_task_by_id(task_id) {
                     task.set_exited(None);
                     let _ = db.update_task(&task);
+
+                    if cfg.telegram.is_configured() {
+                        let msg = task.attention_reason
+                            .as_deref()
+                            .unwrap_or("(sandbox killed)")
+                            .to_string();
+                        if let Ok(text) = build_notification_text(db, Some(task_id), &msg, false) {
+                            let _ = notifications::telegram::send_with_reply_button(&cfg.telegram, &text, task_id)
+                                .map(|msg_id| db.insert_bot_message(msg_id, task_id));
+                        }
+                    }
                 }
                 let _ = db.delete_container_state(task_id);
                 println!("Killed {}", container_name);
@@ -709,6 +775,58 @@ fn cmd_sandbox_resume(db: &Database, all: bool) -> Result<()> {
     Ok(())
 }
 
+// ── Stale task pruning ────────────────────────────────────────────────────────
+
+/// Mark Running tasks as Exited when their process (PID) is no longer alive,
+/// and clean up sandbox DB state for containers that have disappeared.
+///
+/// Returns the number of tasks pruned.
+pub(crate) fn prune_stale_tasks(db: &Database) -> Result<usize> {
+    let mut pruned = 0;
+
+    // 1. Non-sandbox tasks: check PID liveness.
+    let running = db.list_tasks(Some(TaskStatus::Running))?;
+    for mut task in running {
+        if task.sandbox_type != SandboxType::Podman {
+            if let Some(pid) = task.pid {
+                let alive = std::path::Path::new(&format!("/proc/{}", pid)).exists();
+                if !alive {
+                    task.set_exited(None);
+                    db.update_task(&task)?;
+                    eprintln!("[prune] Task {} (pid {}) is dead → exited", &task.task_id[..8.min(task.task_id.len())], pid);
+                    pruned += 1;
+                }
+            }
+        }
+    }
+
+    // 2. Sandbox tasks: verify the container is still running via Podman.
+    let states = db.list_container_states()?;
+    if !states.is_empty() {
+        let sandbox = PodmanSandbox::new();
+        for (task_id, container_name, _, _) in &states {
+            let still_running = matches!(
+                sandbox.status(container_name),
+                Ok(sandbox::ContainerStatus::Running)
+            );
+            if !still_running {
+                // Container gone — clean up state and mark task exited.
+                let _ = db.delete_container_state(task_id);
+                if let Ok(Some(mut task)) = db.get_task_by_id(task_id) {
+                    if task.status == TaskStatus::Running {
+                        task.set_exited(None);
+                        let _ = db.update_task(&task);
+                        eprintln!("[prune] Sandbox {} gone → exited task {}", container_name, &task_id[..8.min(task_id.len())]);
+                        pruned += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(pruned)
+}
+
 // ── Notification helpers ──────────────────────────────────────────────────────
 
 /// Build the full notification text sent to Telegram.
@@ -719,7 +837,7 @@ fn cmd_sandbox_resume(db: &Database, all: bool) -> Result<()> {
 ///
 /// `attention` = true produces a visually distinct header for permission
 /// requests and questions that require an immediate response.
-fn build_notification_text(
+pub(crate) fn build_notification_text(
     db: &Database,
     task_id: Option<&str>,
     message: &str,

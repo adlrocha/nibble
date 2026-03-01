@@ -16,9 +16,19 @@ use crate::models::{SandboxType, Task};
 
 /// Send `message` to the Claude session running inside a Podman sandbox.
 ///
-/// Only sandboxed (Podman) tasks are supported.  Returns an error for any
-/// other task type.
+/// Blocks until the Claude process exits.  Only sandboxed (Podman) tasks are
+/// supported.  Returns an error for any other task type.
 pub fn inject(task: &Task, message: &str) -> Result<()> {
+    let mut child = inject_returning_child(task, message)?;
+    child.wait().context("podman exec inject did not exit cleanly")?;
+    Ok(())
+}
+
+/// Like [`inject`] but returns the spawned child process instead of waiting.
+///
+/// The caller is responsible for waiting on the child (or dropping it).
+/// This allows the caller to poll the process and interleave heartbeats.
+pub fn inject_returning_child(task: &Task, message: &str) -> Result<std::process::Child> {
     if task.sandbox_type != SandboxType::Podman {
         bail!(
             "Message injection is only supported for Podman-sandboxed tasks \
@@ -34,12 +44,13 @@ pub fn inject(task: &Task, message: &str) -> Result<()> {
         .with_context(|| format!("Task {} is sandboxed but has no container_id", task.task_id))?;
 
     let session_id = task.context.as_ref().and_then(|c| c.session_id.as_deref());
-    inject_via_container(container_id, session_id, message)
+    spawn_inject(container_id, session_id, &task.task_id, message)
 }
 
 // ── Container injection ───────────────────────────────────────────────────────
 
-/// Inject `message` into the Claude session running inside a Podman container.
+/// Spawn the `claude --resume` process inside the container, write `message` to
+/// its stdin, and return the child handle.  The caller decides when to wait.
 ///
 /// Strategy:
 /// 1. Kill any active interactive attach sessions (conmon --exec-attach) for
@@ -47,7 +58,7 @@ pub fn inject(task: &Task, message: &str) -> Result<()> {
 /// 2. Run `claude --resume <session_id>` (or `--continue` if no session ID is
 ///    stored) non-interactively via `podman exec -i`, piping the message through
 ///    stdin. Claude handles piped stdin fine and produces a single response turn.
-fn inject_via_container(container_id: &str, session_id: Option<&str>, message: &str) -> Result<()> {
+fn spawn_inject(container_id: &str, session_id: Option<&str>, task_id: &str, message: &str) -> Result<std::process::Child> {
     let short = &container_id[..container_id.len().min(12)];
 
     // Kill any interactive attach sessions so there's no conflict.
@@ -61,11 +72,16 @@ fn inject_via_container(container_id: &str, session_id: Option<&str>, message: &
         vec!["--continue"]
     };
 
+    // AGENT_TASK_ID must be set so the Stop/SessionEnd hooks inside the
+    // container know which task to report against.
+    let agent_task_id_env = format!("AGENT_TASK_ID={}", task_id);
+
     let mut args = vec![
         "exec", "-i",
         "-e", "TERM=xterm-256color",
         "-e", "PATH=/home/node/.local/bin:/usr/local/bin:/usr/bin:/bin",
         "-e", "CLAUDE_CONFIG_DIR=/home/node/.claude",
+        "-e", agent_task_id_env.as_str(),
         "-w", "/workspace",
         container_id,
         claude,
@@ -89,8 +105,7 @@ fn inject_via_container(container_id: &str, session_id: Option<&str>, message: &
         // stdin drops here, closing the pipe — Claude sees EOF and processes the turn.
     }
 
-    child.wait().context("podman exec inject did not exit cleanly")?;
-    Ok(())
+    Ok(child)
 }
 
 /// Kill all active `podman exec -it` (conmon --exec-attach) sessions for the
@@ -140,6 +155,13 @@ mod tests {
     fn test_inject_fails_for_non_sandbox_task() {
         let task = make_non_sandbox_task();
         let err = inject(&task, "hello").unwrap_err().to_string();
+        assert!(err.contains("only supported for Podman-sandboxed tasks"), "got: {err}");
+    }
+
+    #[test]
+    fn test_inject_returning_child_fails_for_non_sandbox_task() {
+        let task = make_non_sandbox_task();
+        let err = inject_returning_child(&task, "hello").unwrap_err().to_string();
         assert!(err.contains("only supported for Podman-sandboxed tasks"), "got: {err}");
     }
 

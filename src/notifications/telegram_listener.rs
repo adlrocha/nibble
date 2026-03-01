@@ -16,9 +16,19 @@
 //!
 //! The current `poll_offset` is persisted to the SQLite kv_store after every
 //! batch so that a daemon restart does not re-process old updates.
+//!
+//! ## Long-running turns
+//!
+//! Injection (`claude --resume`) can take many minutes for complex tasks.
+//! Rather than blocking the listener loop, injection is dispatched to a
+//! background thread.  That thread:
+//! - Sends a "⏳ working…" heartbeat to Telegram every 2 minutes.
+//! - After the Claude process exits, sends a safety-net completion notification
+//!   if the Stop hook inside the container didn't already send one (e.g. because
+//!   the hook timed out or the container crashed).
 
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
@@ -30,6 +40,10 @@ use crate::notifications::telegram;
 const POLL_TIMEOUT_SECS: u64 = 30;
 const POLL_OFFSET_KEY: &str = "telegram_poll_offset";
 const PENDING_REPLY_PREFIX: &str = "pending_reply:";
+/// Run a prune pass every this many polling loops (~5 minutes at 30s/poll).
+const PRUNE_EVERY_N_POLLS: u32 = 10;
+/// Send a "still working" heartbeat this often during a long inject turn.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(120);
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
@@ -42,6 +56,8 @@ pub fn run(db: &Database, config: &TelegramConfig) -> Result<()> {
         .kv_get(POLL_OFFSET_KEY)?
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
+
+    let mut poll_count: u32 = 0;
 
     loop {
         let updates = match get_updates(config, offset) {
@@ -68,6 +84,14 @@ pub fn run(db: &Database, config: &TelegramConfig) -> Result<()> {
 
         // Persist offset after every batch (even if empty) to survive restarts.
         let _ = db.kv_set(POLL_OFFSET_KEY, &offset.to_string());
+
+        // Periodically prune stale tasks (dead PIDs / gone containers).
+        poll_count += 1;
+        if poll_count % PRUNE_EVERY_N_POLLS == 0 {
+            if let Err(e) = crate::prune_stale_tasks(db) {
+                eprintln!("[listen] prune error: {e:#}");
+            }
+        }
     }
 }
 
@@ -221,23 +245,35 @@ fn handle_sandboxes_command(
     db: &Database,
     _chat_id: i64,
 ) -> Result<()> {
-    use crate::models::{SandboxType, TaskStatus};
+    use crate::sandbox::podman::PodmanSandbox;
+    use crate::sandbox::{ContainerStatus, Sandbox};
 
-    let tasks = db.list_tasks(Some(TaskStatus::Running))?;
+    let sandbox = PodmanSandbox::new();
+    let states = db.list_container_states()?;
 
-    // Only show Podman-sandboxed tasks — injection only works for those.
-    let sandboxed: Vec<_> = tasks
+    // Ask Podman directly — DB task status is unreliable because sandbox tasks
+    // flip between Running/Completed on every turn.
+    let mut running: Vec<(String, String)> = Vec::new(); // (task_id, label)
+    for (task_id, container_name, repo_path, _created) in &states {
+        if let Ok(ContainerStatus::Running) = sandbox.status(container_name) {
+            // Use the last component of the repo path as the display label.
+            let label = std::path::Path::new(repo_path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(repo_path.as_str())
+                .to_string();
+            running.push((task_id.clone(), label));
+        }
+    }
+
+    if running.is_empty() {
+        telegram::send(config, "🤖 No running sandboxes.")?;
+        return Ok(());
+    }
+
+    let sandboxes: Vec<(&str, &str)> = running
         .iter()
-        .filter(|t| t.sandbox_type == SandboxType::Podman)
-        .collect();
-
-    // Build (task_id, repo_label) pairs — use the last component of the title path.
-    let sandboxes: Vec<(&str, &str)> = sandboxed
-        .iter()
-        .map(|t| {
-            let repo = t.title.rsplit('/').next().unwrap_or(&t.title);
-            (t.task_id.as_str(), repo)
-        })
+        .map(|(id, label)| (id.as_str(), label.as_str()))
         .collect();
 
     telegram::send_sandbox_list(config, &sandboxes)?;
@@ -260,17 +296,111 @@ fn route_text_to_task(
     };
 
     eprintln!("[listen] Injecting into task {task_id}, pid={:?}", task.pid);
-    match agent_input::inject(&task, text) {
-        Ok(()) => {
-            eprintln!("[listen] Injection succeeded");
-            send_notice(config, chat_id, "📨 Message sent to agent.")?;
-        }
+
+    // Acknowledge immediately so the user knows their message was received.
+    send_notice(config, chat_id, "📨 Message sent to agent.")?;
+
+    // Spawn the actual inject in a background thread so the listener loop stays
+    // live and can process other Telegram updates while Claude is working.
+    let config_clone = config.clone();
+    let task_id_owned = task_id.to_string();
+    let text_owned = text.to_string();
+    let db_path = crate::db::default_db_path();
+
+    thread::spawn(move || {
+        inject_with_heartbeat(&task, &text_owned, &config_clone, &task_id_owned, &db_path);
+    });
+
+    Ok(())
+}
+
+/// Run inject inside a background thread, sending periodic heartbeats and a
+/// safety-net completion notification when the Claude process exits.
+fn inject_with_heartbeat(
+    task: &crate::models::Task,
+    text: &str,
+    config: &TelegramConfig,
+    task_id: &str,
+    db_path: &std::path::Path,
+) {
+    // Snapshot the attention_reason before the turn so we can detect whether
+    // the Stop hook updated it (= Stop hook ran successfully).
+    let pre_turn_attention = task.attention_reason.clone();
+
+    // Spawn the Claude process.
+    let mut child = match agent_input::inject_returning_child(task, text) {
+        Ok(c) => c,
         Err(e) => {
-            eprintln!("[listen] Injection FAILED: {e:#}");
-            send_notice(config, chat_id, &format!("❌ Could not inject: {e}"))?;
+            eprintln!("[listen] inject failed: {e:#}");
+            let _ = telegram::send(config, &format!("❌ Could not start agent turn: {e}"));
+            return;
+        }
+    };
+
+    let start = Instant::now();
+    let short_id = &task_id[..task_id.len().min(8)];
+
+    // Poll the child process, sending heartbeats every HEARTBEAT_INTERVAL.
+    let mut last_heartbeat = Instant::now();
+    loop {
+        // Check if process has finished (non-blocking).
+        match child.try_wait() {
+            Ok(Some(_status)) => break, // done
+            Ok(None) => {}              // still running
+            Err(e) => {
+                eprintln!("[listen] inject wait error: {e:#}");
+                break;
+            }
+        }
+
+        if last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
+            let elapsed_min = start.elapsed().as_secs() / 60;
+            let msg = format!("⏳ Agent still working… ({elapsed_min}m elapsed)");
+            eprintln!("[listen] heartbeat for task {short_id}: {msg}");
+            let _ = telegram::send(config, &msg);
+            last_heartbeat = Instant::now();
+        }
+
+        thread::sleep(Duration::from_secs(5));
+    }
+
+    let elapsed = start.elapsed();
+    eprintln!("[listen] inject done for task {short_id} in {}s", elapsed.as_secs());
+
+    // Safety-net: if the Stop hook already fired and stored a last-message, it
+    // also sent the notification — don't double-notify.  But if attention_reason
+    // is unchanged (Stop hook timed out or container crashed), send the final
+    // notification ourselves so the user always gets a response.
+    let db = match Database::open(db_path) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("[listen] safety-net: could not open DB: {e:#}");
+            return;
+        }
+    };
+
+    let current_task = match db.get_task_by_id(task_id) {
+        Ok(Some(t)) => t,
+        _ => return,
+    };
+
+    let stop_hook_fired = current_task.attention_reason != pre_turn_attention
+        && current_task.attention_reason.is_some();
+
+    if !stop_hook_fired {
+        // Stop hook didn't update the message — send a generic completion ping.
+        eprintln!("[listen] safety-net: Stop hook didn't fire for {short_id}, sending fallback notification");
+        let elapsed_str = if elapsed.as_secs() < 60 {
+            format!("{}s", elapsed.as_secs())
+        } else {
+            format!("{}m {}s", elapsed.as_secs() / 60, elapsed.as_secs() % 60)
+        };
+        let msg = format!("✅ Agent turn complete ({elapsed_str})");
+        if let Ok(text) = crate::build_notification_text(&db, Some(task_id), &msg, false) {
+            let _ = telegram::send_with_reply_button(config, &text, task_id)
+                .map(|msg_id| db.insert_bot_message(msg_id, task_id));
         }
     }
-    Ok(())
 }
 
 // ── Telegram API ──────────────────────────────────────────────────────────────

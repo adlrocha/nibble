@@ -400,17 +400,13 @@ step "Installing Claude Code hooks"
 
 mkdir -p "$HOME/.claude"
 
-# If existing hooks are from a previous agent-inbox install, remove them first
-# so setup-claude-hooks.sh writes the latest version (it skips if AGENT_TASK_ID
-# is already present).
+# Pre-remove any existing agent-inbox hooks so setup-claude-hooks.sh always
+# writes the latest version. setup-claude-hooks.sh also does this itself, but
+# doing it here first avoids a jq-unavailable warning from that script.
 if grep -q "AGENT_TASK_ID" "$CLAUDE_SETTINGS" 2>/dev/null; then
     if command -v jq >/dev/null 2>&1; then
         jq 'del(.hooks)' "$CLAUDE_SETTINGS" > "$CLAUDE_SETTINGS.tmp" \
             && mv "$CLAUDE_SETTINGS.tmp" "$CLAUDE_SETTINGS"
-        ok "Removed stale hooks from existing settings"
-    else
-        warn "jq not available — cannot auto-update existing hooks."
-        warn "Manually remove the \"hooks\" block from $CLAUDE_SETTINGS then re-run."
     fi
 fi
 

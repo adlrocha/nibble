@@ -53,6 +53,13 @@ pub enum Commands {
         retention_secs: i64,
     },
 
+    /// Mark Running tasks as Exited when their process is no longer alive
+    ///
+    /// Also checks sandbox containers: removes DB state for containers that are
+    /// no longer running (caught a crash or host reboot).
+    /// Called automatically by `listen`; run manually to repair a stuck dashboard.
+    Prune,
+
     /// Report task status (internal command used by wrappers)
     Report {
         #[command(subcommand)]
@@ -233,6 +240,15 @@ pub enum ReportAction {
         /// Exit code
         #[arg(long)]
         exit_code: Option<i32>,
+    },
+
+    /// Store the last assistant message on the task (called by the Stop hook before SessionEnd)
+    LastMessage {
+        /// Task ID
+        task_id: String,
+
+        /// The last assistant message text
+        message: String,
     },
 
     /// Update the Claude session ID for an existing task (called by the Stop hook)

@@ -1,11 +1,13 @@
-1. Output capture in notifications — When a task exits or completes, you send
-  the status but not the last N lines of stdout/stderr. You'd need to know
-what the agent actually did/said.
-2. Task chaining/dependencies — No way to say "start task B when task A
-completes," which would be natural for agent pipelines.
-3. Sandbox exit notifications — Containers can be killed but there's no
-Telegram alert sent on container exit.
--####
+# Future iteration prompts
 
-- The agent-inbox keeps the status around when claude code or opencode haven't been gracefully killed. I think we should get a cron that verifies if the PID is still running and kills it if not to avoid polluting the database.
-- Implement Telegram notifications for gemini and claude in the web?
+## Next iteration (v1.1)
+
+- **TUI dashboard** (`agent-inbox watch`): replace the current 2-second clear-screen refresh with a proper terminal UI (ratatui). Show task list, last message preview, elapsed time, live status. Navigate with arrow keys, press Enter to inject a message.
+
+- **Install toolchain in sandbox**: when spawning a sandbox, detect the project type (package.json, Cargo.toml, go.mod, etc.) and run the appropriate install command before starting Claude, so the agent has a working environment from the start. Also inject a system prompt reminding Claude it is running inside a sandbox container.
+
+## Backlog
+
+- **Output capture in notifications**: attach the last N lines of stdout/stderr to completion notifications, not just the last assistant message.
+- **Task chaining/dependencies**: a way to say "start task B when task A completes" — natural for multi-step agent pipelines.
+- **Telegram notifications for web agents**: push notifications for claude.ai and Gemini web sessions (browser extension integration).

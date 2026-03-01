@@ -6,7 +6,7 @@ A CLI tool that runs Claude Code agents inside isolated Podman sandboxes, monito
 
 - **Podman Sandboxes**: Run agents in rootless containers — repo mounted read-write, ports exposed, full dev flexibility inside
 - **Telegram Notifications**: Receive the agent's last message on your phone when it finishes or needs a decision
-- **Telegram Replies**: Reply to notifications from your phone to unblock agents (input injected via named pipe)
+- **Telegram Replies**: Reply to notifications from your phone to unblock agents (input injected via `podman exec`)
 - **Auto-Resume**: Sandbox agents are tracked across host reboots
 - **Unified Task Tracking**: Track sandboxed and non-sandboxed agents in one dashboard
 - **3-State Model**: Running → Completed → Exited
@@ -22,27 +22,27 @@ A CLI tool that runs Claude Code agents inside isolated Podman sandboxes, monito
 │  ─────────────            ─────────           ────────────────      │
 │  sandbox / kill           tasks.db            long-polls Telegram   │
 │  list / watch             container_state     routes replies to     │
-│  resume                                       container via pipe    │
-│         │                                              ▲            │
+│  prune / inject           session_id          sandbox via exec      │
+│         │                                              │            │
 │         │ podman run                                   │            │
-│         ▼                                              │            │
-│  ┌──────────────────────────────────────┐              │            │
-│  │  Podman Container                    │              │            │
-│  │                                      │              │            │
-│  │  claude-code ←── input-forwarder ────┼──── podman exec ──────── │
-│  │                  (reads named pipe)  │                           │
-│  │  /workspace  (repo mounted RW)       │                           │
-│  │  ports 3000-3100, 8000-8100 open     │                           │
-│  └──────────────────────────────────────┘                           │
+│         ▼                                              ▼            │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │  Podman Container                                            │   │
+│  │                                                              │   │
+│  │  claude --resume <id>  ←── podman exec -i (stdin message)   │   │
+│  │                                                              │   │
+│  │  Stop hook → agent-inbox report session-id / last-message   │   │
+│  │  /workspace  (repo mounted RW)                              │   │
+│  └──────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────┘
                          │
                          ▼
                📱 Telegram (your phone)
 ```
 
-**Notification flow**: Claude Code `Stop` hook → `agent-inbox notify` → Telegram message with Reply button
+**Notification flow**: Claude Code `Stop` hook → `agent-inbox report last-message` + `agent-inbox notify` → Telegram message with Reply button
 
-**Reply flow**: Telegram reply → listener daemon → `podman exec` → `/tmp/agent-input.pipe` → `input-forwarder.sh` → Claude's TTY
+**Reply flow**: Telegram reply → listener daemon → `podman exec -i claude --resume <session-id>` (stdin) → Claude processes turn → Stop hook fires → next notification sent
 
 ## Installation
 
@@ -120,7 +120,7 @@ The container gets:
 ```bash
 agent-sandbox list
 # or
-agent-inbox sandboxes
+agent-inbox sandbox list
 ```
 
 Output:
@@ -191,6 +191,10 @@ agent-inbox show <task-id>
 # Clean up completed/exited tasks
 agent-inbox clear-all
 agent-inbox reset --force   # wipe everything
+
+# Prune stale tasks (dead PIDs / gone containers → mark exited)
+# Runs automatically every ~5 min inside the listen daemon
+agent-inbox prune
 ```
 
 ---
@@ -314,8 +318,8 @@ src/
 ├── db/mod.rs                # SQLite operations, schema migrations (v3)
 ├── sandbox/
 │   ├── mod.rs               # Sandbox trait, ContainerInfo, helpers
-│   └── podman.rs            # Podman implementation + Dockerfile + input-forwarder script
-├── agent_input.rs           # Input injection (container pipe or host PTY)
+│   └── podman.rs            # Podman implementation + Dockerfile
+├── agent_input.rs           # Input injection via podman exec -i (sandbox tasks)
 ├── notifications/
 │   ├── telegram.rs          # Send Telegram messages
 │   └── telegram_listener.rs # Long-polling daemon, reply routing

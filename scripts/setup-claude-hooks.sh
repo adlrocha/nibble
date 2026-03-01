@@ -23,7 +23,7 @@ mkdir -p "$CLAUDE_SETTINGS_DIR"
 #
 # The SessionEnd hook marks the task as exited when the user quits Claude Code.
 
-STOP_CMD='if [ -n "$AGENT_TASK_ID" ]; then INPUT=$(cat); if command -v jq >/dev/null 2>&1; then SID=$(printf "%s" "$INPUT" | jq -r ".sessionId // .session_id // empty"); [ -n "$SID" ] && agent-inbox report session-id "$AGENT_TASK_ID" "$SID" 2>/dev/null; MSG=$(printf "%s" "$INPUT" | jq -r ".last_assistant_message // \"(no message)\""); else MSG="(install jq to see last message)"; fi; agent-inbox report complete "$AGENT_TASK_ID" 2>/dev/null; notify-send "Claude Code" "Finished generating" 2>/dev/null; agent-inbox notify --task-id "$AGENT_TASK_ID" --message "$MSG" 2>/dev/null; fi'
+STOP_CMD='if [ -n "$AGENT_TASK_ID" ]; then INPUT=$(cat); if command -v jq >/dev/null 2>&1; then SID=$(printf "%s" "$INPUT" | jq -r ".sessionId // .session_id // empty"); [ -n "$SID" ] && agent-inbox report session-id "$AGENT_TASK_ID" "$SID" 2>/dev/null; MSG=$(printf "%s" "$INPUT" | jq -r ".last_assistant_message // \"(no message)\""); agent-inbox report last-message "$AGENT_TASK_ID" "$MSG" 2>/dev/null || true; else MSG="(install jq to see last message)"; fi; agent-inbox report complete "$AGENT_TASK_ID" 2>/dev/null; notify-send "Claude Code" "Finished generating" 2>/dev/null || true; agent-inbox notify --task-id "$AGENT_TASK_ID" --message "$MSG" 2>/dev/null || true; fi'
 
 NOTIFY_CMD='if [ -n "$AGENT_TASK_ID" ]; then INPUT=$(cat); if command -v jq >/dev/null 2>&1; then TOOL=$(printf "%s" "$INPUT" | jq -r ".tool_name // empty"); TOOL_INPUT=$(printf "%s" "$INPUT" | jq -c ".tool_input // empty"); BASE=$(printf "%s" "$INPUT" | jq -r ".message // \"Permission required\""); if [ -n "$TOOL" ]; then MSG="$BASE\nTool: $TOOL"; if [ -n "$TOOL_INPUT" ] && [ "$TOOL_INPUT" != "null" ]; then SHORT=$(printf "%s" "$TOOL_INPUT" | jq -r "to_entries | map(.key + \": \" + (.value | tostring)) | join(\", \")" 2>/dev/null | cut -c1-120); MSG="$MSG\n$SHORT"; fi; else MSG="$BASE"; fi; else MSG="Permission required (install jq for details)"; fi; agent-inbox notify --task-id "$AGENT_TASK_ID" --message "$MSG" --attention 2>/dev/null; fi'
 
@@ -35,14 +35,6 @@ EXITED_CMD='if [ -n "$AGENT_TASK_ID" ]; then agent-inbox report exited "$AGENT_T
 if [ -f "$CLAUDE_SETTINGS_FILE" ]; then
     echo "Found existing settings at $CLAUDE_SETTINGS_FILE"
 
-    # Check if hooks already exist
-    if grep -q "AGENT_TASK_ID" "$CLAUDE_SETTINGS_FILE" 2>/dev/null; then
-        echo "Hooks already configured. Skipping..."
-        echo ""
-        echo "To update hooks manually, edit: $CLAUDE_SETTINGS_FILE"
-        exit 0
-    fi
-
     # Backup existing settings
     BACKUP_FILE="$CLAUDE_SETTINGS_FILE.backup.$(date +%Y%m%d_%H%M%S)"
     cp "$CLAUDE_SETTINGS_FILE" "$BACKUP_FILE"
@@ -50,6 +42,13 @@ if [ -f "$CLAUDE_SETTINGS_FILE" ]; then
 
     # Try to merge hooks into existing settings using jq if available
     if command -v jq &> /dev/null; then
+        # Remove any existing agent-inbox hooks first so we always write the
+        # latest version (avoids stale hook commands after an upgrade).
+        if grep -q "AGENT_TASK_ID" "$CLAUDE_SETTINGS_FILE" 2>/dev/null; then
+            jq 'del(.hooks)' "$CLAUDE_SETTINGS_FILE" > "$CLAUDE_SETTINGS_FILE.tmp" \
+                && mv "$CLAUDE_SETTINGS_FILE.tmp" "$CLAUDE_SETTINGS_FILE"
+            echo "Removed stale hooks — will write latest version"
+        fi
         echo "Merging hooks into existing settings..."
 
         HOOKS_JSON=$(jq -n \
@@ -60,7 +59,7 @@ if [ -f "$CLAUDE_SETTINGS_FILE" ]; then
             '{
               hooks: {
                 UserPromptSubmit: [{hooks: [{type:"command", command:$running, timeout:5}]}],
-                Stop:             [{hooks: [{type:"command", command:$stop,    timeout:30}]}],
+                Stop:             [{hooks: [{type:"command", command:$stop,    timeout:120}]}],
                 Notification: [{
                   matcher: "permission_prompt",
                   hooks:   [{type:"command", command:$notify, timeout:10}]
@@ -95,7 +94,7 @@ else
         '{
           hooks: {
             UserPromptSubmit: [{hooks: [{type:"command", command:$running, timeout:5}]}],
-            Stop:             [{hooks: [{type:"command", command:$stop,    timeout:30}]}],
+            Stop:             [{hooks: [{type:"command", command:$stop,    timeout:120}]}],
             Notification: [{
               matcher: "permission_prompt",
               hooks:   [{type:"command", command:$notify, timeout:10}]
