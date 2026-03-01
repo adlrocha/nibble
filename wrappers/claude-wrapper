@@ -4,7 +4,11 @@
 # Hooks handle: running (UserPromptSubmit), completed (Stop), exited (SessionEnd)
 #
 # Usage:
-#   claude [args...]           -- normal interactive mode (permission prompts active)
+#   claude [args...]           -- normal interactive mode, auto-resumes last session
+#                                 for the current repo (host or sandbox sessions)
+#   claude --fresh [args...]   -- skip auto-resume, always start a new session
+#   claude --kimi [args...]    -- use Kimi as the LLM backend (reads KIMI_BASE_URL
+#                                 and KIMI_API_KEY from the environment)
 #   claude --remote [args...]  -- unattended mode: skips all permission prompts so
 #                                 you can interact purely via Telegram
 
@@ -19,15 +23,30 @@ if [ -z "$CLAUDE_BIN" ]; then
     exit 1
 fi
 
-# Parse --remote flag (consumed here, not passed to claude)
+# Parse wrapper-specific flags (consumed here, not passed to claude)
 REMOTE_MODE=false
+FRESH_MODE=false
+KIMI_MODE=false
 CLAUDE_ARGS=()
 for arg in "$@"; do
     if [ "$arg" = "--remote" ]; then
         REMOTE_MODE=true
+    elif [ "$arg" = "--fresh" ]; then
+        FRESH_MODE=true
+    elif [ "$arg" = "--kimi" ]; then
+        KIMI_MODE=true
     else
         CLAUDE_ARGS+=("$arg")
     fi
+done
+
+# If the user already passed --continue, --resume, or --new-session don't
+# inject our own session flags — honour their explicit intent.
+USER_HAS_SESSION_FLAG=false
+for arg in "${CLAUDE_ARGS[@]}"; do
+    case "$arg" in
+        --continue|--resume|--new-session) USER_HAS_SESSION_FLAG=true ;;
+    esac
 done
 
 # Generate unique task ID and export for hooks
@@ -63,6 +82,51 @@ if [ -n "$ZELLIJ" ] && [ -n "$ZELLIJ_PANE_ID" ]; then
     EXTRA_FLAGS="$EXTRA_FLAGS --zellij-pane-id $ZELLIJ_PANE_ID"
 fi
 
+# ── Session continuation ───────────────────────────────────────────────────────
+# Auto-detect the most recent Claude session for the current working directory
+# (mirrors the logic in cmd_sandbox_spawn). This lets a host session continue
+# a conversation that was started in a sandbox, and vice-versa.
+#
+# Claude stores sessions under ~/.claude/projects/<encoded-path>/*.jsonl where
+# the path is the absolute CWD with every '/' replaced by '-'.
+#
+# Skipped when:
+#   - --fresh flag was passed
+#   - user already supplied --continue / --resume / --new-session
+#   - no prior session exists for this directory
+SESSION_RESUME_FLAG=()
+if [ "$FRESH_MODE" = false ] && [ "$USER_HAS_SESSION_FLAG" = false ]; then
+    ABS_PATH=$(realpath "$PWD" 2>/dev/null || echo "$PWD")
+    # Replace every '/' with '-' (leading slash becomes a leading dash)
+    ENCODED_PATH="${ABS_PATH//\//-}"
+    SESSION_DIR="$HOME/.claude/projects/$ENCODED_PATH"
+
+    if [ -d "$SESSION_DIR" ]; then
+        # Pick the .jsonl file with the most recent modification time
+        LATEST_SESSION=$(ls -t "$SESSION_DIR"/*.jsonl 2>/dev/null | head -1)
+        if [ -n "$LATEST_SESSION" ]; then
+            SESSION_ID=$(basename "$LATEST_SESSION" .jsonl)
+            SESSION_RESUME_FLAG=(--resume "$SESSION_ID")
+        fi
+    fi
+    # If no session found for this directory, start fresh — do NOT fall back to
+    # --continue, which resumes the last global session regardless of repo.
+fi
+
+# ── Kimi backend ──────────────────────────────────────────────────────────────
+# When --kimi is passed, override ANTHROPIC_BASE_URL and ANTHROPIC_API_KEY with
+# the values from KIMI_BASE_URL / KIMI_API_KEY (set in your shell config alongside
+# the claude-kimi alias). This lets a single session switch provider without
+# touching the global environment.
+if [ "$KIMI_MODE" = true ]; then
+    if [ -z "$KIMI_BASE_URL" ] || [ -z "$KIMI_API_KEY" ]; then
+        echo "Error: --kimi requires KIMI_BASE_URL and KIMI_API_KEY to be set" >&2
+        exit 1
+    fi
+    export ANTHROPIC_BASE_URL="$KIMI_BASE_URL"
+    export ANTHROPIC_API_KEY="$KIMI_API_KEY"
+fi
+
 # Register task as 'running'
 # shellcheck disable=SC2086
 agent-inbox report start "$AGENT_TASK_ID" "claude_code" "$PWD" "$TASK_TITLE" \
@@ -72,7 +136,7 @@ agent-inbox report start "$AGENT_TASK_ID" "claude_code" "$PWD" "$TASK_TITLE" \
 if [ "$REMOTE_MODE" = true ]; then
     # Unattended mode: skip all permission prompts so the session can run
     # without keyboard interaction. Interact via Telegram Reply instead.
-    exec "$CLAUDE_BIN" --dangerously-skip-permissions "${CLAUDE_ARGS[@]}"
+    exec "$CLAUDE_BIN" --dangerously-skip-permissions "${SESSION_RESUME_FLAG[@]}" "${CLAUDE_ARGS[@]}"
 else
-    exec "$CLAUDE_BIN" "${CLAUDE_ARGS[@]}"
+    exec "$CLAUDE_BIN" "${SESSION_RESUME_FLAG[@]}" "${CLAUDE_ARGS[@]}"
 fi

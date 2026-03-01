@@ -33,7 +33,8 @@ pub fn inject(task: &Task, message: &str) -> Result<()> {
         .as_deref()
         .with_context(|| format!("Task {} is sandboxed but has no container_id", task.task_id))?;
 
-    inject_via_container(container_id, message)
+    let session_id = task.context.as_ref().and_then(|c| c.session_id.as_deref());
+    inject_via_container(container_id, session_id, message)
 }
 
 // ── Container injection ───────────────────────────────────────────────────────
@@ -43,10 +44,10 @@ pub fn inject(task: &Task, message: &str) -> Result<()> {
 /// Strategy:
 /// 1. Kill any active interactive attach sessions (conmon --exec-attach) for
 ///    this container, to avoid conflicting conversations.
-/// 2. Run `claude --continue` non-interactively via `podman exec -i`, piping
-///    the message through stdin. Claude handles piped stdin fine and produces
-///    a single response turn.
-fn inject_via_container(container_id: &str, message: &str) -> Result<()> {
+/// 2. Run `claude --resume <session_id>` (or `--continue` if no session ID is
+///    stored) non-interactively via `podman exec -i`, piping the message through
+///    stdin. Claude handles piped stdin fine and produces a single response turn.
+fn inject_via_container(container_id: &str, session_id: Option<&str>, message: &str) -> Result<()> {
     let short = &container_id[..container_id.len().min(12)];
 
     // Kill any interactive attach sessions so there's no conflict.
@@ -54,18 +55,26 @@ fn inject_via_container(container_id: &str, message: &str) -> Result<()> {
 
     // Run claude non-interactively with the message on stdin.
     let claude = "/home/node/.local/bin/claude";
+    let resume_arg = if let Some(sid) = session_id {
+        vec!["--resume", sid]
+    } else {
+        vec!["--continue"]
+    };
+
+    let mut args = vec![
+        "exec", "-i",
+        "-e", "TERM=xterm-256color",
+        "-e", "PATH=/home/node/.local/bin:/usr/local/bin:/usr/bin:/bin",
+        "-e", "CLAUDE_CONFIG_DIR=/home/node/.claude",
+        "-w", "/workspace",
+        container_id,
+        claude,
+    ];
+    args.extend_from_slice(&resume_arg);
+    args.push("--dangerously-skip-permissions");
+
     let mut child = std::process::Command::new("podman")
-        .args([
-            "exec", "-i",
-            "-e", "TERM=xterm-256color",
-            "-e", "PATH=/home/node/.local/bin:/usr/local/bin:/usr/bin:/bin",
-            "-e", "CLAUDE_CONFIG_DIR=/home/node/.claude",
-            "-w", "/workspace",
-            container_id,
-            claude,
-            "--continue",
-            "--dangerously-skip-permissions",
-        ])
+        .args(&args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

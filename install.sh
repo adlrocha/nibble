@@ -209,13 +209,19 @@ USAGE
   agent-sandbox <command> [args]
 
 COMMANDS
-  <repo_path>        Spawn a sandboxed Claude Code agent for the repo.
-                     Claude starts automatically with --dangerously-skip-permissions
-                     inside a tmux session. Optionally pass a task description.
+  <repo_path>              Spawn a sandboxed Claude Code agent for the repo.
+                           Claude starts automatically with --dangerously-skip-permissions.
+                           The most recent Claude session for that repo is continued
+                           automatically (host or sandbox sessions, they share ~/.claude).
+                           Optionally pass a task description as a second argument.
+  <repo_path> --fresh      Spawn a sandbox with a brand-new Claude session.
+  <repo_path> --session-id <id>  Spawn a sandbox resuming a specific session.
 
-  attach <task-id>          Attach to Claude inside a running sandbox.
-                            Resumes the last conversation automatically.
-  attach <task-id> --fresh  Start a fresh Claude session instead of resuming.
+  attach <task-id>             Attach to Claude inside a running sandbox.
+                               Resumes the session stored at spawn time automatically.
+  attach <task-id> --fresh     Start a fresh Claude session instead of resuming.
+  attach <task-id> --kimi      Use Kimi as the LLM backend for this session
+                               (reads KIMI_BASE_URL and KIMI_API_KEY from env).
 
   list               List all sandboxes and their status.
 
@@ -235,8 +241,12 @@ COMMANDS
 EXAMPLES
   agent-sandbox ~/projects/myapp
   agent-sandbox ~/projects/myapp "Fix the login bug"
+  agent-sandbox ~/projects/myapp --fresh
+  agent-sandbox ~/projects/myapp --session-id abc12345
   agent-sandbox list
   agent-sandbox attach a1b2c3
+  agent-sandbox attach a1b2c3 --fresh
+  agent-sandbox attach a1b2c3 --kimi
   agent-sandbox kill a1b2c3
   agent-sandbox resume
   agent-sandbox --build-only
@@ -292,9 +302,17 @@ fi
 
 if [ "$1" = "attach" ]; then
     TASK_ID=$(require_task_id attach "${2:-}")
-    FRESH_FLAG=""
-    [ "${3:-}" = "--fresh" ] && FRESH_FLAG="--fresh"
-    exec "$AGENT_INBOX" _sandbox_attach "$TASK_ID" $FRESH_FLAG
+    shift 2
+    ATTACH_FLAGS=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --fresh) ATTACH_FLAGS="$ATTACH_FLAGS --fresh"; shift ;;
+            --kimi)  ATTACH_FLAGS="$ATTACH_FLAGS --kimi";  shift ;;
+            *) shift ;;
+        esac
+    done
+    # shellcheck disable=SC2086
+    exec "$AGENT_INBOX" _sandbox_attach "$TASK_ID" $ATTACH_FLAGS
 fi
 
 if [ "$1" = "inject" ]; then
@@ -316,15 +334,38 @@ if [ "$1" = "kill" ]; then
     exec "$AGENT_INBOX" _sandbox_kill "$TASK_ID"
 fi
 
-# Default: spawn a new sandbox for the given repo path
+# Default: spawn a new sandbox for the given repo path.
+# Supported flags: --fresh, --session-id <id>, and a trailing task description.
 REPO_PATH="$1"
-TASK_DESC="${2:-}"
+shift
+TASK_DESC=""
+FRESH_FLAG=""
+SESSION_ID_FLAG=""
 
-if [ -n "$TASK_DESC" ]; then
-    exec "$AGENT_INBOX" _sandbox_spawn "$REPO_PATH" --task "$TASK_DESC"
-else
-    exec "$AGENT_INBOX" _sandbox_spawn "$REPO_PATH"
-fi
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --fresh)
+            FRESH_FLAG="--fresh"
+            shift
+            ;;
+        --session-id)
+            SESSION_ID_FLAG="--session-id $2"
+            shift 2
+            ;;
+        *)
+            TASK_DESC="$1"
+            shift
+            ;;
+    esac
+done
+
+SPAWN_ARGS="$REPO_PATH"
+[ -n "$TASK_DESC" ]       && SPAWN_ARGS="$SPAWN_ARGS --task $TASK_DESC"
+[ -n "$FRESH_FLAG" ]      && SPAWN_ARGS="$SPAWN_ARGS $FRESH_FLAG"
+[ -n "$SESSION_ID_FLAG" ] && SPAWN_ARGS="$SPAWN_ARGS $SESSION_ID_FLAG"
+
+# shellcheck disable=SC2086
+exec "$AGENT_INBOX" _sandbox_spawn $SPAWN_ARGS
 SCRIPT
 chmod +x "$BIN_DIR/agent-sandbox"
 ok "agent-sandbox convenience script installed"

@@ -98,6 +98,12 @@ pub enum Commands {
         task: Option<String>,
         #[arg(long, default_value = "agent-inbox-sandbox:latest")]
         image: String,
+        /// Always start a fresh Claude session (no --continue / --resume)
+        #[arg(long)]
+        fresh: bool,
+        /// Resume a specific Claude session ID instead of auto-detecting
+        #[arg(long)]
+        session_id: Option<String>,
     },
 
     /// [internal] List sandboxes
@@ -111,6 +117,9 @@ pub enum Commands {
         /// Start a fresh session instead of resuming the last conversation
         #[arg(long)]
         fresh: bool,
+        /// Use Kimi as the LLM backend (reads KIMI_BASE_URL and KIMI_API_KEY from host env)
+        #[arg(long)]
+        kimi: bool,
     },
 
     /// [internal] Kill a sandbox

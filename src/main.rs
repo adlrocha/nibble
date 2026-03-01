@@ -267,14 +267,14 @@ fn main() -> Result<()> {
 
         // ── Internal sandbox subcommands (invoked by agent-sandbox script) ────
 
-        Some(Commands::SandboxSpawn { repo_path, task, image }) => {
-            cmd_sandbox_spawn(&db, repo_path, task, image)?;
+        Some(Commands::SandboxSpawn { repo_path, task, image, fresh, session_id }) => {
+            cmd_sandbox_spawn(&db, repo_path, task, image, fresh, session_id)?;
         }
         Some(Commands::SandboxList) => {
             cmd_sandbox_list(&db)?;
         }
-        Some(Commands::SandboxAttach { task_id, fresh }) => {
-            cmd_sandbox_attach(&db, task_id, fresh)?;
+        Some(Commands::SandboxAttach { task_id, fresh, kimi }) => {
+            cmd_sandbox_attach(&db, task_id, fresh, kimi)?;
         }
         Some(Commands::SandboxKill { task_id, all }) => {
             if all {
@@ -318,12 +318,55 @@ fn main() -> Result<()> {
 
 // ── Sandbox command handlers ──────────────────────────────────────────────────
 
+/// Find the most recent Claude Code session for a given repo path.
+///
+/// Claude stores sessions under ~/.claude/projects/<url-encoded-path>/*.jsonl.
+/// We look for the file with the most recent modification time and return its
+/// stem (filename without extension) as the session ID.
+///
+/// Both host sessions and previous sandbox sessions are stored here because all
+/// sandboxes mount the same ~/.claude directory read-write.
+fn find_latest_session_for_repo(repo_path: &str) -> Option<String> {
+    let home = dirs::home_dir()?;
+    let projects_dir = home.join(".claude").join("projects");
+
+    // Claude encodes the absolute path with each '/' replaced by '-'
+    // and the leading '/' dropped, e.g. /home/user/myapp → -home-user-myapp
+    // Try to canonicalize the repo path first for a reliable match.
+    let abs_path = std::fs::canonicalize(repo_path)
+        .unwrap_or_else(|_| std::path::PathBuf::from(repo_path));
+    let encoded = abs_path.to_string_lossy().replace('/', "-");
+
+    let session_dir = projects_dir.join(&encoded);
+    if !session_dir.exists() {
+        return None;
+    }
+
+    // Find the most recently modified .jsonl file in that directory.
+    std::fs::read_dir(&session_dir)
+        .ok()?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            if path.extension()?.to_str()? != "jsonl" {
+                return None;
+            }
+            let mtime = entry.metadata().ok()?.modified().ok()?;
+            let stem = path.file_stem()?.to_string_lossy().to_string();
+            Some((mtime, stem))
+        })
+        .max_by_key(|(mtime, _)| *mtime)
+        .map(|(_, stem)| stem)
+}
+
 /// Spawn a sandboxed Claude Code agent.
 fn cmd_sandbox_spawn(
     db: &Database,
     repo_path: String,
     task_desc: Option<String>,
     image: String,
+    fresh: bool,
+    session_id: Option<String>,
 ) -> Result<()> {
     let repo = PathBuf::from(&repo_path);
     if !repo.exists() {
@@ -380,6 +423,23 @@ fn cmd_sandbox_spawn(
 
     let title = task_desc.unwrap_or_else(|| format!("[{}:sandbox]", repo_name));
 
+    // Determine which session to continue in the sandbox.
+    // Priority: explicit --session-id > auto-detect from repo > none (fresh start).
+    let resolved_session_id = if fresh {
+        None
+    } else if let Some(sid) = session_id {
+        println!("  Session:   continuing {}", &sid[..sid.len().min(8)]);
+        Some(sid)
+    } else {
+        // Auto-detect: find the most recent Claude session associated with this
+        // repo path by scanning ~/.claude/projects/.
+        find_latest_session_for_repo(&repo_path)
+            .map(|sid| {
+                println!("  Session:   auto-detected {} (use --fresh to start new)", &sid[..sid.len().min(8)]);
+                sid
+            })
+    };
+
     let mut task = Task::new(task_id.clone(), "claude_code".to_string(), title, None, None);
     task.sandbox_type = SandboxType::Podman;
     task.container_id = Some(info.id.clone());
@@ -387,7 +447,7 @@ fn cmd_sandbox_spawn(
     task.context = Some(TaskContext {
         url: None,
         project_path: Some(repo_path.clone()),
-        session_id: None,
+        session_id: resolved_session_id,
         extra: HashMap::new(),
     });
     db.insert_task(&task)?;
@@ -476,7 +536,7 @@ fn cmd_sandbox_list(db: &Database) -> Result<()> {
 /// By default tries `--continue` to resume the last conversation.
 /// Falls back to a fresh session automatically if no conversation exists.
 /// Pass `fresh = true` to always start a new session.
-fn cmd_sandbox_attach(db: &Database, task_id: String, fresh: bool) -> Result<()> {
+fn cmd_sandbox_attach(db: &Database, task_id: String, fresh: bool, kimi: bool) -> Result<()> {
     let task = db
         .get_task_by_id(&task_id)?
         .ok_or_else(|| anyhow::anyhow!("Task not found: {}", task_id))?;
@@ -500,23 +560,51 @@ fn cmd_sandbox_attach(db: &Database, task_id: String, fresh: bool) -> Result<()>
     let shell_cmd = if fresh {
         format!("cd /workspace && {claude}")
     } else {
-        format!("cd /workspace && {claude} --continue 2>&1 || {claude}")
+        // Use the session ID stored on the task (set at spawn time from the host-path
+        // session lookup, or updated later by the Stop hook).
+        // Do NOT fall back to --continue: that resumes the last global session which
+        // has no repo awareness and would bleed sessions across sandboxes.
+        let session_id = task.context.as_ref().and_then(|c| c.session_id.as_deref());
+        if let Some(sid) = session_id {
+            format!("cd /workspace && {claude} --resume {sid} 2>&1 || {claude}")
+        } else {
+            format!("cd /workspace && {claude}")
+        }
     };
+
+    // Build podman exec args, injecting Kimi credentials if requested.
+    // KIMI_BASE_URL and KIMI_API_KEY must be set in the host environment
+    // (e.g. via the claude-kimi alias definition in ~/.zshrc).
+    let mut podman_args: Vec<String> = vec![
+        "exec".into(), "-it".into(),
+        "-e".into(), "TERM=xterm-256color".into(),
+        "-e".into(), "PATH=/home/node/.local/bin:/usr/local/bin:/usr/bin:/bin".into(),
+        "-e".into(), "CLAUDE_CONFIG_DIR=/home/node/.claude".into(),
+    ];
+
+    if kimi {
+        let base_url = std::env::var("KIMI_BASE_URL")
+            .context("--kimi requires KIMI_BASE_URL to be set in the host environment")?;
+        let api_key = std::env::var("KIMI_API_KEY")
+            .context("--kimi requires KIMI_API_KEY to be set in the host environment")?;
+        eprintln!("Using Kimi backend ({})", base_url);
+        podman_args.extend([
+            "-e".into(), format!("ANTHROPIC_BASE_URL={}", base_url),
+            "-e".into(), format!("ANTHROPIC_API_KEY={}", api_key),
+        ]);
+    }
+
+    podman_args.extend([
+        "-w".into(), "/workspace".into(),
+        container_id.into(),
+        "/bin/bash".into(), "-c".into(), shell_cmd,
+    ]);
 
     eprintln!("Attaching to sandbox {}…", container_id);
     eprintln!("(Exit Claude or press Ctrl+C to detach — the container keeps running)");
 
     let err = std::os::unix::process::CommandExt::exec(
-        std::process::Command::new("podman")
-            .args([
-                "exec", "-it",
-                "-e", "TERM=xterm-256color",
-                "-e", "PATH=/home/node/.local/bin:/usr/local/bin:/usr/bin:/bin",
-                "-e", "CLAUDE_CONFIG_DIR=/home/node/.claude",
-                "-w", "/workspace",
-                container_id,
-                "/bin/bash", "-c", &shell_cmd,
-            ]),
+        std::process::Command::new("podman").args(&podman_args),
     );
     anyhow::bail!("Failed to exec podman: {}", err)
 }
