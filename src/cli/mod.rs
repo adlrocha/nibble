@@ -75,26 +75,6 @@ pub enum Commands {
         pid: i32,
     },
 
-    /// Manage sandboxed Claude Code agents (proxies to agent-sandbox)
-    ///
-    /// All arguments are forwarded directly to `agent-sandbox`.
-    /// Run `agent-inbox sandbox --help` or `agent-sandbox --help` for full usage.
-    ///
-    /// Examples:
-    ///   agent-inbox sandbox /path/to/repo
-    ///   agent-inbox sandbox list
-    ///   agent-inbox sandbox attach <task-id>
-    ///   agent-inbox sandbox kill <task-id>
-    ///   agent-inbox sandbox resume
-    ///   agent-inbox sandbox --build-only
-    ///   agent-inbox sandbox --rebuild
-    #[command(allow_hyphen_values = true)]
-    Sandbox {
-        /// Arguments forwarded to agent-sandbox
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
     // ── Internal sandbox subcommands (called by agent-sandbox script) ──────────
 
     /// [internal] Spawn a sandboxed agent
@@ -117,7 +97,7 @@ pub enum Commands {
     #[command(hide = true, name = "_sandbox_list")]
     SandboxList,
 
-    /// [internal] Attach to a sandbox's Claude tmux session
+    /// [internal] Attach to a sandbox container
     #[command(hide = true, name = "_sandbox_attach")]
     SandboxAttach {
         task_id: String,

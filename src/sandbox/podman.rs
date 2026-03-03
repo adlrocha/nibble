@@ -362,16 +362,6 @@ impl Sandbox for PodmanSandbox {
             ));
         }
 
-        // Mount host SSH keys read-only so the sandbox can push/pull from GitHub.
-        // Read-only prevents the container from modifying key files, but note that
-        // key material is still readable inside the container — avoid mounting your
-        // primary keys if prompt-injection attacks are a concern.
-        let ssh_dir = home_dir.join(".ssh");
-        if ssh_dir.exists() {
-            args.push("-v".to_string());
-            args.push(format!("{}:/home/node/.ssh:ro", ssh_dir.display()));
-        }
-
         // Mount host gitconfig read-only so git identity and settings carry over.
         let gitconfig = home_dir.join(".gitconfig");
         if gitconfig.exists() {
@@ -452,34 +442,6 @@ impl Sandbox for PodmanSandbox {
         }
 
         self.parse_container_status(String::from_utf8_lossy(&output.stdout).as_ref())
-    }
-
-    /// Inject a message into the Claude tmux session inside the container.
-    fn inject_input(&self, container_id: &str, message: &str) -> Result<()> {
-        if !container_id.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
-            bail!("Invalid container_id: '{}'", container_id);
-        }
-
-        let output = Command::new("podman")
-            .args([
-                "exec",
-                container_id,
-                "/usr/bin/tmux",
-                "send-keys",
-                "-t",
-                "claude",
-                message,
-                "Enter",
-            ])
-            .output()
-            .context("Failed to inject input via tmux send-keys")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("tmux send-keys failed: {}", stderr.trim());
-        }
-
-        Ok(())
     }
 
     fn list(&self) -> Result<Vec<ContainerInfo>> {

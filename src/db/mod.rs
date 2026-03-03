@@ -324,8 +324,12 @@ impl Database {
     pub fn cleanup_old_completed(&self, older_than_secs: i64) -> Result<usize> {
         let cutoff = Utc::now().timestamp() - older_than_secs;
 
+        // Sandbox tasks are long-lived and only cleaned up when explicitly killed.
+        // Excluding them here prevents the 1-hour retention from erasing DB records
+        // for containers that are still running (which would break Telegram routing).
         let affected = self.conn.execute(
-            "DELETE FROM tasks WHERE status IN ('completed', 'exited') AND completed_at < ?1",
+            "DELETE FROM tasks WHERE status IN ('completed', 'exited') \
+             AND completed_at < ?1 AND sandbox_type = 'none'",
             params![cutoff],
         )?;
 
@@ -353,6 +357,17 @@ impl Database {
             )
             .optional()?;
         Ok(task_id)
+    }
+
+    /// Return true if a bot message was sent for `task_id` at or after `since_unix`.
+    /// Used by the safety-net logic to detect whether the Stop hook already notified.
+    pub fn has_bot_message_since(&self, task_id: &str, since_unix: i64) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM bot_messages WHERE task_id = ?1 AND sent_at >= ?2",
+            params![task_id, since_unix],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
     }
 
     /// Delete bot_messages older than the given retention period (same cadence as tasks cleanup).

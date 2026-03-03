@@ -175,11 +175,11 @@ fi
 # ── 5. Sandbox image ─────────────────────────────────────────────────────────
 step "Building sandbox image (node:20-slim + claude-code)"
 
-if agent-inbox sandbox --build-only 2>/dev/null; then
+if agent-inbox _sandbox_build 2>/dev/null; then
     ok "Sandbox image ready: agent-inbox-sandbox:latest"
 else
     warn "Sandbox image build failed or agent-inbox not yet in PATH."
-    warn "Run after install:  agent-inbox sandbox --build-only"
+    warn "Run after install:  agent-sandbox --build-only"
 fi
 
 # ── 5a. Install agent-sandbox convenience script ──────────────────────────────
@@ -454,8 +454,8 @@ echo "  Test notify: agent-inbox notify --message 'install test' --attention"
 echo ""
 echo -e "${BOLD}Sandbox usage:${NC}"
 echo "  Start agent:  agent-sandbox /path/to/repo"
-echo "  List agents:  agent-inbox list"
-echo "  Watch agents: agent-inbox watch"
-echo "  Kill agent:   agent-inbox kill <task-id>"
-echo "  Attach shell: podman exec -it agent-inbox-<task-id> bash"
+echo "  List agents:  agent-sandbox list"
+echo "  Attach:       agent-sandbox attach <task-id>"
+echo "  Kill agent:   agent-sandbox kill <task-id>"
+echo "  Watch:        agent-inbox watch"
 echo ""

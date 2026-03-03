@@ -203,9 +203,31 @@ fn handle_message(
 
     eprintln!("[listen] Text message from {from_id}: {:?}", &text[..text.len().min(80)]);
 
-    // Priority 0: /sandboxes command — list running sandboxes with reply buttons.
+    // Priority 0a: /sandboxes command — list running sandboxes with reply buttons.
     if text.trim() == "/sandboxes" {
         return handle_sandboxes_command(config, db, chat_id);
+    }
+
+    // Priority 0b: /spawn <repo_path> [task description]
+    let trimmed = text.trim_start();
+    let spawn_args = if trimmed == "/spawn" {
+        Some("")
+    } else if let Some(rest) = trimmed.strip_prefix("/spawn ") {
+        Some(rest)
+    } else {
+        None
+    };
+    if let Some(args) = spawn_args {
+        let args = args.trim();
+        let (repo_path, task_desc) = if args.is_empty() {
+            (None, None)
+        } else {
+            let mut parts = args.splitn(2, char::is_whitespace);
+            let path = parts.next().map(str::trim).filter(|s| !s.is_empty());
+            let desc = parts.next().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+            (path.map(str::to_string), desc)
+        };
+        return handle_spawn_command(config, db, chat_id, repo_path, task_desc);
     }
 
     // Priority 1: pending-reply state persisted in DB (survives daemon restarts).
@@ -280,6 +302,77 @@ fn handle_sandboxes_command(
     Ok(())
 }
 
+fn handle_spawn_command(
+    config: &TelegramConfig,
+    _db: &Database,
+    chat_id: i64,
+    repo_path: Option<String>,
+    task_desc: Option<String>,
+) -> Result<()> {
+    let repo_path = match repo_path {
+        Some(p) => p,
+        None => {
+            send_notice(
+                config,
+                chat_id,
+                "Usage: `/spawn /path/to/repo [optional task description]`",
+            )?;
+            return Ok(());
+        }
+    };
+
+    let repo_label = std::path::Path::new(&repo_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(&repo_path)
+        .to_string();
+
+    send_notice(
+        config,
+        chat_id,
+        &format!("⏳ Spawning sandbox for `{repo_label}`…"),
+    )?;
+
+    let config_clone = config.clone();
+    let db_path = crate::db::default_db_path();
+
+    thread::spawn(move || {
+        // Open a fresh DB connection for the background thread.
+        let db = match crate::db::Database::open(&db_path) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("[spawn] Could not open DB: {e:#}");
+                let _ = telegram::send(&config_clone, &format!("❌ Spawn failed: {e}"));
+                return;
+            }
+        };
+
+        match crate::cmd_sandbox_spawn(
+            &db,
+            repo_path,
+            task_desc,
+            "agent-inbox-sandbox:latest".to_string(),
+            false, // fresh
+            None,  // session_id — auto-detect
+        ) {
+            Ok(task_id) => {
+                let short_id = &task_id[..task_id.len().min(8)];
+                let msg = format!(
+                    "✅ Sandbox started for `{repo_label}`\nTask ID: `{short_id}`\n\nUse `/sandboxes` to interact."
+                );
+                let _ = telegram::send_with_reply_button(&config_clone, &msg, &task_id)
+                    .map(|msg_id| db.insert_bot_message(msg_id, &task_id));
+            }
+            Err(e) => {
+                eprintln!("[spawn] cmd_sandbox_spawn failed: {e:#}");
+                let _ = telegram::send(&config_clone, &format!("❌ Spawn failed: {e}"));
+            }
+        }
+    });
+
+    Ok(())
+}
+
 fn route_text_to_task(
     task_id: &str,
     text: &str,
@@ -314,6 +407,12 @@ fn route_text_to_task(
     Ok(())
 }
 
+/// How long to wait after the inject process exits before checking whether the
+/// Stop hook has already sent a notification.  The Stop hook runs as a separate
+/// process launched by Claude Code immediately after it finishes — giving it a
+/// few seconds to write its bot_message row prevents a false safety-net fire.
+const STOP_HOOK_GRACE_SECS: u64 = 15;
+
 /// Run inject inside a background thread, sending periodic heartbeats and a
 /// safety-net completion notification when the Claude process exits.
 fn inject_with_heartbeat(
@@ -323,9 +422,11 @@ fn inject_with_heartbeat(
     task_id: &str,
     db_path: &std::path::Path,
 ) {
-    // Snapshot the attention_reason before the turn so we can detect whether
-    // the Stop hook updated it (= Stop hook ran successfully).
-    let pre_turn_attention = task.attention_reason.clone();
+    // Record the Unix timestamp just before we start so that we can later ask
+    // "did a bot_message get inserted for this task after we started?"  That is
+    // a more reliable proxy for "did the Stop hook send the notification" than
+    // comparing attention_reason, which may not be updated on every turn.
+    let turn_start_unix = chrono::Utc::now().timestamp();
 
     // Spawn the Claude process.
     let mut child = match agent_input::inject_returning_child(task, text) {
@@ -367,10 +468,16 @@ fn inject_with_heartbeat(
     let elapsed = start.elapsed();
     eprintln!("[listen] inject done for task {short_id} in {}s", elapsed.as_secs());
 
-    // Safety-net: if the Stop hook already fired and stored a last-message, it
-    // also sent the notification — don't double-notify.  But if attention_reason
-    // is unchanged (Stop hook timed out or container crashed), send the final
-    // notification ourselves so the user always gets a response.
+    // Give the Stop hook time to run and record its bot_message before we check.
+    // The hook is a separate process spawned by Claude Code right after it exits,
+    // so the inject child may exit slightly before the hook completes.
+    eprintln!("[listen] waiting {STOP_HOOK_GRACE_SECS}s for Stop hook…");
+    thread::sleep(Duration::from_secs(STOP_HOOK_GRACE_SECS));
+
+    // Safety-net: check whether the Stop hook already sent a Telegram message
+    // for this task since the turn started.  If it did, suppress the fallback
+    // so the user only gets one notification.  If it didn't (hook timed out,
+    // container crashed, or network error), send the fallback ourselves.
     let db = match Database::open(db_path) {
         Ok(d) => d,
         Err(e) => {
@@ -379,17 +486,13 @@ fn inject_with_heartbeat(
         }
     };
 
-    let current_task = match db.get_task_by_id(task_id) {
-        Ok(Some(t)) => t,
-        _ => return,
-    };
+    let hook_notified = db
+        .has_bot_message_since(task_id, turn_start_unix)
+        .unwrap_or(false);
 
-    let stop_hook_fired = current_task.attention_reason != pre_turn_attention
-        && current_task.attention_reason.is_some();
-
-    if !stop_hook_fired {
-        // Stop hook didn't update the message — send a generic completion ping.
-        eprintln!("[listen] safety-net: Stop hook didn't fire for {short_id}, sending fallback notification");
+    if !hook_notified {
+        // Stop hook didn't send a notification — send a generic completion ping.
+        eprintln!("[listen] safety-net: Stop hook didn't notify for {short_id}, sending fallback");
         let elapsed_str = if elapsed.as_secs() < 60 {
             format!("{}s", elapsed.as_secs())
         } else {

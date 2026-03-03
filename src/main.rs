@@ -14,7 +14,7 @@ use cli::{Cli, Commands, ReportAction};
 use db::Database;
 use models::{SandboxConfig, SandboxType, Task, TaskContext, TaskStatus};
 use sandbox::podman::PodmanSandbox;
-use sandbox::Sandbox;
+use sandbox::{Sandbox, SandboxHealth};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -281,14 +281,6 @@ fn main() -> Result<()> {
                 let _ = db.insert_bot_message(msg_id, tid);
             }
         }
-        Some(Commands::Sandbox { args }) => {
-            // Proxy to agent-sandbox so `agent-inbox sandbox *` and `agent-sandbox *` are identical.
-            let err = std::os::unix::process::CommandExt::exec(
-                std::process::Command::new("agent-sandbox").args(&args),
-            );
-            anyhow::bail!("Failed to exec agent-sandbox: {}", err);
-        }
-
         // ── Internal sandbox subcommands (invoked by agent-sandbox script) ────
 
         Some(Commands::SandboxSpawn { repo_path, task, image, fresh, session_id }) => {
@@ -365,50 +357,47 @@ fn find_latest_session_for_repo(repo_path: &str) -> Option<String> {
         .unwrap_or_else(|_| std::path::PathBuf::from(repo_path));
     let encoded = abs_path.to_string_lossy().replace('/', "-");
 
-    // Also check the container-side path: the sandbox always mounts the repo at
-    // /workspace, so container sessions are stored under "-workspace" regardless
-    // of the host repo path.  We need to check both dirs and pick the newest.
-    let candidate_dirs: Vec<_> = [encoded.as_str(), "-workspace"]
-        .iter()
-        .map(|enc| projects_dir.join(enc))
-        .filter(|d| d.exists())
-        .collect();
-
-    if candidate_dirs.is_empty() {
+    // Only search the host-path encoded directory.
+    //
+    // We intentionally do NOT fall back to "-workspace" here. All sandbox
+    // containers mount their repo at /workspace, so every sandbox session is
+    // stored under the same "-workspace" directory regardless of which repo was
+    // mounted. Including it would cause spawning a sandbox for repo A to resume
+    // the most recent session from repo B (or any other repo that was previously
+    // sandboxed). After the first attach the Stop hook writes the real session ID
+    // back via `report session-id`, so future attaches use the stored value
+    // directly and never reach this function.
+    let candidate_dir = projects_dir.join(&encoded);
+    if !candidate_dir.exists() {
         return None;
     }
 
-    // Find the most recently modified .jsonl file across all candidate dirs.
-    candidate_dirs
-        .iter()
-        .flat_map(|dir| {
-            std::fs::read_dir(dir)
-                .into_iter()
-                .flatten()
-                .flatten()
-                .filter_map(|entry| {
-                    let path = entry.path();
-                    if path.extension()?.to_str()? != "jsonl" {
-                        return None;
-                    }
-                    let mtime = entry.metadata().ok()?.modified().ok()?;
-                    let stem = path.file_stem()?.to_string_lossy().to_string();
-                    Some((mtime, stem))
-                })
+    // Find the most recently modified .jsonl file in the host-path directory.
+    std::fs::read_dir(&candidate_dir)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension()?.to_str()? != "jsonl" {
+                return None;
+            }
+            let mtime = entry.metadata().ok()?.modified().ok()?;
+            let stem = path.file_stem()?.to_string_lossy().to_string();
+            Some((mtime, stem))
         })
         .max_by_key(|(mtime, _)| *mtime)
         .map(|(_, stem)| stem)
 }
 
-/// Spawn a sandboxed Claude Code agent.
-fn cmd_sandbox_spawn(
+/// Spawn a sandboxed Claude Code agent.  Returns the new task_id on success.
+pub(crate) fn cmd_sandbox_spawn(
     db: &Database,
     repo_path: String,
     task_desc: Option<String>,
     image: String,
     fresh: bool,
     session_id: Option<String>,
-) -> Result<()> {
+) -> Result<String> {
     let repo = PathBuf::from(&repo_path);
     if !repo.exists() {
         anyhow::bail!("Repository path does not exist: {}", repo_path);
@@ -462,6 +451,22 @@ fn cmd_sandbox_spawn(
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
         .unwrap_or_else(|| repo_path.clone());
 
+    // Detect project toolchains and write a CLAUDE.md into the container so
+    // Claude knows it is in a sandbox and how to install/run the project.
+    let toolchains = detect_toolchains(&repo);
+    let claude_md = build_sandbox_claude_md(&repo_name, &toolchains);
+    match inject_sandbox_claude_md(&info.id, &claude_md) {
+        Ok(()) => {
+            if toolchains.is_empty() {
+                println!("  Context:   CLAUDE.md written (no toolchain detected)");
+            } else {
+                let names: Vec<&str> = toolchains.iter().map(|(e, _, _)| *e).collect();
+                println!("  Context:   CLAUDE.md written (detected: {})", names.join(", "));
+            }
+        }
+        Err(e) => eprintln!("  Warning:   Could not write CLAUDE.md: {e:#}"),
+    }
+
     let title = task_desc.unwrap_or_else(|| format!("[{}:sandbox]", repo_name));
 
     // Determine which session to continue in the sandbox.
@@ -510,7 +515,7 @@ fn cmd_sandbox_spawn(
     println!("  agent-sandbox attach {} --fresh   (start a new conversation)", short_id);
     println!("  (The container keeps running after you exit — re-attach any time)");
 
-    Ok(())
+    Ok(task_id)
 }
 
 /// List all tracked sandboxes, auto-cleaning gone entries.
@@ -525,19 +530,21 @@ fn cmd_sandbox_list(db: &Database) -> Result<()> {
 
     let sandbox = PodmanSandbox::new();
 
-    println!("{:<20} {:<18} {:<10} {}", "TASK ID", "STARTED", "STATUS", "REPO");
-    println!("{}", "─".repeat(80));
+    println!("{:<20} {:<18} {:<12} {}", "TASK ID", "STARTED", "STATUS", "REPO");
+    println!("{}", "─".repeat(82));
 
     let mut any_gone = false;
     for (task_id, container_name, repo_path, _created) in &states {
-        let status = match sandbox.status(container_name) {
-            Ok(sandbox::ContainerStatus::Running) => "running",
-            Ok(sandbox::ContainerStatus::Stopped) => "stopped",
-            Ok(sandbox::ContainerStatus::Paused)  => "paused",
-            _ => {
+        let health = sandbox.health_check(container_name);
+
+        let status = match health {
+            SandboxHealth::Healthy  => "healthy",
+            SandboxHealth::Degraded => "degraded",
+            SandboxHealth::Dead => {
+                // Container is gone — prune state silently
                 any_gone = true;
                 let _ = db.delete_container_state(task_id);
-                continue; // skip gone entries silently
+                continue;
             }
         };
 
@@ -562,7 +569,7 @@ fn cmd_sandbox_list(db: &Database) -> Result<()> {
             .unwrap_or_else(|| container_name.chars().take(17).collect());
 
         let short_id = &task_id[..task_id.len().min(8)];
-        println!("{:<20} {:<18} {:<10} {}", short_id, started, status, repo_path);
+        println!("{:<20} {:<18} {:<12} {}", short_id, started, status, repo_path);
     }
 
     if any_gone {
@@ -641,7 +648,7 @@ fn cmd_sandbox_attach(db: &Database, task_id: String, fresh: bool, kimi: bool) -
         "/bin/bash".into(), "-c".into(), shell_cmd,
     ]);
 
-    eprintln!("Attaching to sandbox {}…", container_id);
+    eprintln!("Attaching to sandbox {} ({})…", task.title, container_id);
     eprintln!("(Exit Claude or press Ctrl+C to detach — the container keeps running)");
 
     let err = std::os::unix::process::CommandExt::exec(
@@ -748,18 +755,27 @@ fn cmd_sandbox_resume(db: &Database, all: bool) -> Result<()> {
     let mut stale = 0;
 
     for (task_id, container_name, repo_path, _) in &states {
-        match sandbox.status(container_name) {
-            Ok(sandbox::ContainerStatus::Running) => {
+        match sandbox.health_check(container_name) {
+            SandboxHealth::Healthy => {
                 if let Ok(Some(mut task)) = db.get_task_by_id(task_id) {
                     if task.status != TaskStatus::Running {
                         task.set_running();
                         let _ = db.update_task(&task);
                     }
                 }
-                println!("  Running: {} ({})", container_name, task_id);
+                println!("  Healthy: {} ({})", container_name, task_id);
                 resumed += 1;
             }
-            _ => {
+            SandboxHealth::Degraded => {
+                // Container alive but Claude session gone — keep container, mark task exited.
+                if let Ok(Some(mut task)) = db.get_task_by_id(task_id) {
+                    task.set_exited(None);
+                    let _ = db.update_task(&task);
+                }
+                println!("  Degraded: {} (container up, Claude session gone, repo: {})", container_name, repo_path);
+                stale += 1;
+            }
+            SandboxHealth::Dead => {
                 if let Ok(Some(mut task)) = db.get_task_by_id(task_id) {
                     task.set_exited(None);
                     let _ = db.update_task(&task);
@@ -800,24 +816,48 @@ pub(crate) fn prune_stale_tasks(db: &Database) -> Result<usize> {
         }
     }
 
-    // 2. Sandbox tasks: verify the container is still running via Podman.
+    // 2. Sandbox tasks: health-check each container (not just running/stopped).
+    //    - Dead      → container is gone; clean up state and mark task exited.
+    //    - Degraded  → container is running but exec fails (zombie/OOM/etc.);
+    //                  mark the DB task as exited so the dashboard reflects reality.
+    //    - Healthy   → all good, leave it alone.
     let states = db.list_container_states()?;
     if !states.is_empty() {
         let sandbox = PodmanSandbox::new();
         for (task_id, container_name, _, _) in &states {
-            let still_running = matches!(
-                sandbox.status(container_name),
-                Ok(sandbox::ContainerStatus::Running)
-            );
-            if !still_running {
-                // Container gone — clean up state and mark task exited.
-                let _ = db.delete_container_state(task_id);
-                if let Ok(Some(mut task)) = db.get_task_by_id(task_id) {
-                    if task.status == TaskStatus::Running {
-                        task.set_exited(None);
-                        let _ = db.update_task(&task);
-                        eprintln!("[prune] Sandbox {} gone → exited task {}", container_name, &task_id[..8.min(task_id.len())]);
-                        pruned += 1;
+            match sandbox.health_check(container_name) {
+                SandboxHealth::Healthy => {}
+                SandboxHealth::Dead => {
+                    // Container is gone — clean up state and mark task exited.
+                    let _ = db.delete_container_state(task_id);
+                    if let Ok(Some(mut task)) = db.get_task_by_id(task_id) {
+                        if task.status == TaskStatus::Running {
+                            task.set_exited(None);
+                            let _ = db.update_task(&task);
+                            eprintln!(
+                                "[prune] Sandbox {} dead → exited task {}",
+                                container_name,
+                                &task_id[..8.min(task_id.len())]
+                            );
+                            pruned += 1;
+                        }
+                    }
+                }
+                SandboxHealth::Degraded => {
+                    // Container alive but Claude session has exited — mark the
+                    // task exited in the DB so the dashboard is accurate, but
+                    // leave the container running so the user can re-attach.
+                    if let Ok(Some(mut task)) = db.get_task_by_id(task_id) {
+                        if task.status == TaskStatus::Running {
+                            task.set_exited(None);
+                            let _ = db.update_task(&task);
+                            eprintln!(
+                                "[prune] Sandbox {} degraded (Claude session gone) → exited task {}",
+                                container_name,
+                                &task_id[..8.min(task_id.len())]
+                            );
+                            pruned += 1;
+                        }
                     }
                 }
             }
@@ -825,6 +865,172 @@ pub(crate) fn prune_stale_tasks(db: &Database) -> Result<usize> {
     }
 
     Ok(pruned)
+}
+
+// ── Sandbox context injection ─────────────────────────────────────────────────
+
+/// Detect the project toolchain from files present in the repo directory.
+///
+/// Returns a list of (ecosystem, install_command, run_hint) tuples for every
+/// recognised manifest found so Claude can install deps and run the project
+/// without guessing.
+fn detect_toolchains(repo_path: &std::path::Path) -> Vec<(&'static str, &'static str, &'static str)> {
+    let checks: &[(&str, &str, &str, &str)] = &[
+        // (manifest file, ecosystem label, install cmd, run hint)
+        ("package.json",    "Node.js",  "npm install",          "npm start / npm test / npm run dev"),
+        ("yarn.lock",       "Node.js",  "yarn install",         "yarn start / yarn test / yarn dev"),
+        ("pnpm-lock.yaml",  "Node.js",  "pnpm install",         "pnpm start / pnpm test / pnpm dev"),
+        ("Cargo.toml",      "Rust",     "cargo build",          "cargo run / cargo test"),
+        ("go.mod",          "Go",       "go mod download",      "go run . / go test ./..."),
+        ("requirements.txt","Python",   "pip install -r requirements.txt", "python main.py / pytest"),
+        ("pyproject.toml",  "Python",   "pip install -e .",     "python -m pytest / python -m <module>"),
+        ("Pipfile",         "Python",   "pipenv install",       "pipenv run python ... / pipenv run pytest"),
+        ("composer.json",   "PHP",      "composer install",     "php artisan serve / php -S localhost:8000"),
+        ("Gemfile",         "Ruby",     "bundle install",       "bundle exec rails s / bundle exec rspec"),
+        ("build.gradle",    "JVM",      "./gradlew build",      "./gradlew run / ./gradlew test"),
+        ("pom.xml",         "JVM",      "mvn install -DskipTests", "mvn exec:java / mvn test"),
+        ("mix.exs",         "Elixir",   "mix deps.get",         "mix run / mix test"),
+        ("Makefile",        "Make",     "make",                 "make run / make test"),
+    ];
+
+    // Deduplicate: if yarn.lock is present package.json will also be — prefer
+    // the more specific lock-file entry over the generic one.
+    let mut seen_ecosystems = std::collections::HashSet::new();
+    let mut results = Vec::new();
+
+    for (manifest, ecosystem, install, run_hint) in checks {
+        if repo_path.join(manifest).exists() && seen_ecosystems.insert(*ecosystem) {
+            results.push((*ecosystem, *install, *run_hint));
+        }
+    }
+
+    results
+}
+
+const CLAUDE_MD_BEGIN: &str = "<!-- agent-inbox:begin -->";
+const CLAUDE_MD_END: &str = "<!-- agent-inbox:end -->";
+
+/// Build the sandbox CLAUDE.md section that tells Claude it is running inside
+/// an isolated container and how to set up the project toolchain.
+///
+/// The returned string is wrapped in delimiters so `inject_sandbox_claude_md`
+/// can replace it in-place without touching any user-written content.
+fn build_sandbox_claude_md(repo_name: &str, toolchains: &[(&str, &str, &str)]) -> String {
+    let mut lines = vec![
+        "# Agent Inbox Sandbox".to_string(),
+        String::new(),
+        format!(
+            "You are running inside an isolated Podman sandbox container for the **{}** project.",
+            repo_name
+        ),
+        String::new(),
+        "## Environment".to_string(),
+        String::new(),
+        "- Working directory: `/workspace` (the project repo, mounted read-write)".to_string(),
+        "- You have full `sudo` access — install any system package with `apt-get install`".to_string(),
+        "- Ports are forwarded to the host: services on `localhost:3000`, `:8080`, etc. are reachable from outside".to_string(),
+        "- Internet access is available".to_string(),
+        "- Git is configured with the host user's identity and SSH keys".to_string(),
+        String::new(),
+    ];
+
+    if toolchains.is_empty() {
+        lines.push("## Toolchain".to_string());
+        lines.push(String::new());
+        lines.push("No recognised dependency manifest was found in the repo root.".to_string());
+        lines.push("Inspect the project structure and install any required tools before running or testing.".to_string());
+    } else {
+        lines.push("## Toolchain".to_string());
+        lines.push(String::new());
+        lines.push(
+            "The following dependency manifests were detected. \
+             Install dependencies before running or testing the project:"
+                .to_string(),
+        );
+        lines.push(String::new());
+        for (ecosystem, install_cmd, run_hint) in toolchains {
+            lines.push(format!("### {}", ecosystem));
+            lines.push(format!("- **Install:** `{}`", install_cmd));
+            lines.push(format!("- **Run/test:** `{}`", run_hint));
+            lines.push(String::new());
+        }
+        lines.push(
+            "Always install dependencies before attempting to build, run, or test the project. \
+             If a command fails due to missing tools, install them with `sudo apt-get install <package>` \
+             or the appropriate package manager."
+                .to_string(),
+        );
+    }
+
+    lines.push(String::new());
+    lines.push("## Important notes".to_string());
+    lines.push(String::new());
+    lines.push("- Prefer making small, focused changes and running tests after each one".to_string());
+    lines.push("- The container persists between sessions — installed packages and build artifacts are retained".to_string());
+    lines.push("- When you finish a task, summarise what you did clearly so the notification sent to the user is informative".to_string());
+
+    format!("{}\n{}\n{}", CLAUDE_MD_BEGIN, lines.join("\n"), CLAUDE_MD_END)
+}
+
+/// Write the sandbox section of `.claude/CLAUDE.md` inside the container.
+///
+/// - If the file does not exist, it is created with just the generated block.
+/// - If the file exists and already contains the agent-inbox delimiters, only
+///   the block between them is replaced — any user-written content outside the
+///   markers is preserved verbatim.
+/// - If the file exists but has no delimiters (user wrote it by hand), the
+///   generated block is appended so Claude sees both.
+fn inject_sandbox_claude_md(container_id: &str, content: &str) -> Result<()> {
+    // Write the new content to a temp file first, then use a small python
+    // script inside the container to do the marker-aware merge.  Python is
+    // available in the node:20-slim image (via apt), but we can't rely on it.
+    // Instead we do everything with bash + awk, which is always present.
+    //
+    // The awk script removes everything between the markers (inclusive) and
+    // inserts the new block in their place.  If no markers exist it appends.
+    let escaped = content.replace('\'', "'\\''"); // escape single quotes for bash
+
+    let script = format!(
+        r#"set -e
+mkdir -p /workspace/.claude
+TARGET=/workspace/.claude/CLAUDE.md
+NEW_BLOCK='{escaped}'
+BEGIN='{begin}'
+END='{end}'
+
+if [ ! -f "$TARGET" ]; then
+    printf '%s\n' "$NEW_BLOCK" > "$TARGET"
+else
+    # Check if markers already exist in the file.
+    if grep -qF "$BEGIN" "$TARGET" 2>/dev/null; then
+        # Replace the block between markers (inclusive) with the new content.
+        awk -v new="$NEW_BLOCK" -v begin="$BEGIN" -v end="$END" '
+            BEGIN {{ skip=0 }}
+            index($0, begin) {{ skip=1; print new; next }}
+            skip && index($0, end) {{ skip=0; next }}
+            !skip {{ print }}
+        ' "$TARGET" > "$TARGET.tmp" && mv "$TARGET.tmp" "$TARGET"
+    else
+        # No markers — append the new block separated by a blank line.
+        printf '\n%s\n' "$NEW_BLOCK" >> "$TARGET"
+    fi
+fi"#,
+        escaped = escaped,
+        begin = CLAUDE_MD_BEGIN,
+        end = CLAUDE_MD_END,
+    );
+
+    let output = std::process::Command::new("podman")
+        .args(["exec", container_id, "/bin/bash", "-c", &script])
+        .output()
+        .context("Failed to write CLAUDE.md into container")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Writing CLAUDE.md failed: {}", stderr.trim());
+    }
+
+    Ok(())
 }
 
 // ── Notification helpers ──────────────────────────────────────────────────────

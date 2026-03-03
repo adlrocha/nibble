@@ -31,6 +31,23 @@ pub enum ContainerStatus {
     Unknown,
 }
 
+/// Sandbox health — a richer view on top of ContainerStatus.
+///
+/// `ContainerStatus::Running` only tells us the container process is alive.
+/// `SandboxHealth` goes one step further and verifies that `podman exec` can
+/// actually run a process inside the container (catches zombie/unresponsive
+/// containers that appear running but can no longer execute commands).
+#[derive(Debug, Clone, PartialEq)]
+pub enum SandboxHealth {
+    /// Container running and `podman exec` works — ready to attach or inject.
+    Healthy,
+    /// Container appears running but `podman exec` fails (zombie / OOM / etc.).
+    /// The container should be killed and re-spawned.
+    Degraded,
+    /// Container is not running (stopped, paused, or unknown).
+    Dead,
+}
+
 /// Trait for sandbox implementations
 #[allow(dead_code)]
 pub trait Sandbox: Send + Sync {
@@ -59,13 +76,6 @@ pub trait Sandbox: Send + Sync {
     /// Get container status
     fn status(&self, container_id: &str) -> Result<ContainerStatus>;
 
-    /// Inject input into a running container
-    ///
-    /// # Arguments
-    /// * `container_id` - Container identifier
-    /// * `message` - Message to inject (will be sent to agent)
-    fn inject_input(&self, container_id: &str, message: &str) -> Result<()>;
-
     /// List all containers managed by this sandbox
     fn list(&self) -> Result<Vec<ContainerInfo>>;
 
@@ -74,6 +84,28 @@ pub trait Sandbox: Send + Sync {
 
     /// Execute a command inside the container
     fn exec(&self, container_id: &str, command: &[&str]) -> Result<String>;
+
+    /// Check whether the container is running and can execute processes.
+    ///
+    /// Returns `SandboxHealth::Healthy` if the container is running and
+    /// `podman exec` succeeds, `SandboxHealth::Degraded` if the container
+    /// appears running but exec fails (zombie/OOM/etc.), or
+    /// `SandboxHealth::Dead` if the container is not running.
+    fn health_check(&self, container_id: &str) -> SandboxHealth {
+        match self.status(container_id) {
+            Ok(ContainerStatus::Running) => {}
+            _ => return SandboxHealth::Dead,
+        }
+
+        // Try running a trivial command to confirm exec capability.
+        let can_exec = self.exec(container_id, &["true"]).is_ok();
+
+        if can_exec {
+            SandboxHealth::Healthy
+        } else {
+            SandboxHealth::Degraded
+        }
+    }
 }
 
 /// Factory function to get the appropriate sandbox implementation
