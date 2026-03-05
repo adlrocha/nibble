@@ -70,6 +70,9 @@ pub trait Sandbox: Send + Sync {
         config: &SandboxConfig,
     ) -> Result<ContainerInfo>;
 
+    /// Start a stopped container (e.g. after a host reboot)
+    fn start(&self, container_id: &str) -> Result<()>;
+
     /// Kill/stop a container
     fn kill(&self, container_id: &str) -> Result<()>;
 

@@ -16,8 +16,20 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if [ -n \"$AGENT_TASK_ID\" ]; then agent-inbox report complete \"$AGENT_TASK_ID\" && notify-send 'Claude Code' 'Finished generating' 2>/dev/null; fi",
-            "timeout": 5
+            "command": "if [ -n \"$AGENT_TASK_ID\" ]; then INPUT=$(cat); if command -v jq >/dev/null 2>&1; then SID=$(printf \"%s\" \"$INPUT\" | jq -r \".sessionId // .session_id // empty\"); [ -n \"$SID\" ] && agent-inbox report session-id \"$AGENT_TASK_ID\" \"$SID\" 2>/dev/null; MSG=$(printf \"%s\" \"$INPUT\" | jq -r \".last_assistant_message // \\\"(no message)\\\"\"); agent-inbox report last-message \"$AGENT_TASK_ID\" \"$MSG\" 2>/dev/null || true; else MSG=\"(install jq to see last message)\"; fi; agent-inbox report complete \"$AGENT_TASK_ID\" 2>/dev/null; notify-send 'Claude Code' 'Finished generating' 2>/dev/null || true; agent-inbox notify --task-id \"$AGENT_TASK_ID\" --message \"$MSG\" 2>/dev/null || true; fi",
+            "timeout": 120
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "permission_prompt",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -n \"$AGENT_TASK_ID\" ]; then INPUT=$(cat); if command -v jq >/dev/null 2>&1; then TOOL=$(printf \"%s\" \"$INPUT\" | jq -r \".tool_name // empty\"); TOOL_INPUT=$(printf \"%s\" \"$INPUT\" | jq -c \".tool_input // empty\"); BASE=$(printf \"%s\" \"$INPUT\" | jq -r \".message // \\\"Permission required\\\"\"); if [ -n \"$TOOL\" ]; then MSG=\"$BASE\\nTool: $TOOL\"; if [ -n \"$TOOL_INPUT\" ] && [ \"$TOOL_INPUT\" != \"null\" ]; then SHORT=$(printf \"%s\" \"$TOOL_INPUT\" | jq -r \"to_entries | map(.key + \\\": \\\" + (.value | tostring)) | join(\\\", \\\")\" 2>/dev/null | cut -c1-120); MSG=\"$MSG\\n$SHORT\"; fi; else MSG=\"$BASE\"; fi; else MSG=\"Permission required (install jq for details)\"; fi; agent-inbox notify --task-id \"$AGENT_TASK_ID\" --message \"$MSG\" --attention 2>/dev/null; fi",
+            "timeout": 10
           }
         ]
       }

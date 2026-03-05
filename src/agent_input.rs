@@ -7,8 +7,9 @@
 //! they reach the target process.
 //!
 //! **Strategy**: kill any active interactive attach sessions for the container
-//! (so there is no conflict with a local user), then run `claude --continue`
-//! non-interactively via `podman exec -i` with the message on stdin.
+//! (so there is no conflict with a local user), then run `claude --resume <sid>`
+//! (or plain `claude` for the very first turn in a new container) non-interactively
+//! via `podman exec -i` with the message on stdin.
 
 use anyhow::{bail, Context, Result};
 
@@ -49,15 +50,16 @@ pub fn inject_returning_child(task: &Task, message: &str) -> Result<std::process
 
 // ── Container injection ───────────────────────────────────────────────────────
 
-/// Spawn the `claude --resume` process inside the container, write `message` to
-/// its stdin, and return the child handle.  The caller decides when to wait.
+/// Spawn the Claude process inside the container, write `message` to its stdin,
+/// and return the child handle.  The caller decides when to wait.
 ///
 /// Strategy:
 /// 1. Kill any active interactive attach sessions (conmon --exec-attach) for
 ///    this container, to avoid conflicting conversations.
-/// 2. Run `claude --resume <session_id>` (or `--continue` if no session ID is
-///    stored) non-interactively via `podman exec -i`, piping the message through
-///    stdin. Claude handles piped stdin fine and produces a single response turn.
+/// 2. Run `claude --resume <session_id>` (or bare `claude` for a brand-new
+///    container with no prior session) non-interactively via `podman exec -i`,
+///    piping the message through stdin.  Claude handles piped stdin fine and
+///    produces a single response turn.
 fn spawn_inject(container_id: &str, session_id: Option<&str>, task_id: &str, message: &str) -> Result<std::process::Child> {
     let short = &container_id[..container_id.len().min(12)];
 
@@ -66,10 +68,14 @@ fn spawn_inject(container_id: &str, session_id: Option<&str>, task_id: &str, mes
 
     // Run claude non-interactively with the message on stdin.
     let claude = "/home/node/.local/bin/claude";
-    let resume_arg = if let Some(sid) = session_id {
+    // Use --resume <sid> when we have a known session, otherwise start fresh
+    // (no flag).  Do NOT use --continue: in a brand-new container there is no
+    // prior session to continue, and --continue would cause Claude to exit
+    // immediately with a non-zero code (triggering "session ended unexpectedly").
+    let resume_arg: Vec<&str> = if let Some(sid) = session_id {
         vec!["--resume", sid]
     } else {
-        vec!["--continue"]
+        vec![]
     };
 
     // AGENT_TASK_ID must be set so the Stop/SessionEnd hooks inside the

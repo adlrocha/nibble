@@ -300,6 +300,9 @@ fn main() -> Result<()> {
                 cmd_sandbox_kill(&db, id)?;
             }
         }
+        Some(Commands::SandboxRestart) => {
+            cmd_sandbox_resume(&db, true)?;
+        }
         Some(Commands::SandboxResume { all }) => {
             cmd_sandbox_resume(&db, all)?;
         }
@@ -340,33 +343,33 @@ fn main() -> Result<()> {
 
 /// Find the most recent Claude Code session for a given repo path.
 ///
-/// Claude stores sessions under ~/.claude/projects/<url-encoded-path>/*.jsonl.
-/// We look for the file with the most recent modification time and return its
-/// stem (filename without extension) as the session ID.
+/// First checks the database for any task with this repo path that has a stored
+/// session_id (enables repo-level conversation continuity across sandboxes).
+/// Falls back to scanning ~/.claude/projects/<url-encoded-path>/ for host-side
+/// sessions if no DB record exists.
 ///
-/// Both host sessions and previous sandbox sessions are stored here because all
-/// sandboxes mount the same ~/.claude directory read-write.
-fn find_latest_session_for_repo(repo_path: &str) -> Option<String> {
+/// This ensures repo-level isolation: sessions from repo A will never bleed into
+/// repo B, even though all sandboxes store sessions under the same "-workspace"
+/// directory inside the container.
+fn find_latest_session_for_repo(db: &Database, repo_path: &str) -> Option<String> {
+    // First: check the database for the most recent session_id for this repo.
+    // This handles the sandbox case where sessions are stored under "-workspace"
+    // but we track which repo they belong to via the task context.
+    if let Ok(Some(session_id)) = db.get_most_recent_session_for_repo(repo_path) {
+        return Some(session_id);
+    }
+
+    // Second: fall back to scanning the filesystem for host-side sessions.
+    // Claude stores sessions under ~/.claude/projects/<url-encoded-path>/*.jsonl.
     let home = dirs::home_dir()?;
     let projects_dir = home.join(".claude").join("projects");
 
     // Claude encodes the absolute path with each '/' replaced by '-'
     // and the leading '/' dropped, e.g. /home/user/myapp → -home-user-myapp
-    // Try to canonicalize the repo path first for a reliable match.
     let abs_path = std::fs::canonicalize(repo_path)
         .unwrap_or_else(|_| std::path::PathBuf::from(repo_path));
     let encoded = abs_path.to_string_lossy().replace('/', "-");
 
-    // Only search the host-path encoded directory.
-    //
-    // We intentionally do NOT fall back to "-workspace" here. All sandbox
-    // containers mount their repo at /workspace, so every sandbox session is
-    // stored under the same "-workspace" directory regardless of which repo was
-    // mounted. Including it would cause spawning a sandbox for repo A to resume
-    // the most recent session from repo B (or any other repo that was previously
-    // sandboxed). After the first attach the Stop hook writes the real session ID
-    // back via `report session-id`, so future attaches use the stored value
-    // directly and never reach this function.
     let candidate_dir = projects_dir.join(&encoded);
     if !candidate_dir.exists() {
         return None;
@@ -478,8 +481,9 @@ pub(crate) fn cmd_sandbox_spawn(
         Some(sid)
     } else {
         // Auto-detect: find the most recent Claude session associated with this
-        // repo path by scanning ~/.claude/projects/.
-        find_latest_session_for_repo(&repo_path)
+        // repo. First checks the DB for sandbox sessions, then falls back to
+        // scanning ~/.claude/projects/ for host-side sessions.
+        find_latest_session_for_repo(db, &repo_path)
             .map(|sid| {
                 println!("  Session:   auto-detected {} (use --fresh to start new)", &sid[..sid.len().min(8)]);
                 sid
@@ -488,20 +492,21 @@ pub(crate) fn cmd_sandbox_spawn(
 
     let mut task = Task::new(task_id.clone(), "claude_code".to_string(), title, None, None);
     task.sandbox_type = SandboxType::Podman;
+    let abs_repo_path = repo
+        .canonicalize()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or(repo_path);
+
     task.container_id = Some(info.id.clone());
     task.sandbox_config = Some(config);
     task.context = Some(TaskContext {
         url: None,
-        project_path: Some(repo_path.clone()),
+        project_path: Some(abs_repo_path.clone()),
         session_id: resolved_session_id,
         extra: HashMap::new(),
     });
     db.insert_task(&task)?;
 
-    let abs_repo_path = repo
-        .canonicalize()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or(repo_path);
     db.upsert_container_state(&task_id, &info.name, &abs_repo_path)?;
 
     let short_id = &task_id[..task_id.len().min(8)];
@@ -776,13 +781,43 @@ fn cmd_sandbox_resume(db: &Database, all: bool) -> Result<()> {
                 stale += 1;
             }
             SandboxHealth::Dead => {
-                if let Ok(Some(mut task)) = db.get_task_by_id(task_id) {
-                    task.set_exited(None);
-                    let _ = db.update_task(&task);
+                // Container may be stopped (reboot) rather than truly gone.
+                // Try to start it; if that succeeds re-check health.
+                match sandbox.start(container_name) {
+                    Ok(()) => {
+                        match sandbox.health_check(container_name) {
+                            SandboxHealth::Healthy => {
+                                if let Ok(Some(mut task)) = db.get_task_by_id(task_id) {
+                                    if task.status != TaskStatus::Running {
+                                        task.set_running();
+                                        let _ = db.update_task(&task);
+                                    }
+                                }
+                                println!("  Restarted: {} ({})", container_name, task_id);
+                                resumed += 1;
+                            }
+                            _ => {
+                                if let Ok(Some(mut task)) = db.get_task_by_id(task_id) {
+                                    task.set_exited(None);
+                                    let _ = db.update_task(&task);
+                                }
+                                let _ = db.delete_container_state(task_id);
+                                println!("  Cleaned: {} (start failed health check, repo: {})", container_name, repo_path);
+                                stale += 1;
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        // Container doesn't exist at all — clean up.
+                        if let Ok(Some(mut task)) = db.get_task_by_id(task_id) {
+                            task.set_exited(None);
+                            let _ = db.update_task(&task);
+                        }
+                        let _ = db.delete_container_state(task_id);
+                        println!("  Cleaned: {} (gone, repo: {})", container_name, repo_path);
+                        stale += 1;
+                    }
                 }
-                let _ = db.delete_container_state(task_id);
-                println!("  Cleaned: {} (gone, repo: {})", container_name, repo_path);
-                stale += 1;
             }
         }
     }

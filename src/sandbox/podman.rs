@@ -406,6 +406,20 @@ impl Sandbox for PodmanSandbox {
         Ok(info)
     }
 
+    fn start(&self, container_id: &str) -> Result<()> {
+        let output = Command::new("podman")
+            .args(["start", container_id])
+            .output()
+            .context("Failed to start container")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("Failed to start container: {}", stderr);
+        }
+
+        Ok(())
+    }
+
     fn kill(&self, container_id: &str) -> Result<()> {
         // Only send SIGKILL if the container is actually running
         let status = self.status(container_id)?;

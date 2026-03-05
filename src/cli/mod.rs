@@ -119,6 +119,13 @@ pub enum Commands {
         all: bool,
     },
 
+    /// Restart all stopped sandbox containers (e.g. after a host reboot)
+    ///
+    /// Attempts to start any stopped containers tracked in the database.
+    /// Containers that no longer exist are cleaned up.
+    #[command(name = "sandbox-restart")]
+    SandboxRestart,
+
     /// [internal] Resume sandboxes after reboot
     #[command(hide = true, name = "_sandbox_resume")]
     SandboxResume {

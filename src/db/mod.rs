@@ -500,6 +500,56 @@ impl Database {
         Ok(states)
     }
 
+    /// Get the most recent session_id for a given repo path across all tasks.
+    /// This enables repo-level conversation continuity: when spawning a new sandbox
+    /// for a repo, we can resume the most recent session from any previous sandbox
+    /// for that same repo.
+    pub fn get_most_recent_session_for_repo(&self, repo_path: &str) -> Result<Option<String>> {
+        // Always match against the canonical (absolute) path so relative paths
+        // passed at spawn time don't cause mismatches on subsequent lookups.
+        let canonical_path = std::fs::canonicalize(repo_path)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| repo_path.to_string());
+
+        // Query only sandbox tasks ordered by most-recently-updated so we pick up
+        // the session_id written by the Stop hook from the last session.
+        let mut stmt = self.conn.prepare(
+            "SELECT context FROM tasks
+             WHERE context IS NOT NULL AND sandbox_type != 'none'
+             ORDER BY updated_at DESC"
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            let context_json: Option<String> = row.get(0)?;
+            Ok(context_json)
+        })?;
+
+        for row in rows {
+            if let Ok(Some(context_json)) = row {
+                if let Ok(context) = serde_json::from_str::<TaskContext>(&context_json) {
+                    if let Some(session_id) = context.session_id {
+                        if let Some(task_path) = context.project_path {
+                            // Primary: direct string match (both stored as canonical paths).
+                            // Fallback: re-canonicalize the stored path in case it was saved
+                            // before the fix (i.e. stored as a relative path).
+                            let matches = task_path == canonical_path || {
+                                std::fs::canonicalize(&task_path)
+                                    .map(|p| p.to_string_lossy().to_string())
+                                    .map(|p| p == canonical_path)
+                                    .unwrap_or(false)
+                            };
+                            if matches {
+                                return Ok(Some(session_id));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
     fn row_to_task(&self, row: &rusqlite::Row) -> rusqlite::Result<Task> {
         let created_ts: i64 = row.get(5)?;
         let updated_ts: i64 = row.get(6)?;
