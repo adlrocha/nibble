@@ -211,17 +211,9 @@ fn main() -> Result<()> {
                 task.set_exited(exit_code);
                 db.update_task(&task)?;
                 println!("Task exited: {}", task_id);
-
-                // Send exit notification only when the Stop hook did NOT already
-                // send a response notification (i.e. attention_reason is unset).
-                // When attention_reason IS set the Stop hook ran cleanly and
-                // already delivered the real response — this path is a crash/kill.
-                let cfg = config::load().unwrap_or_default();
-                if cfg.telegram.is_configured() && task.attention_reason.is_none() {
-                    let text = build_notification_text(&db, Some(&task_id), "⚠️ Session ended unexpectedly.", false)?;
-                    let _ = notifications::telegram::send_with_reply_button(&cfg.telegram, &text, &task_id)
-                        .map(|msg_id| db.insert_bot_message(msg_id, &task_id));
-                }
+                // No Telegram notification here: the sandbox container is still
+                // running. Session exits are normal (detach, turn complete, etc.).
+                // Container crashes are detected separately by prune_stale_tasks.
             }
             ReportAction::LastMessage { task_id, message } => {
                 let mut task = db
@@ -388,6 +380,34 @@ pub(crate) fn cmd_sandbox_spawn(
     let sandbox = PodmanSandbox::new();
     if !sandbox.is_available()? {
         anyhow::bail!("Podman is not installed. Run ./install.sh to set it up.");
+    }
+
+    // Check if a sandbox already exists for this repo and re-use it.
+    let abs_repo_path_early = repo
+        .canonicalize()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| repo_path.clone());
+    if let Some((existing_task_id, _)) = db.get_container_state_by_repo_path(&abs_repo_path_early)? {
+        if let Some(task) = db.get_task_by_id(&existing_task_id)? {
+            if let Some(ref cid) = task.container_id {
+                if let Ok(crate::sandbox::ContainerStatus::Running) = sandbox.status(cid) {
+                    eprintln!(
+                        "⚠️  A sandbox for '{}' already exists (task {}).",
+                        abs_repo_path_early,
+                        &existing_task_id[..existing_task_id.len().min(8)]
+                    );
+                    eprintln!("   Attaching to the existing sandbox instead of spawning a new one.");
+                    eprintln!();
+                    if no_attach {
+                        eprintln!("Attach with:");
+                        eprintln!("  agent-sandbox attach {}", abs_repo_path_early);
+                    } else {
+                        cmd_sandbox_attach(db, existing_task_id.clone(), fresh, false)?;
+                    }
+                    return Ok(existing_task_id);
+                }
+            }
+        }
     }
 
     sandbox.ensure_image_with_opts(&image, false)?;
@@ -756,18 +776,6 @@ fn cmd_sandbox_kill(db: &Database, task_id: String) -> Result<()> {
 
     println!("Killed sandbox {} (task {})", container_id, task_id);
 
-    // Notify via Telegram that the sandbox was stopped.
-    let cfg = config::load().unwrap_or_default();
-    if cfg.telegram.is_configured() {
-        let msg = task.attention_reason
-            .as_deref()
-            .unwrap_or("(sandbox killed)")
-            .to_string();
-        let text = build_notification_text(db, Some(&task_id), &msg, false)?;
-        let _ = notifications::telegram::send_with_reply_button(&cfg.telegram, &text, &task_id)
-            .map(|msg_id| db.insert_bot_message(msg_id, &task_id));
-    }
-
     Ok(())
 }
 
@@ -781,7 +789,6 @@ fn cmd_sandbox_kill_all(db: &Database) -> Result<()> {
         return Ok(());
     }
 
-    let cfg = config::load().unwrap_or_default();
     let mut killed = 0;
     for (task_id, container_name, _, _) in &states {
         match sandbox.kill(container_name) {
@@ -789,17 +796,6 @@ fn cmd_sandbox_kill_all(db: &Database) -> Result<()> {
                 if let Ok(Some(mut task)) = db.get_task_by_id(task_id) {
                     task.set_exited(None);
                     let _ = db.update_task(&task);
-
-                    if cfg.telegram.is_configured() {
-                        let msg = task.attention_reason
-                            .as_deref()
-                            .unwrap_or("(sandbox killed)")
-                            .to_string();
-                        if let Ok(text) = build_notification_text(db, Some(task_id), &msg, false) {
-                            let _ = notifications::telegram::send_with_reply_button(&cfg.telegram, &text, task_id)
-                                .map(|msg_id| db.insert_bot_message(msg_id, task_id));
-                        }
-                    }
                 }
                 let _ = db.delete_container_state(task_id);
                 println!("Killed {}", container_name);
@@ -923,43 +919,51 @@ pub(crate) fn prune_stale_tasks(db: &Database) -> Result<usize> {
         }
     }
 
-    // 2. Sandbox tasks: health-check each container (not just running/stopped).
-    //    - Dead      → container is gone; clean up state and mark task exited.
-    //    - Degraded  → container is running but exec fails (zombie/OOM/etc.);
-    //                  mark the DB task as exited so the dashboard reflects reality.
+    // 2. Sandbox tasks: health-check each container.
+    //    - Dead      → container crashed; notify via Telegram, clean up state.
+    //    - Degraded  → container running but exec fails; update DB only.
     //    - Healthy   → all good, leave it alone.
     let states = db.list_container_states()?;
     if !states.is_empty() {
         let sandbox = PodmanSandbox::new();
-        for (task_id, container_name, _, _) in &states {
+        let cfg = config::load().unwrap_or_default();
+        for (task_id, container_name, repo_path, _) in &states {
             match sandbox.health_check(container_name) {
                 SandboxHealth::Healthy => {}
                 SandboxHealth::Dead => {
-                    // Container is gone — clean up state and mark task exited.
                     let _ = db.delete_container_state(task_id);
                     if let Ok(Some(mut task)) = db.get_task_by_id(task_id) {
-                        if task.status == TaskStatus::Running {
-                            task.set_exited(None);
-                            let _ = db.update_task(&task);
-                            eprintln!(
-                                "[prune] Sandbox {} dead → exited task {}",
-                                container_name,
-                                &task_id[..8.min(task_id.len())]
-                            );
-                            pruned += 1;
+                        task.set_exited(None);
+                        let _ = db.update_task(&task);
+                        eprintln!(
+                            "[prune] Sandbox {} dead → exited task {}",
+                            container_name,
+                            &task_id[..8.min(task_id.len())]
+                        );
+                        pruned += 1;
+
+                        // Notify: container crash is the one case the user
+                        // needs to know about regardless of what they were doing.
+                        if cfg.telegram.is_configured() {
+                            let repo_label = std::path::Path::new(repo_path)
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or(repo_path.as_str());
+                            let msg = format!("💥 Sandbox for `{}` crashed or was killed by the OS.\nRe-spawn with: `agent-sandbox {}`", repo_label, repo_path);
+                            if let Ok(text) = build_notification_text(db, Some(task_id), &msg, false) {
+                                let _ = notifications::telegram::send(&cfg.telegram, &text);
+                            }
                         }
                     }
                 }
                 SandboxHealth::Degraded => {
-                    // Container alive but Claude session has exited — mark the
-                    // task exited in the DB so the dashboard is accurate, but
-                    // leave the container running so the user can re-attach.
+                    // Container alive but exec fails — update DB only, no notification.
                     if let Ok(Some(mut task)) = db.get_task_by_id(task_id) {
                         if task.status == TaskStatus::Running {
                             task.set_exited(None);
                             let _ = db.update_task(&task);
                             eprintln!(
-                                "[prune] Sandbox {} degraded (Claude session gone) → exited task {}",
+                                "[prune] Sandbox {} degraded → exited task {}",
                                 container_name,
                                 &task_id[..8.min(task_id.len())]
                             );

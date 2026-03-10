@@ -418,11 +418,11 @@ fn route_text_to_task(
     Ok(())
 }
 
-/// How long to wait after the inject process exits before checking whether the
-/// Stop hook has already sent a notification.  The Stop hook runs as a separate
-/// process launched by Claude Code immediately after it finishes — giving it a
-/// few seconds to write its bot_message row prevents a false safety-net fire.
-const STOP_HOOK_GRACE_SECS: u64 = 15;
+/// Maximum time to wait for the Stop hook to send its notification after the
+/// inject process exits.  We poll every second and fire the safety-net as soon
+/// as we see the hook's bot_message row, so in the happy path latency is ~1s.
+/// The upper bound only matters if the hook is slow or crashes.
+const STOP_HOOK_TIMEOUT_SECS: u64 = 30;
 
 /// Run inject inside a background thread, sending periodic heartbeats and a
 /// safety-net completion notification when the Claude process exits.
@@ -489,16 +489,9 @@ fn inject_with_heartbeat(
         exit_code
     );
 
-    // Give the Stop hook time to run and record its bot_message before we check.
-    // The hook is a separate process spawned by Claude Code right after it exits,
-    // so the inject child may exit slightly before the hook completes.
-    eprintln!("[listen] waiting {STOP_HOOK_GRACE_SECS}s for Stop hook…");
-    thread::sleep(Duration::from_secs(STOP_HOOK_GRACE_SECS));
-
-    // Safety-net: check whether the Stop hook already sent a Telegram message
-    // for this task since the turn started.  If it did, suppress the fallback
-    // so the user only gets one notification.  If it didn't (hook timed out,
-    // container crashed, or network error), send the fallback ourselves.
+    // Poll until the Stop hook records its bot_message row, or until the timeout
+    // expires.  Polling every second means we fire the safety-net within ~1s of
+    // the hook completing in the happy path, instead of always waiting a fixed delay.
     let db = match Database::open(db_path) {
         Ok(d) => d,
         Err(e) => {
@@ -507,9 +500,17 @@ fn inject_with_heartbeat(
         }
     };
 
-    let hook_notified = db
-        .has_bot_message_since(task_id, turn_start_unix)
-        .unwrap_or(false);
+    let mut hook_notified = false;
+    for i in 0..STOP_HOOK_TIMEOUT_SECS {
+        thread::sleep(Duration::from_secs(1));
+        hook_notified = db
+            .has_bot_message_since(task_id, turn_start_unix)
+            .unwrap_or(false);
+        if hook_notified {
+            eprintln!("[listen] Stop hook notified after {}s, suppressing safety-net", i + 1);
+            break;
+        }
+    }
 
     if !hook_notified {
         // Stop hook didn't send a notification — send a fallback notification.

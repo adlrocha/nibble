@@ -273,6 +273,35 @@ agent-inbox inject <task-id> "Yes, proceed with the migration"
 
 ---
 
+## How it works
+
+### Sandbox model
+
+Each repo gets **one long-lived container**. The container starts with `sleep infinity` as PID 1 and keeps running between sessions. Claude Code is launched transiently via `podman exec` on attach and exits when you detach — the container itself is unaffected.
+
+If you try to spawn a sandbox for a repo that already has one, agent-inbox re-attaches to the existing container instead.
+
+### Session continuity
+
+When you attach, Claude resumes the most recent conversation for the repo using `--continue`. Every attach — whether interactive from the terminal or a Telegram reply injected remotely — picks up the same conversation history. Session state is stored inside the container at `/workspace/.claude/projects/`.
+
+### Telegram injection
+
+When you reply to a notification from your phone, the listener daemon:
+
+1. Receives the reply via Telegram long-poll
+2. Runs `claude --continue` inside the container with your message on stdin (non-interactive, one-shot turn)
+3. Claude loads the full prior conversation history and processes the new message
+4. The Stop hook inside the container fires when Claude finishes and sends the response back to Telegram
+
+The injected turn and an interactive attach session share the same conversation history — they are just different ways to add a turn to the same session.
+
+### Container crash notifications
+
+If a container disappears unexpectedly (OOM, host kill, etc.), the prune daemon detects it and sends a Telegram notification so you can re-spawn. Normal session exits (detach, turn complete) are not notified.
+
+---
+
 ## Sandbox Security Model
 
 Sandboxes use **rootless Podman** — containers run as your user, so even a full container escape grants no root access on the host. The goal is to protect your host from:
