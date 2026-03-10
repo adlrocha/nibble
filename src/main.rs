@@ -20,6 +20,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::thread;
 use std::time::Duration;
+use uuid::Uuid;
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -284,12 +285,13 @@ fn main() -> Result<()> {
         // ── Internal sandbox subcommands (invoked by agent-sandbox script) ────
 
         Some(Commands::SandboxSpawn { repo_path, task, image, fresh, session_id }) => {
-            cmd_sandbox_spawn(&db, repo_path, task, image, fresh, session_id)?;
+            cmd_sandbox_spawn(&db, repo_path, task, image, fresh, session_id, false)?;
         }
         Some(Commands::SandboxList) => {
             cmd_sandbox_list(&db)?;
         }
-        Some(Commands::SandboxAttach { task_id, fresh, kimi }) => {
+        Some(Commands::SandboxAttach { task_id_or_path, fresh, kimi }) => {
+            let task_id = resolve_sandbox_id(&db, &task_id_or_path)?;
             cmd_sandbox_attach(&db, task_id, fresh, kimi)?;
         }
         Some(Commands::SandboxKill { task_id, all }) => {
@@ -350,46 +352,21 @@ fn main() -> Result<()> {
 ///
 /// This ensures repo-level isolation: sessions from repo A will never bleed into
 /// repo B, even though all sandboxes store sessions under the same "-workspace"
-/// directory inside the container.
-fn find_latest_session_for_repo(db: &Database, repo_path: &str) -> Option<String> {
-    // First: check the database for the most recent session_id for this repo.
-    // This handles the sandbox case where sessions are stored under "-workspace"
-    // but we track which repo they belong to via the task context.
-    if let Ok(Some(session_id)) = db.get_most_recent_session_for_repo(repo_path) {
-        return Some(session_id);
-    }
-
-    // Second: fall back to scanning the filesystem for host-side sessions.
-    // Claude stores sessions under ~/.claude/projects/<url-encoded-path>/*.jsonl.
-    let home = dirs::home_dir()?;
-    let projects_dir = home.join(".claude").join("projects");
-
-    // Claude encodes the absolute path with each '/' replaced by '-'
-    // and the leading '/' dropped, e.g. /home/user/myapp → -home-user-myapp
-    let abs_path = std::fs::canonicalize(repo_path)
+/// Derive a deterministic UUID v5 for a repo path.
+///
+/// Every sandbox mounting the same repo will always get the same session UUID,
+/// so `claude --session-id <uuid>` resumes the right conversation regardless of
+/// which container the repo is mounted in or what its in-container path is.
+///
+/// Passing `--fresh` at spawn generates a new random v4 UUID instead, replacing
+/// the stored ID so that subsequent attaches start from the new session.
+fn repo_session_id(repo_path: &str) -> Uuid {
+    // Canonicalise so /home/user/myrepo and ./myrepo resolve to the same UUID.
+    let canonical = std::fs::canonicalize(repo_path)
         .unwrap_or_else(|_| std::path::PathBuf::from(repo_path));
-    let encoded = abs_path.to_string_lossy().replace('/', "-");
-
-    let candidate_dir = projects_dir.join(&encoded);
-    if !candidate_dir.exists() {
-        return None;
-    }
-
-    // Find the most recently modified .jsonl file in the host-path directory.
-    std::fs::read_dir(&candidate_dir)
-        .ok()?
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            if path.extension()?.to_str()? != "jsonl" {
-                return None;
-            }
-            let mtime = entry.metadata().ok()?.modified().ok()?;
-            let stem = path.file_stem()?.to_string_lossy().to_string();
-            Some((mtime, stem))
-        })
-        .max_by_key(|(mtime, _)| *mtime)
-        .map(|(_, stem)| stem)
+    let key = canonical.to_string_lossy();
+    // UUID v5: SHA-1 hash of the path in the OID namespace — stable across runs.
+    Uuid::new_v5(&Uuid::NAMESPACE_OID, key.as_bytes())
 }
 
 /// Spawn a sandboxed Claude Code agent.  Returns the new task_id on success.
@@ -400,6 +377,7 @@ pub(crate) fn cmd_sandbox_spawn(
     image: String,
     fresh: bool,
     session_id: Option<String>,
+    no_attach: bool,
 ) -> Result<String> {
     let repo = PathBuf::from(&repo_path);
     if !repo.exists() {
@@ -472,24 +450,6 @@ pub(crate) fn cmd_sandbox_spawn(
 
     let title = task_desc.unwrap_or_else(|| format!("[{}:sandbox]", repo_name));
 
-    // Determine which session to continue in the sandbox.
-    // Priority: explicit --session-id > auto-detect from repo > none (fresh start).
-    let resolved_session_id = if fresh {
-        None
-    } else if let Some(sid) = session_id {
-        println!("  Session:   continuing {}", &sid[..sid.len().min(8)]);
-        Some(sid)
-    } else {
-        // Auto-detect: find the most recent Claude session associated with this
-        // repo. First checks the DB for sandbox sessions, then falls back to
-        // scanning ~/.claude/projects/ for host-side sessions.
-        find_latest_session_for_repo(db, &repo_path)
-            .map(|sid| {
-                println!("  Session:   auto-detected {} (use --fresh to start new)", &sid[..sid.len().min(8)]);
-                sid
-            })
-    };
-
     let mut task = Task::new(task_id.clone(), "claude_code".to_string(), title, None, None);
     task.sandbox_type = SandboxType::Podman;
     let abs_repo_path = repo
@@ -497,12 +457,32 @@ pub(crate) fn cmd_sandbox_spawn(
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or(repo_path);
 
+    // Determine the session UUID for this sandbox.
+    // - Normal spawn: derive a deterministic UUID v5 from the canonical repo path.
+    //   Every sandbox on the same repo gets the same UUID, so `claude --session-id`
+    //   always resumes the right conversation regardless of in-container path (/workspace).
+    // - --fresh: generate a new random UUID v4, replacing the stored ID so subsequent
+    //   attaches start from this new session.
+    // - explicit --session-id: honour the caller's choice verbatim.
+    let resolved_session_id = if let Some(sid) = session_id {
+        println!("  Session:   using explicit {}", &sid[..sid.len().min(8)]);
+        sid
+    } else if fresh {
+        let new_sid = Uuid::new_v4().to_string();
+        println!("  Session:   fresh start ({})", &new_sid[..8]);
+        new_sid
+    } else {
+        let det_sid = repo_session_id(&abs_repo_path).to_string();
+        println!("  Session:   {} (deterministic for this repo)", &det_sid[..8]);
+        det_sid
+    };
+
     task.container_id = Some(info.id.clone());
     task.sandbox_config = Some(config);
     task.context = Some(TaskContext {
         url: None,
         project_path: Some(abs_repo_path.clone()),
-        session_id: resolved_session_id,
+        session_id: Some(resolved_session_id),
         extra: HashMap::new(),
     });
     db.insert_task(&task)?;
@@ -515,10 +495,22 @@ pub(crate) fn cmd_sandbox_spawn(
     println!("  Container: {}", info.name);
     println!("  Repo:      {}", abs_repo_path);
     println!();
-    println!("Attach to the Claude session:");
-    println!("  agent-sandbox attach {}", short_id);
-    println!("  agent-sandbox attach {} --fresh   (start a new conversation)", short_id);
-    println!("  (The container keeps running after you exit — re-attach any time)");
+
+    if no_attach {
+        println!("Attach to the Claude session:");
+        println!("  agent-sandbox attach {}          (by repo path)", abs_repo_path);
+        println!("  agent-sandbox attach {}   (by task ID)", short_id);
+        println!("  agent-sandbox attach {} --fresh  (start a new conversation)", short_id);
+        println!("  (The container keeps running after you exit — re-attach any time)");
+        println!();
+        println!("After a system reboot, restart stopped containers with:");
+        println!("  agent-sandbox resume --all");
+    } else {
+        println!("Attaching to Claude session (exit to detach — container keeps running)…");
+        println!("  Re-attach later: agent-sandbox attach {}  (or by path: {})", short_id, abs_repo_path);
+        println!();
+        cmd_sandbox_attach(db, task_id.clone(), fresh, false)?;
+    }
 
     Ok(task_id)
 }
@@ -584,11 +576,86 @@ fn cmd_sandbox_list(db: &Database) -> Result<()> {
     Ok(())
 }
 
+/// Resolve a user-supplied sandbox identifier to a full task_id.
+///
+/// Accepts either:
+/// - A task ID or prefix (UUID hex string)
+/// - A repo path (starts with `.`, `/`, `~`, contains a path separator, or exists as a directory)
+///
+/// For repo paths the canonical absolute path is looked up in the container_state table,
+/// returning the most recently spawned sandbox for that repo.
+fn resolve_sandbox_id(db: &Database, input: &str) -> Result<String> {
+    // Heuristic: treat as a path if it looks like one or actually exists on disk.
+    let looks_like_path = input.starts_with('.')
+        || input.starts_with('/')
+        || input.starts_with('~')
+        || input.contains('/')
+        || std::path::Path::new(input).exists();
+
+    if looks_like_path {
+        // Expand ~ manually (std::fs::canonicalize won't expand it).
+        let expanded = if let Some(rest) = input.strip_prefix("~/") {
+            if let Ok(home) = std::env::var("HOME") {
+                format!("{}/{}", home, rest)
+            } else {
+                input.to_string()
+            }
+        } else {
+            input.to_string()
+        };
+
+        let canonical = std::fs::canonicalize(&expanded)
+            .with_context(|| format!("Cannot resolve path: {}", input))?;
+        let path_str = canonical.to_string_lossy();
+
+        let result = db
+            .get_container_state_by_repo_path(&path_str)
+            .with_context(|| format!("DB error looking up repo path: {}", path_str))?;
+
+        if let Some((task_id, _)) = result {
+            return Ok(task_id);
+        }
+
+        anyhow::bail!(
+            "No sandbox found for repo path: {}\n\
+             Start one with:  agent-sandbox {}",
+            path_str,
+            input
+        );
+    }
+
+    // Treat as a task ID (or prefix).
+    // First try exact match, then prefix scan.
+    if db.get_task_by_id(input)?.is_some() {
+        return Ok(input.to_string());
+    }
+
+    // Prefix match against container_states (more efficient than scanning all tasks).
+    let states = db.list_container_states()?;
+    let matches: Vec<_> = states
+        .iter()
+        .filter(|(tid, _, _, _)| tid.starts_with(input))
+        .collect();
+
+    match matches.len() {
+        0 => anyhow::bail!("No sandbox found with ID or path: {}", input),
+        1 => Ok(matches[0].0.clone()),
+        _ => {
+            let ids: Vec<&str> = matches.iter().map(|(tid, _, _, _)| tid.as_str()).collect();
+            anyhow::bail!(
+                "Ambiguous prefix '{}' matches multiple sandboxes:\n  {}",
+                input,
+                ids.join("\n  ")
+            )
+        }
+    }
+}
+
 /// Attach to the Claude session inside a running sandbox.
 ///
-/// By default tries `--continue` to resume the last conversation.
-/// Falls back to a fresh session automatically if no conversation exists.
-/// Pass `fresh = true` to always start a new session.
+/// Uses `--session-id` to resume the deterministic session stored on the task.
+/// Pass `fresh = true` to generate a new random session UUID and persist it,
+/// so subsequent attaches continue from this new session.
 fn cmd_sandbox_attach(db: &Database, task_id: String, fresh: bool, kimi: bool) -> Result<()> {
     let task = db
         .get_task_by_id(&task_id)?
@@ -610,18 +677,20 @@ fn cmd_sandbox_attach(db: &Database, task_id: String, fresh: bool, kimi: bool) -
     }
 
     let claude = "/home/node/.local/bin/claude --dangerously-skip-permissions";
+
+    // Build the shell command that runs inside the container.
     let shell_cmd = if fresh {
         format!("cd /workspace && {claude}")
     } else {
         // Use the session ID stored on the task (set at spawn time from the host-path
         // session lookup, or updated later by the Stop hook).
-        // Do NOT fall back to --continue: that resumes the last global session which
-        // has no repo awareness and would bleed sessions across sandboxes.
         let session_id = task.context.as_ref().and_then(|c| c.session_id.as_deref());
         if let Some(sid) = session_id {
+            // Try to resume the stored session; fall back to a fresh start if it fails.
             format!("cd /workspace && {claude} --resume {sid} 2>&1 || {claude}")
         } else {
-            format!("cd /workspace && {claude}")
+            // No session stored — use --continue to resume last conversation, or fresh.
+            format!("cd /workspace && {claude} --continue 2>&1 || {claude}")
         }
     };
 
@@ -644,6 +713,7 @@ fn cmd_sandbox_attach(db: &Database, task_id: String, fresh: bool, kimi: bool) -
         podman_args.extend([
             "-e".into(), format!("ANTHROPIC_BASE_URL={}", base_url),
             "-e".into(), format!("ANTHROPIC_API_KEY={}", api_key),
+            "-e".into(), "ENABLE_TOOL_SEARCH=FALSE".into(),
         ]);
     }
 
@@ -661,6 +731,7 @@ fn cmd_sandbox_attach(db: &Database, task_id: String, fresh: bool, kimi: bool) -
     );
     anyhow::bail!("Failed to exec podman: {}", err)
 }
+
 
 /// Kill a sandbox container and mark its task as exited.
 fn cmd_sandbox_kill(db: &Database, task_id: String) -> Result<()> {

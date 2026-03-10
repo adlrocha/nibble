@@ -85,10 +85,10 @@ pub enum Commands {
         task: Option<String>,
         #[arg(long, default_value = "agent-inbox-sandbox:latest")]
         image: String,
-        /// Always start a fresh Claude session (no --continue / --resume)
+        /// Start a new session (generates a fresh random UUID, replacing the stored one)
         #[arg(long)]
         fresh: bool,
-        /// Resume a specific Claude session ID instead of auto-detecting
+        /// Use a specific Claude session UUID instead of the deterministic repo UUID
         #[arg(long)]
         session_id: Option<String>,
     },
@@ -100,7 +100,8 @@ pub enum Commands {
     /// [internal] Attach to a sandbox container
     #[command(hide = true, name = "_sandbox_attach")]
     SandboxAttach {
-        task_id: String,
+        /// Task ID (or a prefix) OR a repo path (e.g. "." or "/path/to/repo")
+        task_id_or_path: String,
         /// Start a fresh session instead of resuming the last conversation
         #[arg(long)]
         fresh: bool,

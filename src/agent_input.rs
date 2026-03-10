@@ -7,13 +7,15 @@
 //! they reach the target process.
 //!
 //! **Strategy**: kill any active interactive attach sessions for the container
-//! (so there is no conflict with a local user), then run `claude --resume <sid>`
-//! (or plain `claude` for the very first turn in a new container) non-interactively
-//! via `podman exec -i` with the message on stdin.
+//! (so there is no conflict with a local user), then run `claude --session-id <sid>`
+//! non-interactively via `podman exec -i` with the message on stdin.
 
 use anyhow::{bail, Context, Result};
+use dirs;
 
 use crate::models::{SandboxType, Task};
+use crate::sandbox::podman::PodmanSandbox;
+use crate::sandbox::{ContainerStatus, Sandbox};
 
 /// Send `message` to the Claude session running inside a Podman sandbox.
 ///
@@ -48,6 +50,29 @@ pub fn inject_returning_child(task: &Task, message: &str) -> Result<std::process
     spawn_inject(container_id, session_id, &task.task_id, message)
 }
 
+/// Check if the container is healthy enough to accept an inject.
+///
+/// Returns `Ok(())` if the container is running and exec works.
+/// Returns an error with a descriptive message if not.
+pub fn check_container_health(container_id: &str) -> Result<()> {
+    let sandbox = PodmanSandbox::new();
+    match sandbox.status(container_id) {
+        Ok(ContainerStatus::Running) => Ok(()),
+        Ok(ContainerStatus::Stopped) => {
+            bail!("Container is stopped — restart it with `agent-sandbox resume {}`", &container_id[..container_id.len().min(8)])
+        }
+        Ok(ContainerStatus::Paused) => {
+            bail!("Container is paused — unpause it first")
+        }
+        Ok(ContainerStatus::Unknown) => {
+            bail!("Container status unknown — it may have been removed")
+        }
+        Err(e) => {
+            bail!("Failed to check container status: {e}")
+        }
+    }
+}
+
 // ── Container injection ───────────────────────────────────────────────────────
 
 /// Spawn the Claude process inside the container, write `message` to its stdin,
@@ -56,33 +81,58 @@ pub fn inject_returning_child(task: &Task, message: &str) -> Result<std::process
 /// Strategy:
 /// 1. Kill any active interactive attach sessions (conmon --exec-attach) for
 ///    this container, to avoid conflicting conversations.
-/// 2. Run `claude --resume <session_id>` (or bare `claude` for a brand-new
-///    container with no prior session) non-interactively via `podman exec -i`,
+/// 2. Run `claude --session-id <session_id>` non-interactively via `podman exec -i`,
 ///    piping the message through stdin.  Claude handles piped stdin fine and
 ///    produces a single response turn.
 fn spawn_inject(container_id: &str, session_id: Option<&str>, task_id: &str, message: &str) -> Result<std::process::Child> {
     let short = &container_id[..container_id.len().min(12)];
 
-    // Kill any interactive attach sessions so there's no conflict.
+    // Kill any interactive attach sessions (host-side conmon processes) so there's no conflict.
     kill_exec_attach_sessions(short);
 
-    // Run claude non-interactively with the message on stdin.
+    // Also remove the lock on the host side immediately (bind-mount = same inode).
+    if let Some(sid) = session_id {
+        if let Some(home) = dirs::home_dir() {
+            let lock_path = home.join(".claude").join("tasks").join(sid).join(".lock");
+            let _ = std::fs::remove_file(&lock_path);
+        }
+    }
+
+    // Run the entire cleanup + claude invocation as a single shell script inside
+    // the container.  Inlining the kill/lock-removal before the exec means there
+    // is no race window between a separate cleanup podman-exec and this one.
     let claude = "/home/node/.local/bin/claude";
-    // Use --resume <sid> when we have a known session, otherwise start fresh
-    // (no flag).  Do NOT use --continue: in a brand-new container there is no
-    // prior session to continue, and --continue would cause Claude to exit
-    // immediately with a non-zero code (triggering "session ended unexpectedly").
-    let resume_arg: Vec<&str> = if let Some(sid) = session_id {
-        vec!["--resume", sid]
+    let session_arg = if let Some(sid) = session_id {
+        format!("--session-id {sid}")
     } else {
-        vec![]
+        String::new()
     };
+
+    // The shell script kills any stale claude, waits for it to die, removes its
+    // session lock, then execs claude with stdin connected to our pipe.
+    // We use `exec` so claude inherits the piped stdin directly.
+    let lock_rm = if let Some(sid) = session_id {
+        format!("rm -f /home/node/.claude/tasks/{sid}/.lock 2>/dev/null;")
+    } else {
+        String::new()
+    };
+    let shell_script = format!(
+        "pkill -TERM -f '{claude}' 2>/dev/null; \
+         sleep 0.3; \
+         pkill -KILL -f '{claude}' 2>/dev/null; \
+         for i in $(seq 1 30); do \
+             pgrep -f '{claude}' > /dev/null 2>&1 || break; \
+             sleep 0.1; \
+         done; \
+         {lock_rm} \
+         exec {claude} {session_arg} --dangerously-skip-permissions",
+    );
 
     // AGENT_TASK_ID must be set so the Stop/SessionEnd hooks inside the
     // container know which task to report against.
     let agent_task_id_env = format!("AGENT_TASK_ID={}", task_id);
 
-    let mut args = vec![
+    let args = vec![
         "exec", "-i",
         "-e", "TERM=xterm-256color",
         "-e", "PATH=/home/node/.local/bin:/usr/local/bin:/usr/bin:/bin",
@@ -90,10 +140,8 @@ fn spawn_inject(container_id: &str, session_id: Option<&str>, task_id: &str, mes
         "-e", agent_task_id_env.as_str(),
         "-w", "/workspace",
         container_id,
-        claude,
+        "/bin/bash", "-c", &shell_script,
     ];
-    args.extend_from_slice(&resume_arg);
-    args.push("--dangerously-skip-permissions");
 
     let mut child = std::process::Command::new("podman")
         .args(&args)
@@ -113,6 +161,7 @@ fn spawn_inject(container_id: &str, session_id: Option<&str>, task_id: &str, mes
 
     Ok(child)
 }
+
 
 /// Kill all active `podman exec -it` (conmon --exec-attach) sessions for the
 /// given container, so that a remote inject doesn't conflict with a local

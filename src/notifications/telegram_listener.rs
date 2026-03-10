@@ -353,7 +353,8 @@ fn handle_spawn_command(
             task_desc,
             "agent-inbox-sandbox:latest".to_string(),
             false, // fresh
-            None,  // session_id — auto-detect
+            None,  // session_id — None uses deterministic UUID v5 for the repo
+            true,  // no_attach — background thread, do not exec into tty
         ) {
             Ok(task_id) => {
                 let short_id = &task_id[..task_id.len().min(8)];
@@ -389,6 +390,16 @@ fn route_text_to_task(
     };
 
     eprintln!("[listen] Injecting into task {task_id}, pid={:?}", task.pid);
+
+    // Check container health before attempting inject — this gives us a clear
+    // error message early rather than a cryptic "session ended" later.
+    if let Some(ref container_id) = task.container_id {
+        if let Err(e) = agent_input::check_container_health(container_id) {
+            eprintln!("[listen] Container health check failed for {task_id}: {e:#}");
+            send_notice(config, chat_id, &format!("❌ Cannot send message: {e}"))?;
+            return Ok(());
+        }
+    }
 
     // Acknowledge immediately so the user knows their message was received.
     send_notice(config, chat_id, "📨 Message sent to agent.")?;
@@ -443,11 +454,15 @@ fn inject_with_heartbeat(
 
     // Poll the child process, sending heartbeats every HEARTBEAT_INTERVAL.
     let mut last_heartbeat = Instant::now();
+    let mut exit_status: Option<std::process::ExitStatus> = None;
     loop {
         // Check if process has finished (non-blocking).
         match child.try_wait() {
-            Ok(Some(_status)) => break, // done
-            Ok(None) => {}              // still running
+            Ok(Some(status)) => {
+                exit_status = Some(status);
+                break;
+            } // done
+            Ok(None) => {} // still running
             Err(e) => {
                 eprintln!("[listen] inject wait error: {e:#}");
                 break;
@@ -466,7 +481,13 @@ fn inject_with_heartbeat(
     }
 
     let elapsed = start.elapsed();
-    eprintln!("[listen] inject done for task {short_id} in {}s", elapsed.as_secs());
+    let exit_code = exit_status.and_then(|s| s.code());
+    let success = exit_status.map_or(false, |s| s.success());
+    eprintln!(
+        "[listen] inject done for task {short_id} in {}s, exit={:?}",
+        elapsed.as_secs(),
+        exit_code
+    );
 
     // Give the Stop hook time to run and record its bot_message before we check.
     // The hook is a separate process spawned by Claude Code right after it exits,
@@ -491,14 +512,25 @@ fn inject_with_heartbeat(
         .unwrap_or(false);
 
     if !hook_notified {
-        // Stop hook didn't send a notification — send a generic completion ping.
+        // Stop hook didn't send a notification — send a fallback notification.
         eprintln!("[listen] safety-net: Stop hook didn't notify for {short_id}, sending fallback");
         let elapsed_str = if elapsed.as_secs() < 60 {
             format!("{}s", elapsed.as_secs())
         } else {
             format!("{}m {}s", elapsed.as_secs() / 60, elapsed.as_secs() % 60)
         };
-        let msg = format!("✅ Agent turn complete ({elapsed_str})");
+
+        // If the process exited with an error, report that instead of "complete".
+        let msg = if !success {
+            if let Some(code) = exit_code {
+                format!("❌ Agent exited with error (code {code}) after {elapsed_str}")
+            } else {
+                format!("❌ Agent exited with error after {elapsed_str}")
+            }
+        } else {
+            format!("✅ Agent turn complete ({elapsed_str})")
+        };
+
         if let Ok(text) = crate::build_notification_text(&db, Some(task_id), &msg, false) {
             let _ = telegram::send_with_reply_button(config, &text, task_id)
                 .map(|msg_id| db.insert_bot_message(msg_id, task_id));

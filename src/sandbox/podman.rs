@@ -273,6 +273,8 @@ impl Sandbox for PodmanSandbox {
             // Map host uid/gid into the container so volume-mounted files
             // owned by the host user (e.g. ~/.claude) are accessible as node.
             "--userns=keep-id".to_string(),
+            // Restart the container automatically after system reboots or crashes.
+            "--restart=on-failure".to_string(),
         ];
 
         if config.privileged {

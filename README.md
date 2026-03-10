@@ -132,15 +132,22 @@ a1b2c3d4e5f6g7h8i9    agent-inbox-a1b2c3d4e5f6g7h8     running    /home/you/proj
 
 ### Attach to a running sandbox
 
-Drop into an interactive bash shell inside the container. The Claude Code agent keeps running — attaching and detaching doesn't interrupt it.
+Drop into an interactive Claude Code session inside the container. Detaching doesn't stop the container — you can re-attach any time.
 
 ```bash
+# By repo path — most convenient from inside the repo
+agent-sandbox attach .
+agent-sandbox attach /path/to/repo
+
+# By task ID or prefix
 agent-sandbox attach <task-id>
-# or
-agent-inbox attach <task-id>
+agent-sandbox attach a1b2c3d4
+
+# Start a fresh conversation instead of resuming
+agent-sandbox attach . --fresh
 ```
 
-Detach with `exit` or `Ctrl+D`.
+Detach with `exit` or `Ctrl+C`.
 
 ### Watch logs
 
@@ -291,7 +298,8 @@ Network is host-mode, so services started inside the container (e.g. `npm run de
 | `install.sh --listen` | Also start reply listener daemon |
 | `agent-sandbox <repo>` | Start a sandboxed agent |
 | `agent-sandbox list` | List open sandboxes |
-| `agent-sandbox attach <id>` | Attach interactive shell to sandbox |
+| `agent-sandbox attach .` | Attach to sandbox for current repo |
+| `agent-sandbox attach <id>` | Attach to sandbox by task ID or prefix |
 | `agent-sandbox --resume` | Resume agents after reboot |
 | `agent-sandbox --build-only` | Rebuild sandbox image |
 | `scripts/setup-telegram.sh` | Interactive Telegram bot setup |
