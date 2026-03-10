@@ -437,7 +437,11 @@ fn inject_with_heartbeat(
     // "did a bot_message get inserted for this task after we started?"  That is
     // a more reliable proxy for "did the Stop hook send the notification" than
     // comparing attention_reason, which may not be updated on every turn.
-    let turn_start_unix = chrono::Utc::now().timestamp();
+    //
+    // Subtract 5 seconds to account for potential clock skew between host and
+    // container — the Stop hook runs inside the container and may record an
+    // earlier timestamp if the container clock is slightly behind.
+    let turn_start_unix = chrono::Utc::now().timestamp() - 5;
 
     // Spawn the Claude process.
     let mut child = match agent_input::inject_returning_child(task, text) {
