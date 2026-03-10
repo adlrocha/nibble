@@ -113,8 +113,8 @@ pub enum Commands {
     /// [internal] Kill a sandbox
     #[command(hide = true, name = "_sandbox_kill")]
     SandboxKill {
-        /// Task ID to kill (omit when --all is set)
-        task_id: Option<String>,
+        /// Task ID (or prefix) OR repo path (e.g. "." or "/path/to/repo"). Omit when --all is set.
+        task_id_or_path: Option<String>,
         /// Kill all running sandbox containers
         #[arg(long)]
         all: bool,

@@ -158,7 +158,15 @@ podman logs -f agent-inbox-<task-id>
 ### Kill a sandbox
 
 ```bash
-agent-inbox kill <task-id>
+# By repo path
+agent-sandbox kill .
+agent-sandbox kill /path/to/repo
+
+# By task ID or prefix
+agent-sandbox kill <task-id>
+
+# Kill all sandboxes
+agent-sandbox kill --all
 ```
 
 Stops the container and marks the task as exited.
@@ -300,6 +308,8 @@ Network is host-mode, so services started inside the container (e.g. `npm run de
 | `agent-sandbox list` | List open sandboxes |
 | `agent-sandbox attach .` | Attach to sandbox for current repo |
 | `agent-sandbox attach <id>` | Attach to sandbox by task ID or prefix |
+| `agent-sandbox kill .` | Kill sandbox for current repo |
+| `agent-sandbox kill <id>` | Kill sandbox by task ID or prefix |
 | `agent-sandbox --resume` | Resume agents after reboot |
 | `agent-sandbox --build-only` | Rebuild sandbox image |
 | `scripts/setup-telegram.sh` | Interactive Telegram bot setup |

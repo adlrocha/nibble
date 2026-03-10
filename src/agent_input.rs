@@ -6,12 +6,11 @@
 //! (TIOCSTI was removed) and terminal emulators consume the bytes before
 //! they reach the target process.
 //!
-//! **Strategy**: kill any active interactive attach sessions for the container
-//! (so there is no conflict with a local user), then run `claude --session-id <sid>`
-//! non-interactively via `podman exec -i` with the message on stdin.
+//! **Strategy**: run `claude --continue` non-interactively via `podman exec -i`
+//! with the message on stdin.  `--continue` resumes the most recent conversation
+//! in /workspace without needing a session UUID.
 
 use anyhow::{bail, Context, Result};
-use dirs;
 
 use crate::models::{SandboxType, Task};
 use crate::sandbox::podman::PodmanSandbox;
@@ -78,73 +77,28 @@ pub fn check_container_health(container_id: &str) -> Result<()> {
 /// Spawn the Claude process inside the container, write `message` to its stdin,
 /// and return the child handle.  The caller decides when to wait.
 ///
-/// Strategy:
-/// 1. Kill any active interactive attach sessions (conmon --exec-attach) for
-///    this container, to avoid conflicting conversations.
-/// 2. Run `claude --session-id <session_id>` non-interactively via `podman exec -i`,
-///    piping the message through stdin.  Claude handles piped stdin fine and
-///    produces a single response turn.
-fn spawn_inject(container_id: &str, session_id: Option<&str>, task_id: &str, message: &str) -> Result<std::process::Child> {
-    let short = &container_id[..container_id.len().min(12)];
-
-    // Kill any interactive attach sessions (host-side conmon processes) so there's no conflict.
-    kill_exec_attach_sessions(short);
-
-    // Also remove the lock on the host side immediately (bind-mount = same inode).
-    if let Some(sid) = session_id {
-        if let Some(home) = dirs::home_dir() {
-            let lock_path = home.join(".claude").join("tasks").join(sid).join(".lock");
-            let _ = std::fs::remove_file(&lock_path);
-        }
-    }
-
-    // Run the entire cleanup + claude invocation as a single shell script inside
-    // the container.  Inlining the kill/lock-removal before the exec means there
-    // is no race window between a separate cleanup podman-exec and this one.
+/// Run `claude --continue` inside the container with the message on stdin.
+/// Returns the child process handle.
+fn spawn_inject(container_id: &str, _session_id: Option<&str>, task_id: &str, message: &str) -> Result<std::process::Child> {
     let claude = "/home/node/.local/bin/claude";
-    let session_arg = if let Some(sid) = session_id {
-        format!("--session-id {sid}")
-    } else {
-        String::new()
-    };
-
-    // The shell script kills any stale claude, waits for it to die, removes its
-    // session lock, then execs claude with stdin connected to our pipe.
-    // We use `exec` so claude inherits the piped stdin directly.
-    let lock_rm = if let Some(sid) = session_id {
-        format!("rm -f /home/node/.claude/tasks/{sid}/.lock 2>/dev/null;")
-    } else {
-        String::new()
-    };
-    let shell_script = format!(
-        "pkill -TERM -f '{claude}' 2>/dev/null; \
-         sleep 0.3; \
-         pkill -KILL -f '{claude}' 2>/dev/null; \
-         for i in $(seq 1 30); do \
-             pgrep -f '{claude}' > /dev/null 2>&1 || break; \
-             sleep 0.1; \
-         done; \
-         {lock_rm} \
-         exec {claude} {session_arg} --dangerously-skip-permissions",
-    );
 
     // AGENT_TASK_ID must be set so the Stop/SessionEnd hooks inside the
     // container know which task to report against.
     let agent_task_id_env = format!("AGENT_TASK_ID={}", task_id);
 
-    let args = vec![
-        "exec", "-i",
-        "-e", "TERM=xterm-256color",
-        "-e", "PATH=/home/node/.local/bin:/usr/local/bin:/usr/bin:/bin",
-        "-e", "CLAUDE_CONFIG_DIR=/home/node/.claude",
-        "-e", agent_task_id_env.as_str(),
-        "-w", "/workspace",
-        container_id,
-        "/bin/bash", "-c", &shell_script,
-    ];
-
     let mut child = std::process::Command::new("podman")
-        .args(&args)
+        .args([
+            "exec", "-i",
+            "-e", "TERM=xterm-256color",
+            "-e", "PATH=/home/node/.local/bin:/usr/local/bin:/usr/bin:/bin",
+            "-e", "CLAUDE_CONFIG_DIR=/home/node/.claude",
+            "-e", agent_task_id_env.as_str(),
+            "-w", "/workspace",
+            container_id,
+            claude,
+            "--continue",
+            "--dangerously-skip-permissions",
+        ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -156,30 +110,10 @@ fn spawn_inject(container_id: &str, session_id: Option<&str>, task_id: &str, mes
         stdin
             .write_all(message.as_bytes())
             .context("Failed to write message to claude stdin")?;
-        // stdin drops here, closing the pipe — Claude sees EOF and processes the turn.
+        // stdin drops here — Claude sees EOF and processes the turn.
     }
 
     Ok(child)
-}
-
-
-/// Kill all active `podman exec -it` (conmon --exec-attach) sessions for the
-/// given container, so that a remote inject doesn't conflict with a local
-/// interactive session on the same repo.
-fn kill_exec_attach_sessions(container_id_prefix: &str) {
-    for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
-        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else { continue };
-        let Ok(cmdline) = std::fs::read_to_string(format!("/proc/{}/cmdline", pid)) else { continue };
-        if cmdline.contains("conmon")
-            && cmdline.contains("exec-attach")
-            && cmdline.contains(container_id_prefix)
-        {
-            // SIGTERM — lets conmon clean up its PTY and exit gracefully.
-            unsafe {
-                libc::kill(pid as libc::pid_t, libc::SIGTERM);
-            }
-        }
-    }
 }
 
 

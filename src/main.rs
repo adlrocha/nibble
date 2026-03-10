@@ -294,11 +294,12 @@ fn main() -> Result<()> {
             let task_id = resolve_sandbox_id(&db, &task_id_or_path)?;
             cmd_sandbox_attach(&db, task_id, fresh, kimi)?;
         }
-        Some(Commands::SandboxKill { task_id, all }) => {
+        Some(Commands::SandboxKill { task_id_or_path, all }) => {
             if all {
                 cmd_sandbox_kill_all(&db)?;
             } else {
-                let id = task_id.ok_or_else(|| anyhow::anyhow!("Provide a task ID or --all"))?;
+                let input = task_id_or_path.ok_or_else(|| anyhow::anyhow!("Provide a task ID, repo path, or --all"))?;
+                let id = resolve_sandbox_id(&db, &input)?;
                 cmd_sandbox_kill(&db, id)?;
             }
         }
