@@ -355,6 +355,7 @@ fn handle_spawn_command(
             false, // fresh
             None,  // session_id — None uses deterministic UUID v5 for the repo
             true,  // no_attach — background thread, do not exec into tty
+            false, // kimi — Telegram spawn doesn't support Kimi backend
         ) {
             Ok(task_id) => {
                 let short_id = &task_id[..task_id.len().min(8)];

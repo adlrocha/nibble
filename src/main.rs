@@ -277,14 +277,43 @@ fn main() -> Result<()> {
         // ── Internal sandbox subcommands (invoked by agent-sandbox script) ────
 
         Some(Commands::SandboxSpawn { repo_path, task, image, fresh, session_id }) => {
-            cmd_sandbox_spawn(&db, repo_path, task, image, fresh, session_id, false)?;
+            cmd_sandbox_spawn(&db, repo_path, task, image, fresh, session_id, false, false)?;
         }
         Some(Commands::SandboxList) => {
             cmd_sandbox_list(&db)?;
         }
         Some(Commands::SandboxAttach { task_id_or_path, fresh, kimi }) => {
-            let task_id = resolve_sandbox_id(&db, &task_id_or_path)?;
-            cmd_sandbox_attach(&db, task_id, fresh, kimi)?;
+            match resolve_sandbox_id(&db, &task_id_or_path) {
+                Ok(task_id) => {
+                    cmd_sandbox_attach(&db, task_id, fresh, kimi)?;
+                }
+                Err(e) => {
+                    // If the input looks like a repo path and no sandbox exists,
+                    // spawn one and then attach to it.
+                    let looks_like_path = task_id_or_path.starts_with('.')
+                        || task_id_or_path.starts_with('/')
+                        || task_id_or_path.starts_with('~')
+                        || task_id_or_path.contains('/')
+                        || std::path::Path::new(&task_id_or_path).exists();
+
+                    if looks_like_path {
+                        eprintln!("No sandbox found for '{}', spawning one...", task_id_or_path);
+                        let task_id = cmd_sandbox_spawn(
+                            &db,
+                            task_id_or_path,
+                            None, // task_desc
+                            "agent-inbox-sandbox:latest".to_string(),
+                            fresh,
+                            None, // session_id
+                            false, // no_attach - we will attach below
+                            kimi, // pass through kimi flag
+                        )?;
+                        cmd_sandbox_attach(&db, task_id, fresh, kimi)?;
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
         }
         Some(Commands::SandboxKill { task_id_or_path, all }) => {
             if all {
@@ -371,6 +400,7 @@ pub(crate) fn cmd_sandbox_spawn(
     fresh: bool,
     session_id: Option<String>,
     no_attach: bool,
+    kimi: bool,
 ) -> Result<String> {
     let repo = PathBuf::from(&repo_path);
     if !repo.exists() {
@@ -402,7 +432,7 @@ pub(crate) fn cmd_sandbox_spawn(
                         eprintln!("Attach with:");
                         eprintln!("  agent-sandbox attach {}", abs_repo_path_early);
                     } else {
-                        cmd_sandbox_attach(db, existing_task_id.clone(), fresh, false)?;
+                        cmd_sandbox_attach(db, existing_task_id.clone(), fresh, kimi)?;
                     }
                     return Ok(existing_task_id);
                 }
@@ -530,7 +560,7 @@ pub(crate) fn cmd_sandbox_spawn(
         println!("Attaching to Claude session (exit to detach — container keeps running)…");
         println!("  Re-attach later: agent-sandbox attach {}  (or by path: {})", short_id, abs_repo_path);
         println!();
-        cmd_sandbox_attach(db, task_id.clone(), fresh, false)?;
+        cmd_sandbox_attach(db, task_id.clone(), fresh, kimi)?;
     }
 
     Ok(task_id)
