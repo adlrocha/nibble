@@ -247,6 +247,7 @@ EXAMPLES
   agent-sandbox attach a1b2c3
   agent-sandbox attach a1b2c3 --fresh
   agent-sandbox attach a1b2c3 --kimi
+  agent-sandbox attach a1b2c3 --glm
   agent-sandbox kill a1b2c3
   agent-sandbox resume
   agent-sandbox --build-only
@@ -308,6 +309,7 @@ if [ "$1" = "attach" ]; then
         case "$1" in
             --fresh) ATTACH_FLAGS="$ATTACH_FLAGS --fresh"; shift ;;
             --kimi)  ATTACH_FLAGS="$ATTACH_FLAGS --kimi";  shift ;;
+            --glm)   ATTACH_FLAGS="$ATTACH_FLAGS --glm";   shift ;;
             *) shift ;;
         esac
     done

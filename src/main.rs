@@ -8,9 +8,11 @@ mod monitor;
 mod notifications;
 mod sandbox;
 
+mod cron;
+
 use anyhow::{Context, Result};
 use clap::Parser;
-use cli::{Cli, Commands, ReportAction};
+use cli::{Cli, Commands, CronAction, ReportAction};
 use db::Database;
 use models::{SandboxConfig, SandboxType, Task, TaskContext, TaskStatus};
 use sandbox::podman::PodmanSandbox;
@@ -274,18 +276,66 @@ fn main() -> Result<()> {
                 let _ = db.insert_bot_message(msg_id, tid);
             }
         }
+        Some(Commands::Cron { action }) => match action {
+            CronAction::Add {
+                task_id_or_path,
+                schedule,
+                prompt,
+                file,
+                label,
+                expires,
+            } => {
+                cmd_cron_add(
+                    &db,
+                    task_id_or_path,
+                    schedule,
+                    prompt,
+                    file,
+                    label,
+                    expires,
+                )?;
+            }
+            CronAction::List { task_id_or_path } => {
+                cmd_cron_list(&db, task_id_or_path)?;
+            }
+            CronAction::Edit {
+                id,
+                schedule,
+                prompt,
+                label,
+                enable,
+                disable,
+                expires,
+            } => {
+                let cron_id = resolve_cron_id(&db, &id)?;
+                cmd_cron_edit(&db, cron_id, schedule, prompt, label, enable, disable, expires)?;
+            }
+            CronAction::Del { id } => {
+                let cron_id = resolve_cron_id(&db, &id)?;
+                let deleted = db.delete_cron_job(cron_id)?;
+                if deleted {
+                    println!("Deleted cron job {}", id);
+                } else {
+                    println!("Cron job {} not found", id);
+                }
+            }
+            CronAction::Run { id } => {
+                let cron_id = resolve_cron_id(&db, &id)?;
+                cmd_cron_run(&db, cron_id)?;
+            }
+        },
         // ── Internal sandbox subcommands (invoked by agent-sandbox script) ────
 
         Some(Commands::SandboxSpawn { repo_path, task, image, fresh, session_id }) => {
-            cmd_sandbox_spawn(&db, repo_path, task, image, fresh, session_id, false, false)?;
+            cmd_sandbox_spawn(&db, repo_path, task, image, fresh, session_id, false, false, false)?;
         }
         Some(Commands::SandboxList) => {
             cmd_sandbox_list(&db)?;
         }
-        Some(Commands::SandboxAttach { task_id_or_path, fresh, kimi }) => {
+        Some(Commands::SandboxAttach { task_id_or_path, fresh, kimi, glm }) => {
             match resolve_sandbox_id(&db, &task_id_or_path) {
                 Ok(task_id) => {
-                    cmd_sandbox_attach(&db, task_id, fresh, kimi)?;
+                    cmd_sandbox_attach(&db, task_id, fresh, kimi, glm)?;
                 }
                 Err(e) => {
                     // If the input looks like a repo path and no sandbox exists,
@@ -307,8 +357,9 @@ fn main() -> Result<()> {
                             None, // session_id
                             false, // no_attach - we will attach below
                             kimi, // pass through kimi flag
+                            glm,  // pass through glm flag
                         )?;
-                        cmd_sandbox_attach(&db, task_id, fresh, kimi)?;
+                        cmd_sandbox_attach(&db, task_id, fresh, kimi, glm)?;
                     } else {
                         return Err(e);
                     }
@@ -401,6 +452,7 @@ pub(crate) fn cmd_sandbox_spawn(
     session_id: Option<String>,
     no_attach: bool,
     kimi: bool,
+    glm: bool,
 ) -> Result<String> {
     let repo = PathBuf::from(&repo_path);
     if !repo.exists() {
@@ -432,7 +484,7 @@ pub(crate) fn cmd_sandbox_spawn(
                         eprintln!("Attach with:");
                         eprintln!("  agent-sandbox attach {}", abs_repo_path_early);
                     } else {
-                        cmd_sandbox_attach(db, existing_task_id.clone(), fresh, kimi)?;
+                        cmd_sandbox_attach(db, existing_task_id.clone(), fresh, kimi, glm)?;
                     }
                     return Ok(existing_task_id);
                 }
@@ -560,10 +612,277 @@ pub(crate) fn cmd_sandbox_spawn(
         println!("Attaching to Claude session (exit to detach — container keeps running)…");
         println!("  Re-attach later: agent-sandbox attach {}  (or by path: {})", short_id, abs_repo_path);
         println!();
-        cmd_sandbox_attach(db, task_id.clone(), fresh, kimi)?;
+        cmd_sandbox_attach(db, task_id.clone(), fresh, kimi, glm)?;
     }
 
     Ok(task_id)
+}
+
+// ── Cron job commands ─────────────────────────────────────────────────────────
+
+fn cmd_cron_add(
+    db: &Database,
+    task_id_or_path: String,
+    schedule: Option<String>,
+    prompt: Option<String>,
+    file: Option<String>,
+    label: Option<String>,
+    expires: Option<String>,
+) -> Result<()> {
+    // Resolve the sandbox
+    let task_id = resolve_sandbox_id(db, &task_id_or_path)?;
+    let task = db
+        .get_task_by_id(&task_id)?
+        .ok_or_else(|| anyhow::anyhow!("Task not found: {}", task_id))?;
+
+    if task.sandbox_type != SandboxType::Podman {
+        anyhow::bail!("Task {} is not a sandbox task", task_id);
+    }
+
+    // Parse the cron definition
+    let (schedule, prompt, label, enabled, skip_if_running, file_expires) = if let Some(file_path) = file {
+        let content = std::fs::read_to_string(&file_path)
+            .with_context(|| format!("Failed to read cron file: {}", file_path))?;
+        let (sched, prompt, lbl, en, skip, exp) = cron::parse_cron_markdown(&content)?;
+        (sched, prompt, lbl.or(label), en, skip, exp)
+    } else {
+        let schedule = schedule.context("Either --schedule or --file must be provided")?;
+        let prompt = prompt.context("Either --prompt or --file must be provided")?;
+        cron::validate_schedule(&schedule)?;
+        (schedule, prompt, label, true, true, None) // defaults: enabled, skip_if_running
+    };
+    // CLI --expires overrides file expires_at
+    let expires = expires.or_else(|| file_expires.map(|exp| exp.to_rfc3339()));
+
+    // Compute next run time
+    let next_run = cron::compute_next_run(&schedule, chrono::Utc::now())?;
+
+    // Create the cron job
+    let mut job = models::CronJob::new(
+        task_id.clone(),
+        schedule.clone(),
+        prompt,
+        label,
+        next_run,
+    );
+    job.enabled = enabled;
+    job.skip_if_running = skip_if_running;
+    if let Some(exp_str) = expires {
+        job.expires_at = Some(
+            chrono::DateTime::parse_from_rfc3339(&exp_str)
+                .with_context(|| format!("Invalid expiry datetime: {exp_str} (use RFC3339, e.g. 2026-04-01T00:00:00Z)"))?
+                .with_timezone(&chrono::Utc)
+        );
+    }
+
+    if let Some(ref lbl) = job.label {
+        if db.label_exists_for_task(&task_id, lbl)? {
+            anyhow::bail!(
+                "A cron job with label '{}' already exists for this sandbox. \
+                 Use `agent-inbox cron edit {}` to update it or choose a different label.",
+                lbl, lbl
+            );
+        }
+    }
+
+    let id = db.insert_cron_job(&job)?;
+
+    println!("Created cron job {} for sandbox {}", id, task_id);
+    println!("  Schedule: {}", job.schedule);
+    println!("  Next run: {}", job.next_run);
+    if let Some(ref lbl) = job.label {
+        println!("  Label: {}", lbl);
+    }
+    println!("  Skip if running: {}", job.skip_if_running);
+    if let Some(exp) = job.expires_at {
+        println!("  Expires at: {}", exp.format("%Y-%m-%d %H:%M UTC"));
+    }
+
+    Ok(())
+}
+
+fn cmd_cron_list(db: &Database, task_id_or_path: Option<String>) -> Result<()> {
+    let task_id_filter = if let Some(input) = task_id_or_path {
+        Some(resolve_sandbox_id(db, &input)?)
+    } else {
+        None
+    };
+
+    let jobs = db.list_cron_jobs(task_id_filter.as_deref())?;
+
+    if jobs.is_empty() {
+        if task_id_filter.is_some() {
+            println!("No cron jobs found for this sandbox.");
+        } else {
+            println!("No cron jobs found.");
+        }
+        return Ok(());
+    }
+
+    println!("{:<5} {:<10} {:<20} {:<20} {:<10} {:<24} {}",
+        "ID", "TASK", "SCHEDULE", "NEXT RUN", "STATUS", "EXPIRES (UTC)", "LABEL");
+    println!("{}", "─".repeat(114));
+
+    let now = chrono::Utc::now();
+
+    for job in jobs {
+        let short_task = &job.task_id[..job.task_id.len().min(8)];
+        let label = job.label.as_deref().unwrap_or("-");
+        let status = if job.enabled {
+            if job.next_run <= now {
+                "due".to_string()
+            } else {
+                "enabled".to_string()
+            }
+        } else {
+            "disabled".to_string()
+        };
+
+        let next_run_str = if job.next_run <= now {
+            "now".to_string()
+        } else {
+            let diff = job.next_run.signed_duration_since(now);
+            let total_secs = diff.num_seconds();
+            let hours = total_secs / 3600;
+            let mins = (total_secs % 3600) / 60;
+            let secs = total_secs % 60;
+            if hours >= 24 {
+                format!("in {}d", diff.num_days())
+            } else if hours > 0 {
+                format!("in {}h {}min", hours, mins)
+            } else if mins > 0 {
+                format!("in {}min {}s", mins, secs)
+            } else {
+                format!("in {}s", secs)
+            }
+        };
+
+        let expires_str = match job.expires_at {
+            Some(exp) => exp.format("%Y-%m-%d %H:%M UTC").to_string(),
+            None => "-".to_string(),
+        };
+
+        println!("{:<5} {:<10} {:<20} {:<20} {:<10} {:<24} {}",
+            job.id.unwrap_or(0),
+            short_task,
+            job.schedule,
+            next_run_str,
+            status,
+            expires_str,
+            label.chars().take(25).collect::<String>(),
+        );
+    }
+
+    Ok(())
+}
+
+fn cmd_cron_edit(
+    db: &Database,
+    id: i64,
+    schedule: Option<String>,
+    prompt: Option<String>,
+    label: Option<String>,
+    enable: bool,
+    disable: bool,
+    expires: Option<String>,
+) -> Result<()> {
+    let mut job = db
+        .get_cron_job(id)?
+        .ok_or_else(|| anyhow::anyhow!("Cron job {} not found", id))?;
+
+    let mut updated = false;
+
+    if let Some(sched) = schedule {
+        cron::validate_schedule(&sched)?;
+        job.schedule = sched;
+        // Recompute next run
+        job.next_run = cron::compute_next_run(&job.schedule, chrono::Utc::now())?;
+        updated = true;
+    }
+
+    if let Some(p) = prompt {
+        job.prompt = p;
+        updated = true;
+    }
+
+    if let Some(l) = label {
+        job.label = Some(l);
+        updated = true;
+    }
+
+    if enable && disable {
+        anyhow::bail!("Cannot use both --enable and --disable");
+    }
+
+    if enable {
+        job.enabled = true;
+        updated = true;
+    }
+
+    if disable {
+        job.enabled = false;
+        updated = true;
+    }
+
+    if let Some(exp_str) = expires {
+        if exp_str.eq_ignore_ascii_case("none") {
+            job.expires_at = None;
+        } else {
+            job.expires_at = Some(
+                chrono::DateTime::parse_from_rfc3339(&exp_str)
+                    .with_context(|| format!("Invalid expiry datetime: {exp_str} (use RFC3339, e.g. 2026-04-01T00:00:00Z)"))?
+                    .with_timezone(&chrono::Utc)
+            );
+        }
+        updated = true;
+    }
+
+    if updated {
+        db.update_cron_job(&job)?;
+        println!("Updated cron job {}", id);
+    } else {
+        println!("No changes made to cron job {}", id);
+    }
+
+    Ok(())
+}
+
+fn cmd_cron_run(db: &Database, id: i64) -> Result<()> {
+    let job = db
+        .get_cron_job(id)?
+        .ok_or_else(|| anyhow::anyhow!("Cron job {} not found", id))?;
+
+    println!("Running cron job {} ({})", id, job.label.as_deref().unwrap_or("unnamed"));
+    println!("Target sandbox: {}", job.task_id);
+    println!("Prompt: {}", job.prompt.chars().take(60).collect::<String>());
+
+    // Check if sandbox is running
+    let task = db
+        .get_task_by_id(&job.task_id)?
+        .ok_or_else(|| anyhow::anyhow!("Task {} not found", job.task_id))?;
+
+    if task.sandbox_type != SandboxType::Podman {
+        anyhow::bail!("Task {} is not a sandbox task", job.task_id);
+    }
+
+    let container_id = task
+        .container_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("Task {} has no container_id", job.task_id))?;
+
+    let sandbox = PodmanSandbox::new();
+    match sandbox.health_check(container_id) {
+        SandboxHealth::Healthy => {
+            println!("Sandbox is healthy, injecting prompt...");
+            agent_input::inject(&task, &job.prompt)?;
+            println!("Prompt injected successfully.");
+        }
+        status => {
+            anyhow::bail!("Sandbox is not healthy ({:?}), cannot inject prompt", status);
+        }
+    }
+
+    Ok(())
 }
 
 /// List all tracked sandboxes, auto-cleaning gone entries.
@@ -702,12 +1021,28 @@ fn resolve_sandbox_id(db: &Database, input: &str) -> Result<String> {
     }
 }
 
+/// Resolve a cron job ID-or-label string to a numeric cron job id.
+fn resolve_cron_id(db: &Database, id_or_label: &str) -> Result<i64> {
+    // Try numeric first
+    if let Ok(n) = id_or_label.parse::<i64>() {
+        if db.get_cron_job(n)?.is_some() {
+            return Ok(n);
+        }
+        anyhow::bail!("Cron job {} not found", n);
+    }
+    // Try label
+    if let Some(job) = db.get_cron_job_by_label(id_or_label)? {
+        return Ok(job.id.unwrap());
+    }
+    anyhow::bail!("Cron job '{}' not found (tried as label)", id_or_label)
+}
+
 /// Attach to the Claude session inside a running sandbox.
 ///
 /// Uses `--session-id` to resume the deterministic session stored on the task.
 /// Pass `fresh = true` to generate a new random session UUID and persist it,
 /// so subsequent attaches continue from this new session.
-fn cmd_sandbox_attach(db: &Database, task_id: String, fresh: bool, kimi: bool) -> Result<()> {
+fn cmd_sandbox_attach(db: &Database, task_id: String, fresh: bool, kimi: bool, glm: bool) -> Result<()> {
     let task = db
         .get_task_by_id(&task_id)?
         .ok_or_else(|| anyhow::anyhow!("Task not found: {}", task_id))?;
@@ -761,6 +1096,19 @@ fn cmd_sandbox_attach(db: &Database, task_id: String, fresh: bool, kimi: bool) -
         let api_key = std::env::var("KIMI_API_KEY")
             .context("--kimi requires KIMI_API_KEY to be set in the host environment")?;
         eprintln!("Using Kimi backend ({})", base_url);
+        podman_args.extend([
+            "-e".into(), format!("ANTHROPIC_BASE_URL={}", base_url),
+            "-e".into(), format!("ANTHROPIC_API_KEY={}", api_key),
+            "-e".into(), "ENABLE_TOOL_SEARCH=FALSE".into(),
+        ]);
+    }
+
+    if glm {
+        let base_url = std::env::var("GLM_BASE_URL")
+            .context("--glm requires GLM_BASE_URL to be set in the host environment")?;
+        let api_key = std::env::var("GLM_API_KEY")
+            .context("--glm requires GLM_API_KEY to be set in the host environment")?;
+        eprintln!("Using GLM backend ({})", base_url);
         podman_args.extend([
             "-e".into(), format!("ANTHROPIC_BASE_URL={}", base_url),
             "-e".into(), format!("ANTHROPIC_API_KEY={}", api_key),

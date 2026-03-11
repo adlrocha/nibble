@@ -108,6 +108,9 @@ pub enum Commands {
         /// Use Kimi as the LLM backend (reads KIMI_BASE_URL and KIMI_API_KEY from host env)
         #[arg(long)]
         kimi: bool,
+        /// Use GLM as the LLM backend (reads GLM_BASE_URL and GLM_API_KEY from host env)
+        #[arg(long)]
+        glm: bool,
     },
 
     /// [internal] Kill a sandbox
@@ -168,6 +171,12 @@ pub enum Commands {
         /// Uses a distinct visual style so it stands out from regular completion notifications.
         #[arg(long)]
         attention: bool,
+    },
+
+    /// Manage scheduled cron jobs for sandboxes
+    Cron {
+        #[command(subcommand)]
+        action: CronAction,
     },
 }
 
@@ -246,5 +255,84 @@ pub enum ReportAction {
 
         /// Claude Code session ID from the hook JSON
         session_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum CronAction {
+    /// Add a new cron job for a sandbox
+    Add {
+        /// Task ID or repo path of the sandbox
+        task_id_or_path: String,
+
+        /// Cron schedule expression (e.g., "0 9 * * 1-5" for 9am weekdays)
+        #[arg(short, long)]
+        schedule: Option<String>,
+
+        /// Prompt text to send (alternative to --file)
+        #[arg(short, long)]
+        prompt: Option<String>,
+
+        /// Path to markdown file with cron definition
+        #[arg(short, long)]
+        file: Option<String>,
+
+        /// Label/name for this cron job
+        #[arg(short, long)]
+        label: Option<String>,
+
+        /// Expiry datetime in RFC3339 format (e.g. "2026-04-01T00:00:00Z").
+        /// Job is auto-disabled after this time.
+        #[arg(long)]
+        expires: Option<String>,
+    },
+
+    /// List cron jobs (optionally filtered by task)
+    List {
+        /// Optional task ID or repo path to filter by
+        task_id_or_path: Option<String>,
+    },
+
+    /// Edit an existing cron job
+    Edit {
+        /// Cron job ID or label
+        id: String,
+
+        /// New schedule expression
+        #[arg(short, long)]
+        schedule: Option<String>,
+
+        /// New prompt text
+        #[arg(short, long)]
+        prompt: Option<String>,
+
+        /// New label
+        #[arg(short, long)]
+        label: Option<String>,
+
+        /// Enable the cron job
+        #[arg(long)]
+        enable: bool,
+
+        /// Disable the cron job
+        #[arg(long)]
+        disable: bool,
+
+        /// Set or update expiry datetime in RFC3339 format (e.g. "2026-04-01T00:00:00Z").
+        /// Pass "none" to remove an existing expiry.
+        #[arg(long)]
+        expires: Option<String>,
+    },
+
+    /// Delete a cron job
+    Del {
+        /// Cron job ID or label
+        id: String,
+    },
+
+    /// Run a cron job immediately (for testing)
+    Run {
+        /// Cron job ID or label
+        id: String,
     },
 }

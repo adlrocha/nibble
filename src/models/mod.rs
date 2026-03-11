@@ -1,3 +1,3 @@
 pub mod task;
 
-pub use task::{SandboxConfig, SandboxType, Task, TaskContext, TaskStatus};
+pub use task::{CronJob, SandboxConfig, SandboxType, Task, TaskContext, TaskStatus};

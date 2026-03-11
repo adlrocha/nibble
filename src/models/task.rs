@@ -202,6 +202,52 @@ impl Task {
     }
 }
 
+/// Cron job for scheduled prompts to sandboxes
+#[derive(Debug, Clone)]
+pub struct CronJob {
+    pub id: Option<i64>,
+    pub task_id: String,
+    pub label: Option<String>,
+    pub schedule: String,
+    pub prompt: String,
+    pub enabled: bool,
+    pub skip_if_running: bool,
+    /// True while a background injection thread is running for this job.
+    /// Prevents overlap when skip_if_running is set.
+    pub running: bool,
+    pub last_run: Option<DateTime<Utc>>,
+    pub next_run: DateTime<Utc>,
+    /// Optional expiry: job is auto-disabled after this datetime.
+    pub expires_at: Option<DateTime<Utc>>,
+    #[allow(dead_code)]
+    pub created_at: DateTime<Utc>,
+}
+
+impl CronJob {
+    pub fn new(
+        task_id: String,
+        schedule: String,
+        prompt: String,
+        label: Option<String>,
+        next_run: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            id: None,
+            task_id,
+            label,
+            schedule,
+            prompt,
+            enabled: true,
+            skip_if_running: true,
+            running: false,
+            last_run: None,
+            next_run,
+            expires_at: None,
+            created_at: Utc::now(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

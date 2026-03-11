@@ -1,13 +1,13 @@
 use anyhow::{Context, Result};
-use chrono::{TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use crate::models::{SandboxConfig, SandboxType, Task, TaskContext, TaskStatus};
+use crate::models::{CronJob, SandboxConfig, SandboxType, Task, TaskContext, TaskStatus};
 
-const SCHEMA_VERSION: i32 = 3;
+const SCHEMA_VERSION: i32 = 6;
 
 pub struct Database {
     conn: Connection,
@@ -108,6 +108,22 @@ impl Database {
                 created_at INTEGER NOT NULL,
                 FOREIGN KEY (task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
             );
+
+            CREATE TABLE cron_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL,
+                label TEXT,
+                schedule TEXT NOT NULL,
+                prompt TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                skip_if_running INTEGER NOT NULL DEFAULT 1,
+                running INTEGER NOT NULL DEFAULT 0,
+                last_run INTEGER,
+                next_run INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY (task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+            );
+            CREATE INDEX idx_cron_next_run ON cron_jobs(next_run) WHERE enabled=1;
             ",
         )?;
 
@@ -147,6 +163,58 @@ impl Database {
                      FOREIGN KEY (task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
                  );",
             )?;
+        }
+
+        if from_version < 4 {
+            // Add cron_jobs table for scheduled prompts (original version, without `running`)
+            self.conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS cron_jobs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT NOT NULL,
+                    label TEXT,
+                    schedule TEXT NOT NULL,
+                    prompt TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    skip_if_running INTEGER NOT NULL DEFAULT 1,
+                    last_run INTEGER,
+                    next_run INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    FOREIGN KEY (task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_cron_next_run ON cron_jobs(next_run) WHERE enabled=1;",
+            )?;
+        }
+
+        if from_version < 5 {
+            // Add `running` column to cron_jobs if it was missing from the v4 migration
+            let has_running: bool = self.conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('cron_jobs') WHERE name='running'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap_or(0) > 0;
+            if !has_running {
+                self.conn.execute_batch(
+                    "ALTER TABLE cron_jobs ADD COLUMN running INTEGER NOT NULL DEFAULT 0;",
+                )?;
+            }
+        }
+
+        if from_version < 6 {
+            // Add `expires_at` column for optional job expiry
+            let has_expires: bool = self.conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('cron_jobs') WHERE name='expires_at'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap_or(0) > 0;
+            if !has_expires {
+                self.conn.execute_batch(
+                    "ALTER TABLE cron_jobs ADD COLUMN expires_at INTEGER;",
+                )?;
+            }
         }
 
         self.conn.execute(
@@ -516,6 +584,178 @@ impl Database {
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(states)
+    }
+
+    // Cron job methods
+    pub fn insert_cron_job(&self, job: &CronJob) -> Result<i64> {
+        let now = Utc::now().timestamp();
+        self.conn.execute(
+            "INSERT INTO cron_jobs (
+                task_id, label, schedule, prompt, enabled, skip_if_running,
+                running, last_run, next_run, expires_at, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                job.task_id,
+                job.label,
+                job.schedule,
+                job.prompt,
+                job.enabled as i32,
+                job.skip_if_running as i32,
+                job.running as i32,
+                job.last_run.map(|dt| dt.timestamp()),
+                job.next_run.timestamp(),
+                job.expires_at.map(|dt| dt.timestamp()),
+                now,
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn update_cron_job(&self, job: &CronJob) -> Result<()> {
+        self.conn.execute(
+            "UPDATE cron_jobs SET
+                label = ?1, schedule = ?2, prompt = ?3, enabled = ?4,
+                skip_if_running = ?5, running = ?6, last_run = ?7, next_run = ?8,
+                expires_at = ?9
+            WHERE id = ?10",
+            params![
+                job.label,
+                job.schedule,
+                job.prompt,
+                job.enabled as i32,
+                job.skip_if_running as i32,
+                job.running as i32,
+                job.last_run.map(|dt| dt.timestamp()),
+                job.next_run.timestamp(),
+                job.expires_at.map(|dt| dt.timestamp()),
+                job.id.unwrap_or(0),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Mark a single cron job as running=true/false (used by the background thread).
+    pub fn set_cron_job_running(&self, id: i64, running: bool) -> Result<()> {
+        self.conn.execute(
+            "UPDATE cron_jobs SET running = ?1 WHERE id = ?2",
+            params![running as i32, id],
+        )?;
+        Ok(())
+    }
+
+    /// Clear the running flag on all cron jobs.  Called on daemon startup to
+    /// recover from a crash where in-flight jobs were left with running=1.
+    pub fn reset_all_cron_running_flags(&self) -> Result<()> {
+        self.conn.execute("UPDATE cron_jobs SET running = 0 WHERE running = 1", [])?;
+        Ok(())
+    }
+
+    pub fn get_cron_job(&self, id: i64) -> Result<Option<CronJob>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, task_id, label, schedule, prompt, enabled, skip_if_running,
+                    running, last_run, next_run, expires_at, created_at
+             FROM cron_jobs WHERE id = ?1"
+        )?;
+
+        let job = stmt
+            .query_row(params![id], |row| self.row_to_cron_job(row))
+            .optional()?;
+
+        Ok(job)
+    }
+
+    pub fn list_cron_jobs(&self, task_id_filter: Option<&str>) -> Result<Vec<CronJob>> {
+        let jobs = match task_id_filter {
+            Some(task_id) => {
+                let mut stmt = self.conn.prepare(
+                    "SELECT id, task_id, label, schedule, prompt, enabled, skip_if_running,
+                            running, last_run, next_run, expires_at, created_at
+                     FROM cron_jobs WHERE task_id = ?1 ORDER BY created_at DESC",
+                )?;
+                let jobs = stmt.query_map(params![task_id], |row| self.row_to_cron_job(row))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                jobs
+            }
+            None => {
+                let mut stmt = self.conn.prepare(
+                    "SELECT id, task_id, label, schedule, prompt, enabled, skip_if_running,
+                            running, last_run, next_run, expires_at, created_at
+                     FROM cron_jobs ORDER BY created_at DESC",
+                )?;
+                let jobs = stmt.query_map([], |row| self.row_to_cron_job(row))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                jobs
+            }
+        };
+
+        Ok(jobs)
+    }
+
+    pub fn delete_cron_job(&self, id: i64) -> Result<bool> {
+        let affected = self
+            .conn
+            .execute("DELETE FROM cron_jobs WHERE id = ?1", params![id])?;
+
+        Ok(affected > 0)
+    }
+
+    pub fn get_cron_job_by_label(&self, label: &str) -> Result<Option<CronJob>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, task_id, label, schedule, prompt, enabled, skip_if_running,
+                    running, last_run, next_run, expires_at, created_at
+             FROM cron_jobs WHERE label = ?1 LIMIT 1",
+        )?;
+        let job = stmt
+            .query_row(params![label], |row| self.row_to_cron_job(row))
+            .optional()?;
+        Ok(job)
+    }
+
+    pub fn label_exists_for_task(&self, task_id: &str, label: &str) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM cron_jobs WHERE task_id = ?1 AND label = ?2",
+            params![task_id, label],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Get all cron jobs that are due to run (next_run <= now and enabled)
+    pub fn get_due_cron_jobs(&self, now: DateTime<Utc>) -> Result<Vec<CronJob>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, task_id, label, schedule, prompt, enabled, skip_if_running,
+                    running, last_run, next_run, expires_at, created_at
+             FROM cron_jobs WHERE enabled = 1 AND next_run <= ?1
+             ORDER BY next_run ASC"
+        )?;
+
+        let jobs = stmt
+            .query_map(params![now.timestamp()], |row| self.row_to_cron_job(row))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(jobs)
+    }
+
+    fn row_to_cron_job(&self, row: &rusqlite::Row) -> rusqlite::Result<CronJob> {
+        let last_run_ts: Option<i64> = row.get(8)?;
+        let next_run_ts: i64 = row.get(9)?;
+        let expires_ts: Option<i64> = row.get(10)?;
+        let created_ts: i64 = row.get(11)?;
+
+        Ok(CronJob {
+            id: Some(row.get(0)?),
+            task_id: row.get(1)?,
+            label: row.get(2)?,
+            schedule: row.get(3)?,
+            prompt: row.get(4)?,
+            enabled: row.get::<_, i32>(5)? != 0,
+            skip_if_running: row.get::<_, i32>(6)? != 0,
+            running: row.get::<_, i32>(7)? != 0,
+            last_run: last_run_ts.map(|ts| Utc.timestamp_opt(ts, 0).unwrap()),
+            next_run: Utc.timestamp_opt(next_run_ts, 0).unwrap(),
+            expires_at: expires_ts.map(|ts| Utc.timestamp_opt(ts, 0).unwrap()),
+            created_at: Utc.timestamp_opt(created_ts, 0).unwrap(),
+        })
     }
 
     fn row_to_task(&self, row: &rusqlite::Row) -> rusqlite::Result<Task> {
