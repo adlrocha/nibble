@@ -332,6 +332,27 @@ impl Sandbox for PodmanSandbox {
 
         // Mount host's ~/.claude so the container shares auth, config, and hooks
         let home_dir = dirs::home_dir().context("Failed to get home directory")?;
+
+        // If the repo has a project-level .claude/settings.json, shadow it inside
+        // the container with an empty file.  This prevents hooks defined there from
+        // duplicating the global hooks already in ~/.claude/settings.json.
+        let repo_claude_settings = repo_abs.join(".claude").join("settings.json");
+        if repo_claude_settings.exists() {
+            let empty_settings_path = home_dir.join(".agent-tasks").join("cache").join("empty-claude-settings.json");
+            if let Some(parent) = empty_settings_path.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            if !empty_settings_path.exists() {
+                std::fs::write(&empty_settings_path, b"{}").ok();
+            }
+            eprintln!("[sandbox] Shadowing repo .claude/settings.json to prevent hook duplication");
+            args.push("-v".to_string());
+            args.push(format!(
+                "{}:/workspace/.claude/settings.json:ro",
+                empty_settings_path.display()
+            ));
+        }
+
         let claude_dir = home_dir.join(".claude");
         if claude_dir.exists() {
             args.push("-v".to_string());

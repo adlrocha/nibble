@@ -545,6 +545,11 @@ fn route_text_to_task(
         }
     }
 
+    // Record the bot message count BEFORE we start the inject.
+    // This is used by the safety-net to detect if Stop hook sent a notification.
+    // Using a count rather than a timestamp avoids clock-skew and SQLite WAL issues.
+    let messages_before = db.bot_message_count_for_task(task_id).unwrap_or(0);
+
     // Acknowledge immediately so the user knows their message was received.
     send_notice(config, chat_id, "📨 Message sent to agent.")?;
 
@@ -556,7 +561,7 @@ fn route_text_to_task(
     let db_path = crate::db::default_db_path();
 
     thread::spawn(move || {
-        inject_with_heartbeat(&task, &text_owned, &config_clone, &task_id_owned, &db_path);
+        inject_with_heartbeat(&task, &text_owned, &config_clone, &task_id_owned, &db_path, messages_before);
     });
 
     Ok(())
@@ -570,22 +575,20 @@ const STOP_HOOK_TIMEOUT_SECS: u64 = 30;
 
 /// Run inject inside a background thread, sending periodic heartbeats and a
 /// safety-net completion notification when the Claude process exits.
+///
+/// `messages_before` is the bot_message row count for this task recorded just
+/// before the inject was started.  After the process exits we wait to see if
+/// a new row appears (count increases), which means the Stop hook already sent
+/// the completion notification.  Using a count rather than a timestamp avoids
+/// clock-skew and SQLite WAL snapshot issues that caused duplicate notifications.
 fn inject_with_heartbeat(
     task: &crate::models::Task,
     text: &str,
     config: &TelegramConfig,
     task_id: &str,
     db_path: &std::path::Path,
+    messages_before: i64,
 ) {
-    // Record the Unix timestamp just before we start so that we can later ask
-    // "did a bot_message get inserted for this task after we started?"  That is
-    // a more reliable proxy for "did the Stop hook send the notification" than
-    // comparing attention_reason, which may not be updated on every turn.
-    //
-    // Subtract 5 seconds to account for potential clock skew between host and
-    // container — the Stop hook runs inside the container and may record an
-    // earlier timestamp if the container clock is slightly behind.
-    let turn_start_unix = chrono::Utc::now().timestamp() - 5;
 
     // Spawn the Claude process.
     let mut child = match agent_input::inject_returning_child(task, text) {
@@ -651,10 +654,9 @@ fn inject_with_heartbeat(
     let mut hook_notified = false;
     for i in 0..STOP_HOOK_TIMEOUT_SECS {
         thread::sleep(Duration::from_secs(1));
-        hook_notified = db
-            .has_bot_message_since(task_id, turn_start_unix)
-            .unwrap_or(false);
-        if hook_notified {
+        let count_now = db.bot_message_count_for_task(task_id).unwrap_or(messages_before);
+        if count_now > messages_before {
+            hook_notified = true;
             eprintln!("[listen] Stop hook notified after {}s, suppressing safety-net", i + 1);
             break;
         }
@@ -901,6 +903,10 @@ fn check_and_run_cron_jobs(db: &Database, config: &TelegramConfig) -> Result<()>
         );
         let _ = telegram::send(config, &start_msg);
 
+        // Record the bot message count BEFORE we start the inject.
+        // This is used by the safety-net to detect if Stop hook sent a notification.
+        let messages_before = db.bot_message_count_for_task(&job.task_id).unwrap_or(0);
+
         // Reuse the existing inject_with_heartbeat path (same as Telegram replies).
         let db_path = crate::db::default_db_path();
         let config_clone = config.clone();
@@ -909,7 +915,7 @@ fn check_and_run_cron_jobs(db: &Database, config: &TelegramConfig) -> Result<()>
         let task_id_clone = job.task_id.clone();
 
         thread::spawn(move || {
-            inject_with_heartbeat(&task_clone, &prompt_clone, &config_clone, &task_id_clone, &db_path);
+            inject_with_heartbeat(&task_clone, &prompt_clone, &config_clone, &task_id_clone, &db_path, messages_before);
             // Clear the running flag when the injection finishes.
             if let Ok(db) = Database::open(&db_path) {
                 let _ = db.set_cron_job_running(job_id, false);

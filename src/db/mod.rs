@@ -427,15 +427,16 @@ impl Database {
         Ok(task_id)
     }
 
-    /// Return true if a bot message was sent for `task_id` at or after `since_unix`.
-    /// Used by the safety-net logic to detect whether the Stop hook already notified.
-    pub fn has_bot_message_since(&self, task_id: &str, since_unix: i64) -> Result<bool> {
+    /// Return the total number of bot messages recorded for `task_id`.
+    /// Used by the safety-net to detect new notifications added after an inject started,
+    /// without relying on timestamps (avoids clock-skew and WAL snapshot issues).
+    pub fn bot_message_count_for_task(&self, task_id: &str) -> Result<i64> {
         let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM bot_messages WHERE task_id = ?1 AND sent_at >= ?2",
-            params![task_id, since_unix],
+            "SELECT COUNT(*) FROM bot_messages WHERE task_id = ?1",
+            params![task_id],
             |row| row.get(0),
         )?;
-        Ok(count > 0)
+        Ok(count)
     }
 
     /// Delete bot_messages older than the given retention period (same cadence as tasks cleanup).
