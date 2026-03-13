@@ -57,7 +57,7 @@ pub struct SandboxConfig {
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
-            image: "agent-inbox-sandbox:latest".to_string(),
+            image: "nibble-sandbox:latest".to_string(),
             port_ranges: vec!["3000-3100".to_string(), "8000-8100".to_string()],
             env_vars: HashMap::new(),
             privileged: true, // Default to privileged for flexibility

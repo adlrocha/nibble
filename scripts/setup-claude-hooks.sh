@@ -1,5 +1,5 @@
 #!/bin/bash
-# Setup Claude Code hooks for agent-inbox integration
+# Setup Claude Code hooks for nibble integration
 # This installs hooks globally in ~/.claude/settings.json
 
 set -e
@@ -7,7 +7,7 @@ set -e
 CLAUDE_SETTINGS_DIR="$HOME/.claude"
 CLAUDE_SETTINGS_FILE="$CLAUDE_SETTINGS_DIR/settings.json"
 
-echo "Setting up Claude Code hooks for agent-inbox..."
+echo "Setting up Claude Code hooks for nibble..."
 
 # Create .claude directory if it doesn't exist
 mkdir -p "$CLAUDE_SETTINGS_DIR"
@@ -23,13 +23,13 @@ mkdir -p "$CLAUDE_SETTINGS_DIR"
 #
 # The SessionEnd hook marks the task as exited when the user quits Claude Code.
 
-STOP_CMD='if [ -n "$AGENT_TASK_ID" ]; then INPUT=$(cat); if command -v jq >/dev/null 2>&1; then SID=$(printf "%s" "$INPUT" | jq -r ".sessionId // .session_id // empty"); [ -n "$SID" ] && agent-inbox report session-id "$AGENT_TASK_ID" "$SID" 2>/dev/null; MSG=$(printf "%s" "$INPUT" | jq -r ".last_assistant_message // \"(no message)\""); agent-inbox report last-message "$AGENT_TASK_ID" "$MSG" 2>/dev/null || true; else MSG="(install jq to see last message)"; fi; agent-inbox report complete "$AGENT_TASK_ID" 2>/dev/null; notify-send "Claude Code" "Finished generating" 2>/dev/null || true; agent-inbox notify --task-id "$AGENT_TASK_ID" --message "$MSG" 2>/dev/null || true; fi'
+STOP_CMD='if [ -n "$AGENT_TASK_ID" ]; then INPUT=$(cat); if command -v jq >/dev/null 2>&1; then SID=$(printf "%s" "$INPUT" | jq -r ".sessionId // .session_id // empty"); [ -n "$SID" ] && nibble report session-id "$AGENT_TASK_ID" "$SID" 2>/dev/null; MSG=$(printf "%s" "$INPUT" | jq -r ".last_assistant_message // \"(no message)\""); nibble report last-message "$AGENT_TASK_ID" "$MSG" 2>/dev/null || true; else MSG="(install jq to see last message)"; fi; nibble report complete "$AGENT_TASK_ID" 2>/dev/null; notify-send "Claude Code" "Finished generating" 2>/dev/null || true; nibble notify --task-id "$AGENT_TASK_ID" --message "$MSG" 2>/dev/null || true; fi'
 
-NOTIFY_CMD='if [ -n "$AGENT_TASK_ID" ]; then INPUT=$(cat); if command -v jq >/dev/null 2>&1; then TOOL=$(printf "%s" "$INPUT" | jq -r ".tool_name // empty"); TOOL_INPUT=$(printf "%s" "$INPUT" | jq -c ".tool_input // empty"); BASE=$(printf "%s" "$INPUT" | jq -r ".message // \"Permission required\""); if [ -n "$TOOL" ]; then MSG="$BASE\nTool: $TOOL"; if [ -n "$TOOL_INPUT" ] && [ "$TOOL_INPUT" != "null" ]; then SHORT=$(printf "%s" "$TOOL_INPUT" | jq -r "to_entries | map(.key + \": \" + (.value | tostring)) | join(\", \")" 2>/dev/null | cut -c1-120); MSG="$MSG\n$SHORT"; fi; else MSG="$BASE"; fi; else MSG="Permission required (install jq for details)"; fi; agent-inbox notify --task-id "$AGENT_TASK_ID" --message "$MSG" --attention 2>/dev/null; fi'
+NOTIFY_CMD='if [ -n "$AGENT_TASK_ID" ]; then INPUT=$(cat); if command -v jq >/dev/null 2>&1; then TOOL=$(printf "%s" "$INPUT" | jq -r ".tool_name // empty"); TOOL_INPUT=$(printf "%s" "$INPUT" | jq -c ".tool_input // empty"); BASE=$(printf "%s" "$INPUT" | jq -r ".message // \"Permission required\""); if [ -n "$TOOL" ]; then MSG="$BASE\nTool: $TOOL"; if [ -n "$TOOL_INPUT" ] && [ "$TOOL_INPUT" != "null" ]; then SHORT=$(printf "%s" "$TOOL_INPUT" | jq -r "to_entries | map(.key + \": \" + (.value | tostring)) | join(\", \")" 2>/dev/null | cut -c1-120); MSG="$MSG\n$SHORT"; fi; else MSG="$BASE"; fi; else MSG="Permission required (install jq for details)"; fi; nibble notify --task-id "$AGENT_TASK_ID" --message "$MSG" --attention 2>/dev/null; fi'
 
-RUNNING_CMD='if [ -n "$AGENT_TASK_ID" ]; then agent-inbox report running "$AGENT_TASK_ID" 2>/dev/null; fi'
+RUNNING_CMD='if [ -n "$AGENT_TASK_ID" ]; then nibble report running "$AGENT_TASK_ID" 2>/dev/null; fi'
 
-EXITED_CMD='if [ -n "$AGENT_TASK_ID" ]; then agent-inbox report exited "$AGENT_TASK_ID" 2>/dev/null; fi'
+EXITED_CMD='if [ -n "$AGENT_TASK_ID" ]; then nibble report exited "$AGENT_TASK_ID" 2>/dev/null; fi'
 
 # Check if settings.json exists
 if [ -f "$CLAUDE_SETTINGS_FILE" ]; then
@@ -42,7 +42,7 @@ if [ -f "$CLAUDE_SETTINGS_FILE" ]; then
 
     # Try to merge hooks into existing settings using jq if available
     if command -v jq &> /dev/null; then
-        # Remove any existing agent-inbox hooks first so we always write the
+        # Remove any existing nibble hooks first so we always write the
         # latest version (avoids stale hook commands after an upgrade).
         if grep -q "AGENT_TASK_ID" "$CLAUDE_SETTINGS_FILE" 2>/dev/null; then
             jq 'del(.hooks)' "$CLAUDE_SETTINGS_FILE" > "$CLAUDE_SETTINGS_FILE.tmp" \
@@ -105,7 +105,7 @@ else
 fi
 
 echo ""
-echo "Claude Code hooks installed successfully!"
+echo "Claude Code hooks installed for nibble!"
 echo ""
 echo "Hooks configured:"
 echo "  - UserPromptSubmit:  marks task as 'running' when you send a message"

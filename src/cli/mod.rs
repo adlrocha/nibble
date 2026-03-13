@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "agent-inbox")]
+#[command(name = "nibble")]
 #[command(about = "Track and monitor tasks across multiple LLM/coding agents", long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
@@ -75,75 +75,12 @@ pub enum Commands {
         pid: i32,
     },
 
-    // ── Internal sandbox subcommands (called by agent-sandbox script) ──────────
+    // ── Sandbox subcommands ────────────────────────────────────────────────────
 
-    /// [internal] Spawn a sandboxed agent
-    #[command(hide = true, name = "_sandbox_spawn")]
-    SandboxSpawn {
-        repo_path: String,
-        #[arg(short, long)]
-        task: Option<String>,
-        #[arg(long, default_value = "agent-inbox-sandbox:latest")]
-        image: String,
-        /// Start a new session (generates a fresh random UUID, replacing the stored one)
-        #[arg(long)]
-        fresh: bool,
-        /// Use a specific Claude session UUID instead of the deterministic repo UUID
-        #[arg(long)]
-        session_id: Option<String>,
-    },
-
-    /// [internal] List sandboxes
-    #[command(hide = true, name = "_sandbox_list")]
-    SandboxList,
-
-    /// [internal] Attach to a sandbox container
-    #[command(hide = true, name = "_sandbox_attach")]
-    SandboxAttach {
-        /// Task ID (or a prefix) OR a repo path (e.g. "." or "/path/to/repo")
-        task_id_or_path: String,
-        /// Start a fresh session instead of resuming the last conversation
-        #[arg(long)]
-        fresh: bool,
-        /// Use Kimi as the LLM backend (reads KIMI_BASE_URL and KIMI_API_KEY from host env)
-        #[arg(long)]
-        kimi: bool,
-        /// Use GLM as the LLM backend (reads GLM_BASE_URL and GLM_API_KEY from host env)
-        #[arg(long)]
-        glm: bool,
-    },
-
-    /// [internal] Kill a sandbox
-    #[command(hide = true, name = "_sandbox_kill")]
-    SandboxKill {
-        /// Task ID (or prefix) OR repo path (e.g. "." or "/path/to/repo"). Omit when --all is set.
-        task_id_or_path: Option<String>,
-        /// Kill all running sandbox containers
-        #[arg(long)]
-        all: bool,
-    },
-
-    /// Restart all stopped sandbox containers (e.g. after a host reboot)
-    ///
-    /// Attempts to start any stopped containers tracked in the database.
-    /// Containers that no longer exist are cleaned up.
-    #[command(name = "sandbox-restart")]
-    SandboxRestart,
-
-    /// [internal] Resume sandboxes after reboot
-    #[command(hide = true, name = "_sandbox_resume")]
-    SandboxResume {
-        #[arg(short, long)]
-        all: bool,
-    },
-
-    /// [internal] Build the sandbox image
-    #[command(hide = true, name = "_sandbox_build")]
-    SandboxBuild {
-        #[arg(long, default_value = "agent-inbox-sandbox:latest")]
-        image: String,
-        #[arg(long)]
-        rebuild: bool,
+    /// Manage sandboxed agent containers
+    Sandbox {
+        #[command(subcommand)]
+        action: SandboxAction,
     },
 
     /// Inject a message into a running sandbox agent (bypasses Telegram)
@@ -177,6 +114,76 @@ pub enum Commands {
     Cron {
         #[command(subcommand)]
         action: CronAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SandboxAction {
+    /// Spawn a sandboxed agent for a repo
+    Spawn {
+        /// Path to the repository to run the agent in
+        repo_path: String,
+        /// Task description
+        #[arg(short, long)]
+        task: Option<String>,
+        /// Sandbox image to use
+        #[arg(long, default_value = "nibble-sandbox:latest")]
+        image: String,
+        /// Start a new session (generates a fresh random UUID, replacing the stored one)
+        #[arg(long)]
+        fresh: bool,
+        /// Use a specific Claude session UUID instead of the deterministic repo UUID
+        #[arg(long)]
+        session_id: Option<String>,
+    },
+
+    /// List all sandbox containers and their status
+    List,
+
+    /// Attach to a running sandbox container
+    Attach {
+        /// Task ID (or a prefix) OR a repo path (e.g. "." or "/path/to/repo")
+        task_id_or_path: String,
+        /// Start a fresh session instead of resuming the last conversation
+        #[arg(long)]
+        fresh: bool,
+        /// Use Kimi as the LLM backend (reads KIMI_BASE_URL and KIMI_API_KEY from host env)
+        #[arg(long)]
+        kimi: bool,
+        /// Use GLM as the LLM backend (reads GLM_BASE_URL and GLM_API_KEY from host env)
+        #[arg(long)]
+        glm: bool,
+    },
+
+    /// Stop and remove a sandbox container
+    Kill {
+        /// Task ID (or prefix) OR repo path (e.g. "." or "/path/to/repo"). Omit when --all is set.
+        task_id_or_path: Option<String>,
+        /// Kill all running sandbox containers
+        #[arg(long)]
+        all: bool,
+    },
+
+    /// Restart all stopped sandbox containers (e.g. after a host reboot)
+    ///
+    /// Attempts to start any stopped containers tracked in the database.
+    /// Containers that no longer exist are cleaned up.
+    Restart,
+
+    /// Resume sandboxes after a host reboot
+    Resume {
+        #[arg(short, long)]
+        all: bool,
+    },
+
+    /// Build or rebuild the sandbox base image
+    Build {
+        /// Image name/tag to build
+        #[arg(long, default_value = "nibble-sandbox:latest")]
+        image: String,
+        /// Force a clean rebuild from scratch
+        #[arg(long)]
+        rebuild: bool,
     },
 }
 

@@ -132,7 +132,7 @@ pub fn is_podman_available() -> bool {
         .unwrap_or(false)
 }
 
-/// Get the base directory for agent-inbox data
+/// Get the base directory for nibble data
 pub fn get_data_dir() -> Result<PathBuf> {
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
     let data_dir = home.join(".agent-tasks");
@@ -168,7 +168,7 @@ mod tests {
     #[test]
     fn test_sandbox_config_default() {
         let config = SandboxConfig::default();
-        assert_eq!(config.image, "agent-inbox-sandbox:latest");
+        assert_eq!(config.image, "nibble-sandbox:latest");
         assert!(config.privileged);
         assert_eq!(config.port_ranges.len(), 2);
     }

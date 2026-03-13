@@ -1,8 +1,8 @@
 //! Native messaging host for browser extension.
-//! Receives task updates from extension and writes to agent-inbox database.
+//! Receives task updates from extension and writes to nibble database.
 
-use agent_inbox::db::{default_db_path, Database};
-use agent_inbox::models::{Task, TaskContext, TaskStatus};
+use nibble::db::{default_db_path, Database};
+use nibble::models::{Task, TaskContext, TaskStatus};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

@@ -1,4 +1,6 @@
-# Agent Inbox
+# Nibble
+
+> *In Futurama, Nibbler's species is tasked with protecting the universe from giant flying brains. Nibble is your orchestrator — keeping watch over the smaller agents so you don't have to.*
 
 A CLI tool that runs Claude Code agents inside isolated Podman sandboxes, monitors their status, sends Telegram notifications when they need your attention, and lets you reply from your phone to unblock them — all without touching your keyboard.
 
@@ -18,8 +20,8 @@ A CLI tool that runs Claude Code agents inside isolated Podman sandboxes, monito
 ┌─────────────────────────────────────────────────────────────────────┐
 │                          HOST SYSTEM                                │
 │                                                                     │
-│  agent-inbox CLI          SQLite DB           Telegram Listener     │
-│  ─────────────            ─────────           ────────────────      │
+│  nibble CLI               SQLite DB           Telegram Listener     │
+│  ─────────                ─────────           ────────────────      │
 │  sandbox / kill           tasks.db            long-polls Telegram   │
 │  list / watch             container_state     routes replies to     │
 │  prune / inject           session_id          sandbox via exec      │
@@ -31,7 +33,7 @@ A CLI tool that runs Claude Code agents inside isolated Podman sandboxes, monito
 │  │                                                              │   │
 │  │  claude --resume <id>  ←── podman exec -i (stdin message)   │   │
 │  │                                                              │   │
-│  │  Stop hook → agent-inbox report session-id / last-message   │   │
+│  │  Stop hook → nibble report session-id / last-message        │   │
 │  │  /workspace  (repo mounted RW)                              │   │
 │  └──────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────┘
@@ -40,7 +42,7 @@ A CLI tool that runs Claude Code agents inside isolated Podman sandboxes, monito
                📱 Telegram (your phone)
 ```
 
-**Notification flow**: Claude Code `Stop` hook → `agent-inbox report last-message` + `agent-inbox notify` → Telegram message with Reply button
+**Notification flow**: Claude Code `Stop` hook → `nibble report last-message` + `nibble notify` → Telegram message with Reply button
 
 **Reply flow**: Telegram reply → listener daemon → `podman exec -i claude --resume <session-id>` (stdin) → Claude processes turn → Stop hook fires → next notification sent
 
@@ -58,7 +60,7 @@ Podman is installed automatically by `install.sh` if not present.
 
 ```bash
 git clone <repo-url>
-cd agent-inbox
+cd nibble
 
 # Full install (builds binary, installs podman if needed, builds sandbox image)
 ./install.sh
@@ -80,11 +82,11 @@ alias claude='~/.agent-tasks/wrappers/claude-wrapper'
 What `install.sh` does:
 1. Installs Podman if not present (apt / dnf / pacman / brew)
 2. Builds release binaries with `cargo build --release`
-3. Installs `agent-inbox`, `agent-bridge`, and `agent-sandbox` to `~/.local/bin/`
+3. Installs `nibble` and `agent-bridge` to `~/.local/bin/`
 4. Copies wrappers to `~/.agent-tasks/wrappers/`
 5. Installs Claude Code hooks to `~/.claude/settings.json`
-6. Builds the sandbox image (`agent-inbox-sandbox:latest` — node:20-slim + claude-code)
-7. Enables `agent-inbox-resume.service` (systemd user service, resumes agents on reboot)
+6. Builds the sandbox image (`nibble-sandbox:latest` — node:20-slim + claude-code)
+7. Enables `nibble-resume.service` (systemd user service, resumes agents on reboot)
 8. Optionally sets up Telegram and the reply listener daemon
 
 ---
@@ -94,16 +96,15 @@ What `install.sh` does:
 ### Start an agent
 
 ```bash
-# Quickest way — use the convenience script
-agent-sandbox /path/to/repo
-agent-sandbox /path/to/repo "Fix the authentication bug"
+# Spawn a sandbox and attach immediately
+nibble sandbox spawn /path/to/repo
+nibble sandbox spawn /path/to/repo --task "Fix the authentication bug"
 
-# Or directly via agent-inbox
-agent-inbox sandbox /path/to/repo
-agent-inbox sandbox /path/to/repo --task "Fix the authentication bug"
+# Spawn without attaching (run in background)
+nibble sandbox spawn /path/to/repo --task "Fix the authentication bug"
 
 # Build/refresh the sandbox image only (no agent)
-agent-sandbox --build-only
+nibble sandbox build
 ```
 
 On first run the sandbox image is built (~2-3 min). Subsequent spawns are fast.
@@ -118,16 +119,14 @@ The container gets:
 ### List open sandboxes
 
 ```bash
-agent-sandbox list
-# or
-agent-inbox sandbox list
+nibble sandbox list
 ```
 
 Output:
 ```
-TASK ID                CONTAINER                        STATUS     REPO
-──────────────────────────────────────────────────────────────────────────────────────────
-a1b2c3d4e5f6g7h8i9    agent-inbox-a1b2c3d4e5f6g7h8     running    /home/you/projects/myapp
+TASK ID              STARTED            STATUS       REPO
+──────────────────────────────────────────────────────────────────────────────────────
+a1b2c3d4             2026-03-13 09:12   healthy      /home/you/projects/myapp
 ```
 
 ### Attach to a running sandbox
@@ -136,37 +135,41 @@ Drop into an interactive Claude Code session inside the container. Detaching doe
 
 ```bash
 # By repo path — most convenient from inside the repo
-agent-sandbox attach .
-agent-sandbox attach /path/to/repo
+nibble sandbox attach .
+nibble sandbox attach /path/to/repo
 
 # By task ID or prefix
-agent-sandbox attach <task-id>
-agent-sandbox attach a1b2c3d4
+nibble sandbox attach <task-id>
+nibble sandbox attach a1b2c3d4
 
 # Start a fresh conversation instead of resuming
-agent-sandbox attach . --fresh
+nibble sandbox attach . --fresh
+
+# Use an alternative LLM backend
+nibble sandbox attach . --kimi
+nibble sandbox attach . --glm
 ```
 
 Detach with `exit` or `Ctrl+C`.
 
-### Watch logs
+### Watch container logs
 
 ```bash
-podman logs -f agent-inbox-<task-id>
+podman logs -f nibble-<timestamp>-<short-id>
 ```
 
 ### Kill a sandbox
 
 ```bash
 # By repo path
-agent-sandbox kill .
-agent-sandbox kill /path/to/repo
+nibble sandbox kill .
+nibble sandbox kill /path/to/repo
 
 # By task ID or prefix
-agent-sandbox kill <task-id>
+nibble sandbox kill <task-id>
 
 # Kill all sandboxes
-agent-sandbox kill --all
+nibble sandbox kill --all
 ```
 
 Stops the container and marks the task as exited.
@@ -176,9 +179,7 @@ Stops the container and marks the task as exited.
 Run automatically on login via systemd, or manually:
 
 ```bash
-agent-sandbox --resume
-# or
-agent-inbox resume --all
+nibble sandbox resume --all
 ```
 
 ---
@@ -187,29 +188,29 @@ agent-inbox resume --all
 
 ```bash
 # Show running tasks (default)
-agent-inbox
+nibble
 
 # List all tasks
-agent-inbox list --all
+nibble list --all
 
 # Filter by status
-agent-inbox list --status running
-agent-inbox list --status completed
-agent-inbox list --status exited
+nibble list --status running
+nibble list --status completed
+nibble list --status exited
 
 # Live dashboard (refreshes every 2s)
-agent-inbox watch
+nibble watch
 
 # Detailed view of one task
-agent-inbox show <task-id>
+nibble show <task-id>
 
 # Clean up completed/exited tasks
-agent-inbox clear-all
-agent-inbox reset --force   # wipe everything
+nibble clear-all
+nibble reset --force   # wipe everything
 
 # Prune stale tasks (dead PIDs / gone containers → mark exited)
 # Runs automatically every ~5 min inside the listen daemon
-agent-inbox prune
+nibble prune
 ```
 
 ---
@@ -257,18 +258,72 @@ Claude needs permission to run: npm install
 ./install.sh --listen
 ```
 
-This installs a systemd user service (`agent-inbox-listen.service`) that long-polls Telegram. Every notification has a **↩ Reply** button — tap it, type your message, and it gets injected into the agent inside its container.
+This installs a systemd user service (`agent-listener.service`) that long-polls Telegram. Every notification has a **↩ Reply** button — tap it, type your message, and it gets injected into the agent inside its container.
 
 ```bash
 # Daemon management
-systemctl --user status agent-inbox-listen
-journalctl --user -u agent-inbox-listen -f
+systemctl --user status agent-listener
+journalctl --user -u agent-listener -f
 ```
 
 You can also inject directly from the terminal (bypasses Telegram):
 
 ```bash
-agent-inbox inject <task-id> "Yes, proceed with the migration"
+nibble inject <task-id> "Yes, proceed with the migration"
+```
+
+#### Telegram bot commands
+
+```
+/help           — show available commands
+/sandboxes      — list running sandboxes with reply buttons
+/spawn <path>   — spawn a new sandbox
+/cron list      — list scheduled cron jobs
+```
+
+---
+
+## Cron Jobs
+
+Schedule prompts to run automatically inside a sandbox:
+
+```bash
+# Add a daily standup at 9am weekdays
+nibble cron add ~/projects/myapp \
+    --schedule "0 9 * * 1-5" \
+    --prompt "Review yesterday's commits and summarise what was done." \
+    --label "Daily Standup"
+
+# From a markdown file (easier for long prompts)
+nibble cron add ~/projects/myapp --file my-cron.md
+
+# List all cron jobs
+nibble cron list
+nibble cron list ~/projects/myapp
+
+# Edit a job
+nibble cron edit "Daily Standup" --schedule "0 8 * * 1-5"
+nibble cron edit "Daily Standup" --disable
+
+# Delete a job
+nibble cron del "Daily Standup"
+
+# Run immediately (for testing)
+nibble cron run "Daily Standup"
+```
+
+Markdown file format (`my-cron.md`):
+```markdown
+# Daily Standup
+
+schedule = "0 9 * * 1-5"
+enabled = true
+skip_if_running = true
+
+## Prompt
+
+Please review yesterday's commits and prepare a summary of what was accomplished.
+Focus on the main branch changes.
 ```
 
 ---
@@ -279,11 +334,11 @@ agent-inbox inject <task-id> "Yes, proceed with the migration"
 
 Each repo gets **one long-lived container**. The container starts with `sleep infinity` as PID 1 and keeps running between sessions. Claude Code is launched transiently via `podman exec` on attach and exits when you detach — the container itself is unaffected.
 
-If you try to spawn a sandbox for a repo that already has one, agent-inbox re-attaches to the existing container instead.
+If you try to spawn a sandbox for a repo that already has one, nibble re-attaches to the existing container instead.
 
 ### Session continuity
 
-When you attach, Claude resumes the most recent conversation for the repo using `--continue`. Every attach — whether interactive from the terminal or a Telegram reply injected remotely — picks up the same conversation history. Session state is stored inside the container at `/workspace/.claude/projects/`.
+When you attach, Claude resumes the most recent conversation for the repo using `--resume`. Every attach — whether interactive from the terminal or a Telegram reply injected remotely — picks up the same conversation history. Session state is stored inside the container at `/workspace/.claude/projects/`.
 
 ### Telegram injection
 
@@ -326,31 +381,40 @@ Network is host-mode, so services started inside the container (e.g. `npm run de
 
 ---
 
-## Scripts Reference
+## Command Reference
 
-| Script / Command | Purpose |
-|-----------------|---------|
-| `install.sh` | One-command install / upgrade |
-| `install.sh --telegram` | Also set up Telegram bot |
-| `install.sh --listen` | Also start reply listener daemon |
-| `agent-sandbox <repo>` | Start a sandboxed agent |
-| `agent-sandbox list` | List open sandboxes |
-| `agent-sandbox attach .` | Attach to sandbox for current repo |
-| `agent-sandbox attach <id>` | Attach to sandbox by task ID or prefix |
-| `agent-sandbox kill .` | Kill sandbox for current repo |
-| `agent-sandbox kill <id>` | Kill sandbox by task ID or prefix |
-| `agent-sandbox --resume` | Resume agents after reboot |
-| `agent-sandbox --build-only` | Rebuild sandbox image |
-| `scripts/setup-telegram.sh` | Interactive Telegram bot setup |
-| `scripts/setup-claude-hooks.sh` | Install Claude Code hooks |
-| `scripts/setup-listen.sh` | Install reply listener systemd service |
+| Command | Purpose |
+|---------|---------|
+| `nibble` | Show running tasks |
+| `nibble list --all` | List all tasks |
+| `nibble watch` | Live dashboard |
+| `nibble show <id>` | Task detail |
+| `nibble clear-all` | Clear completed/exited tasks |
+| `nibble prune` | Mark stale processes as exited |
+| `nibble inject <id> <msg>` | Send message to agent |
+| `nibble notify --message <msg>` | Send Telegram notification |
+| `nibble sandbox spawn <repo>` | Start a sandboxed agent |
+| `nibble sandbox list` | List open sandboxes |
+| `nibble sandbox attach <id>` | Attach to sandbox |
+| `nibble sandbox kill <id>` | Stop sandbox |
+| `nibble sandbox kill --all` | Stop all sandboxes |
+| `nibble sandbox resume --all` | Resume agents after reboot |
+| `nibble sandbox build` | Rebuild sandbox image |
+| `nibble cron add` | Schedule a prompt |
+| `nibble cron list` | List cron jobs |
+| `nibble cron edit <id>` | Modify a cron job |
+| `nibble cron del <id>` | Delete a cron job |
+| `nibble cron run <id>` | Run immediately |
+| `install.sh` | Install / upgrade |
+| `install.sh --telegram` | Set up Telegram bot |
+| `install.sh --listen` | Start reply listener daemon |
 
 ---
 
 ## Development
 
 ```bash
-cargo test          # run all tests (58 unit tests)
+cargo test          # run all tests
 cargo build         # dev build
 cargo build --release
 ```
@@ -362,7 +426,7 @@ src/
 ├── main.rs                  # CLI entry point, all command handlers
 ├── cli/mod.rs               # clap argument definitions
 ├── models/task.rs           # Task, TaskStatus, SandboxType, SandboxConfig
-├── db/mod.rs                # SQLite operations, schema migrations (v3)
+├── db/mod.rs                # SQLite operations, schema migrations
 ├── sandbox/
 │   ├── mod.rs               # Sandbox trait, ContainerInfo, helpers
 │   └── podman.rs            # Podman implementation + Dockerfile

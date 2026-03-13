@@ -3,7 +3,7 @@ set -e
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
-echo "Setting up agent-inbox wrappers..."
+echo "Setting up nibble wrappers..."
 echo ""
 
 # Detect shell
@@ -70,7 +70,7 @@ add_alias() {
 
     # Add alias
     echo "" >> "$RC_FILE"
-    echo "# agent-inbox wrapper for $agent_name" >> "$RC_FILE"
+    echo "# nibble wrapper for $agent_name" >> "$RC_FILE"
     echo "alias $agent_name='$wrapper_path'" >> "$RC_FILE"
     echo "  ✓ Added alias for '$agent_name'"
 }
@@ -125,7 +125,7 @@ fi
 echo ""
 echo "Test it:"
 echo "  1. Run a wrapped command: claude --help"
-echo "  2. Check agent-inbox: agent-inbox list --all"
+echo "  2. Check nibble: nibble list --all"
 echo ""
 echo "To wrap additional agents, see: $REPO_DIR/wrappers/TEMPLATE-wrapper"
 echo ""

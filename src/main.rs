@@ -12,7 +12,7 @@ mod cron;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use cli::{Cli, Commands, CronAction, ReportAction};
+use cli::{Cli, Commands, CronAction, ReportAction, SandboxAction};
 use db::Database;
 use models::{SandboxConfig, SandboxType, Task, TaskContext, TaskStatus};
 use sandbox::podman::PodmanSandbox;
@@ -324,68 +324,70 @@ fn main() -> Result<()> {
                 cmd_cron_run(&db, cron_id)?;
             }
         },
-        // ── Internal sandbox subcommands (invoked by agent-sandbox script) ────
+        // ── Sandbox subcommands ────────────────────────────────────────────
 
-        Some(Commands::SandboxSpawn { repo_path, task, image, fresh, session_id }) => {
-            cmd_sandbox_spawn(&db, repo_path, task, image, fresh, session_id, false, false, false)?;
-        }
-        Some(Commands::SandboxList) => {
-            cmd_sandbox_list(&db)?;
-        }
-        Some(Commands::SandboxAttach { task_id_or_path, fresh, kimi, glm }) => {
-            match resolve_sandbox_id(&db, &task_id_or_path) {
-                Ok(task_id) => {
-                    cmd_sandbox_attach(&db, task_id, fresh, kimi, glm)?;
-                }
-                Err(e) => {
-                    // If the input looks like a repo path and no sandbox exists,
-                    // spawn one and then attach to it.
-                    let looks_like_path = task_id_or_path.starts_with('.')
-                        || task_id_or_path.starts_with('/')
-                        || task_id_or_path.starts_with('~')
-                        || task_id_or_path.contains('/')
-                        || std::path::Path::new(&task_id_or_path).exists();
-
-                    if looks_like_path {
-                        eprintln!("No sandbox found for '{}', spawning one...", task_id_or_path);
-                        let task_id = cmd_sandbox_spawn(
-                            &db,
-                            task_id_or_path,
-                            None, // task_desc
-                            "agent-inbox-sandbox:latest".to_string(),
-                            fresh,
-                            None, // session_id
-                            false, // no_attach - we will attach below
-                            kimi, // pass through kimi flag
-                            glm,  // pass through glm flag
-                        )?;
+        Some(Commands::Sandbox { action }) => match action {
+            SandboxAction::Spawn { repo_path, task, image, fresh, session_id } => {
+                cmd_sandbox_spawn(&db, repo_path, task, image, fresh, session_id, false, false, false)?;
+            }
+            SandboxAction::List => {
+                cmd_sandbox_list(&db)?;
+            }
+            SandboxAction::Attach { task_id_or_path, fresh, kimi, glm } => {
+                match resolve_sandbox_id(&db, &task_id_or_path) {
+                    Ok(task_id) => {
                         cmd_sandbox_attach(&db, task_id, fresh, kimi, glm)?;
-                    } else {
-                        return Err(e);
+                    }
+                    Err(e) => {
+                        // If the input looks like a repo path and no sandbox exists,
+                        // spawn one and then attach to it.
+                        let looks_like_path = task_id_or_path.starts_with('.')
+                            || task_id_or_path.starts_with('/')
+                            || task_id_or_path.starts_with('~')
+                            || task_id_or_path.contains('/')
+                            || std::path::Path::new(&task_id_or_path).exists();
+
+                        if looks_like_path {
+                            eprintln!("No sandbox found for '{}', spawning one...", task_id_or_path);
+                            let task_id = cmd_sandbox_spawn(
+                                &db,
+                                task_id_or_path,
+                                None, // task_desc
+                                "nibble-sandbox:latest".to_string(),
+                                fresh,
+                                None,  // session_id
+                                false, // no_attach - we will attach below
+                                kimi,  // pass through kimi flag
+                                glm,   // pass through glm flag
+                            )?;
+                            cmd_sandbox_attach(&db, task_id, fresh, kimi, glm)?;
+                        } else {
+                            return Err(e);
+                        }
                     }
                 }
             }
-        }
-        Some(Commands::SandboxKill { task_id_or_path, all }) => {
-            if all {
-                cmd_sandbox_kill_all(&db)?;
-            } else {
-                let input = task_id_or_path.ok_or_else(|| anyhow::anyhow!("Provide a task ID, repo path, or --all"))?;
-                let id = resolve_sandbox_id(&db, &input)?;
-                cmd_sandbox_kill(&db, id)?;
+            SandboxAction::Kill { task_id_or_path, all } => {
+                if all {
+                    cmd_sandbox_kill_all(&db)?;
+                } else {
+                    let input = task_id_or_path.ok_or_else(|| anyhow::anyhow!("Provide a task ID, repo path, or --all"))?;
+                    let id = resolve_sandbox_id(&db, &input)?;
+                    cmd_sandbox_kill(&db, id)?;
+                }
             }
-        }
-        Some(Commands::SandboxRestart) => {
-            cmd_sandbox_resume(&db, true)?;
-        }
-        Some(Commands::SandboxResume { all }) => {
-            cmd_sandbox_resume(&db, all)?;
-        }
-        Some(Commands::SandboxBuild { image, rebuild }) => {
-            let sandbox = PodmanSandbox::new();
-            sandbox.ensure_image_with_opts(&image, rebuild)?;
-            println!("Sandbox image ready.");
-        }
+            SandboxAction::Restart => {
+                cmd_sandbox_resume(&db, true)?;
+            }
+            SandboxAction::Resume { all } => {
+                cmd_sandbox_resume(&db, all)?;
+            }
+            SandboxAction::Build { image, rebuild } => {
+                let sandbox = PodmanSandbox::new();
+                sandbox.ensure_image_with_opts(&image, rebuild)?;
+                println!("Sandbox image ready.");
+            }
+        },
         Some(Commands::Inject { task_id, message }) => {
             let task = db
                 .get_task_by_id(&task_id)?
@@ -482,7 +484,7 @@ pub(crate) fn cmd_sandbox_spawn(
                     eprintln!();
                     if no_attach {
                         eprintln!("Attach with:");
-                        eprintln!("  agent-sandbox attach {}", abs_repo_path_early);
+                        eprintln!("  nibble sandbox attach {}", abs_repo_path_early);
                     } else {
                         cmd_sandbox_attach(db, existing_task_id.clone(), fresh, kimi, glm)?;
                     }
@@ -601,16 +603,16 @@ pub(crate) fn cmd_sandbox_spawn(
 
     if no_attach {
         println!("Attach to the Claude session:");
-        println!("  agent-sandbox attach {}          (by repo path)", abs_repo_path);
-        println!("  agent-sandbox attach {}   (by task ID)", short_id);
-        println!("  agent-sandbox attach {} --fresh  (start a new conversation)", short_id);
+        println!("  nibble sandbox attach {}          (by repo path)", abs_repo_path);
+        println!("  nibble sandbox attach {}   (by task ID)", short_id);
+        println!("  nibble sandbox attach {} --fresh  (start a new conversation)", short_id);
         println!("  (The container keeps running after you exit — re-attach any time)");
         println!();
         println!("After a system reboot, restart stopped containers with:");
-        println!("  agent-sandbox resume --all");
+        println!("  nibble sandbox resume --all");
     } else {
         println!("Attaching to Claude session (exit to detach — container keeps running)…");
-        println!("  Re-attach later: agent-sandbox attach {}  (or by path: {})", short_id, abs_repo_path);
+        println!("  Re-attach later: nibble sandbox attach {}  (or by path: {})", short_id, abs_repo_path);
         println!();
         cmd_sandbox_attach(db, task_id.clone(), fresh, kimi, glm)?;
     }
@@ -679,7 +681,7 @@ fn cmd_cron_add(
         if db.label_exists_for_task(&task_id, lbl)? {
             anyhow::bail!(
                 "A cron job with label '{}' already exists for this sandbox. \
-                 Use `agent-inbox cron edit {}` to update it or choose a different label.",
+                 Use `nibble cron edit {}` to update it or choose a different label.",
                 lbl, lbl
             );
         }
@@ -891,7 +893,7 @@ fn cmd_sandbox_list(db: &Database) -> Result<()> {
 
     if states.is_empty() {
         println!("No sandbox containers found.");
-        println!("Start one with:  agent-sandbox <repo_path>");
+        println!("Start one with:  nibble sandbox spawn <repo_path>");
         return Ok(());
     }
 
@@ -915,9 +917,9 @@ fn cmd_sandbox_list(db: &Database) -> Result<()> {
             }
         };
 
-        // Parse timestamp from name: agent-inbox-YYYYMMDD-HHMM-shortid
+        // Parse timestamp from name: nibble-YYYYMMDD-HHMM-shortid
         let started = container_name
-            .strip_prefix("agent-inbox-")
+            .strip_prefix("nibble-")
             .and_then(|s| {
                 let parts: Vec<&str> = s.splitn(3, '-').collect();
                 if parts.len() >= 2 {
@@ -988,7 +990,7 @@ fn resolve_sandbox_id(db: &Database, input: &str) -> Result<String> {
 
         anyhow::bail!(
             "No sandbox found for repo path: {}\n\
-             Start one with:  agent-sandbox {}",
+             Start one with:  nibble sandbox spawn {}",
             path_str,
             input
         );
@@ -1327,7 +1329,7 @@ pub(crate) fn prune_stale_tasks(db: &Database) -> Result<usize> {
                                 .file_name()
                                 .and_then(|n| n.to_str())
                                 .unwrap_or(repo_path.as_str());
-                            let msg = format!("💥 Sandbox for `{}` crashed or was killed by the OS.\nRe-spawn with: `agent-sandbox {}`", repo_label, repo_path);
+                            let msg = format!("💥 Sandbox for `{}` crashed or was killed by the OS.\nRe-spawn with: `nibble sandbox spawn {}`", repo_label, repo_path);
                             if let Ok(text) = build_notification_text(db, Some(task_id), &msg, false) {
                                 let _ = notifications::telegram::send(&cfg.telegram, &text);
                             }
@@ -1396,8 +1398,8 @@ fn detect_toolchains(repo_path: &std::path::Path) -> Vec<(&'static str, &'static
     results
 }
 
-const CLAUDE_MD_BEGIN: &str = "<!-- agent-inbox:begin -->";
-const CLAUDE_MD_END: &str = "<!-- agent-inbox:end -->";
+const CLAUDE_MD_BEGIN: &str = "<!-- nibble:begin -->";
+const CLAUDE_MD_END: &str = "<!-- nibble:end -->";
 
 /// Build the sandbox CLAUDE.md section that tells Claude it is running inside
 /// an isolated container and how to set up the project toolchain.
@@ -1464,7 +1466,7 @@ fn build_sandbox_claude_md(repo_name: &str, toolchains: &[(&str, &str, &str)]) -
 /// Write the sandbox section of `.claude/CLAUDE.md` inside the container.
 ///
 /// - If the file does not exist, it is created with just the generated block.
-/// - If the file exists and already contains the agent-inbox delimiters, only
+/// - If the file exists and already contains the nibble delimiters, only
 ///   the block between them is replaced — any user-written content outside the
 ///   markers is preserved verbatim.
 /// - If the file exists but has no delimiters (user wrote it by hand), the
@@ -1564,7 +1566,7 @@ pub(crate) fn build_notification_text(
 /// Normal completion example:
 /// ```
 /// 🤖 Claude Code
-/// 📁 agent-inbox · main
+/// 📁 nibble · main
 /// ⏱ 4m 32s
 /// ```
 ///
@@ -1572,7 +1574,7 @@ pub(crate) fn build_notification_text(
 /// ```
 /// 🚨 Needs your attention
 /// 🤖 Claude Code
-/// 📁 agent-inbox · main
+/// 📁 nibble · main
 /// ⏱ 4m 32s
 /// ```
 fn format_header(task: &Task, attention: bool) -> String {
@@ -1673,9 +1675,9 @@ mod notification_tests {
 
     #[test]
     fn test_format_location_repo_branch() {
-        let task = make_task("claude_code", "[agent-inbox:main]");
+        let task = make_task("claude_code", "[nibble:main]");
         let loc = format_location(&task);
-        assert!(loc.contains("agent-inbox"));
+        assert!(loc.contains("nibble"));
         assert!(loc.contains("main"));
     }
 

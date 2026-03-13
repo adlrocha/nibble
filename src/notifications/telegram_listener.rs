@@ -1,6 +1,6 @@
 //! Telegram long-polling listener daemon.
 //!
-//! Runs as a blocking loop (`agent-inbox listen`), calling `getUpdates` with a
+//! Runs as a blocking loop (`nibble listen`), calling `getUpdates` with a
 //! 30-second long-poll timeout.  For each incoming update it:
 //!
 //! - Verifies the sender is the authorised user (chat_id whitelist).
@@ -331,7 +331,7 @@ fn handle_sandboxes_command(
 }
 
 fn handle_help_command(config: &TelegramConfig, chat_id: i64) -> Result<()> {
-    let help_text = r#"🤖 *Agent Inbox Commands*
+    let help_text = r#"🐾 *Nibble Commands*
 
 */help* - Show this help message
 
@@ -493,7 +493,7 @@ fn handle_spawn_command(
             &db,
             repo_path,
             task_desc,
-            "agent-inbox-sandbox:latest".to_string(),
+            "nibble-sandbox:latest".to_string(),
             false, // fresh
             None,  // session_id — None uses deterministic UUID v5 for the repo
             true,  // no_attach — background thread, do not exec into tty

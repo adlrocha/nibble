@@ -32,13 +32,13 @@ else
 fi
 
 # Register task as 'running' with process tracking
-agent-inbox report start "$TASK_ID" "$AGENT_TYPE" "$PWD" "$TASK_TITLE" --pid $$ --ppid $PPID 2>/dev/null || {
-    echo "Warning: Failed to register task with agent-inbox" >&2
+nibble report start "$TASK_ID" "$AGENT_TYPE" "$PWD" "$TASK_TITLE" --pid $$ --ppid $PPID 2>/dev/null || {
+    echo "Warning: Failed to register task with nibble" >&2
 }
 
 # Start background monitor to detect attention needs
 # The monitor will detect if the process is waiting for input or stalled
-agent-inbox monitor "$TASK_ID" $$ >/dev/null 2>&1 &
+nibble monitor "$TASK_ID" $$ >/dev/null 2>&1 &
 MONITOR_PID=$!
 
 # Run actual agent command with all args, preserving all I/O
@@ -50,6 +50,6 @@ EXIT_CODE=$?
 kill $MONITOR_PID 2>/dev/null || true
 
 # Report completion (in case monitor didn't catch it, or we beat it)
-agent-inbox report complete "$TASK_ID" --exit-code "$EXIT_CODE" 2>/dev/null || true
+nibble report complete "$TASK_ID" --exit-code "$EXIT_CODE" 2>/dev/null || true
 
 exit $EXIT_CODE

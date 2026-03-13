@@ -1,5 +1,5 @@
 #!/bin/bash
-# Wrapper for Claude Code CLI to track tasks in agent-inbox
+# Wrapper for Claude Code CLI to track tasks in nibble
 # Creates task and exports AGENT_TASK_ID for hooks to use
 # Hooks handle: running (UserPromptSubmit), completed (Stop), exited (SessionEnd)
 #
@@ -12,8 +12,8 @@
 #   claude --remote [args...]  -- unattended mode: skips all permission prompts so
 #                                 you can interact purely via Telegram
 
-# agent-inbox binary location
-AGENT_INBOX="${AGENT_INBOX_BIN:-$HOME/.local/bin/agent-inbox}"
+# nibble binary location
+AGENT_INBOX="${NIBBLE_BIN:-$HOME/.local/bin/nibble}"
 
 # Find the original claude binary
 CLAUDE_BIN=$(which -a claude | grep -v "$(readlink -f "$0")" | head -n 1)
@@ -129,7 +129,7 @@ fi
 
 # Register task as 'running'
 # shellcheck disable=SC2086
-agent-inbox report start "$AGENT_TASK_ID" "claude_code" "$PWD" "$TASK_TITLE" \
+nibble report start "$AGENT_TASK_ID" "claude_code" "$PWD" "$TASK_TITLE" \
     --pid $$ --ppid $PPID $EXTRA_FLAGS 2>/dev/null || true
 
 # Run claude - hooks handle status updates

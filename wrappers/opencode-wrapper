@@ -1,6 +1,6 @@
 #!/bin/bash
-# Wrapper for OpenCode CLI to track tasks in agent-inbox
-# This wrapper transparently intercepts opencode commands and reports to agent-inbox
+# Wrapper for OpenCode CLI to track tasks in nibble
+# This wrapper transparently intercepts opencode commands and reports to nibble
 
 # Find the original opencode binary
 OPENCODE_BIN=$(which -a opencode | grep -v "$(readlink -f "$0")" | head -n 1)
@@ -23,13 +23,12 @@ else
 fi
 
 # Register task as 'running' with process tracking
-agent-inbox report start "$TASK_ID" "opencode" "$PWD" "$TASK_TITLE" --pid $$ --ppid $PPID 2>/dev/null || {
-    echo "Warning: Failed to register task with agent-inbox" >&2
+nibble report start "$TASK_ID" "opencode" "$PWD" "$TASK_TITLE" --pid $$ --ppid $PPID 2>/dev/null || {
+    echo "Warning: Failed to register task with nibble" >&2
 }
 
 # Start background monitor to detect attention needs
-# The monitor will detect if the process is waiting for input or stalled
-agent-inbox monitor "$TASK_ID" $$ >/dev/null 2>&1 &
+nibble monitor "$TASK_ID" $$ >/dev/null 2>&1 &
 MONITOR_PID=$!
 
 # Use `script` to record opencode output into a temp file while preserving the
@@ -54,18 +53,18 @@ fi
 kill $MONITOR_PID 2>/dev/null || true
 
 # Report completion
-agent-inbox report complete "$TASK_ID" --exit-code "$EXIT_CODE" 2>/dev/null || true
+nibble report complete "$TASK_ID" --exit-code "$EXIT_CODE" 2>/dev/null || true
 
 # Send Telegram notification with the last output from opencode.
 # Strip ANSI escape sequences, then take the last 4096 chars.
-if [ -f "$OUTPUT_FILE" ] && command -v agent-inbox >/dev/null 2>&1; then
+if [ -f "$OUTPUT_FILE" ] && command -v nibble >/dev/null 2>&1; then
     # Strip ANSI codes with sed (works without perl/python)
     CLEAN_OUTPUT=$(sed 's/\x1b\[[0-9;]*[mGKHFABCDST]//g; s/\x1b\[[0-9;]*[Jn]//g; s/\r//g' "$OUTPUT_FILE" 2>/dev/null || true)
 
     if [ -n "$CLEAN_OUTPUT" ]; then
-        agent-inbox notify --task-id "$TASK_ID" --message "$CLEAN_OUTPUT" 2>/dev/null || true
+        nibble notify --task-id "$TASK_ID" --message "$CLEAN_OUTPUT" 2>/dev/null || true
     else
-        agent-inbox notify --task-id "$TASK_ID" --message "(no output captured)" 2>/dev/null || true
+        nibble notify --task-id "$TASK_ID" --message "(no output captured)" 2>/dev/null || true
     fi
 fi
 

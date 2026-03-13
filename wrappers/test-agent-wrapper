@@ -32,12 +32,12 @@ else
 fi
 
 # Register task as 'running' with process tracking
-agent-inbox report start "$TASK_ID" "$AGENT_TYPE" "$PWD" "$TASK_TITLE" --pid $$ --ppid $PPID 2>/dev/null || {
-    echo "Warning: Failed to register task with agent-inbox" >&2
+nibble report start "$TASK_ID" "$AGENT_TYPE" "$PWD" "$TASK_TITLE" --pid $$ --ppid $PPID 2>/dev/null || {
+    echo "Warning: Failed to register task with nibble" >&2
 }
 
 # Start background monitor for this specific process
-agent-inbox monitor "$TASK_ID" $$ &
+nibble monitor "$TASK_ID" $$ &
 MONITOR_PID=$!
 
 # Trap to ensure cleanup on exit
@@ -48,7 +48,7 @@ cleanup() {
     kill $MONITOR_PID 2>/dev/null
 
     # Report completion if not already detected
-    agent-inbox report complete "$TASK_ID" --exit-code "$EXIT_CODE" 2>/dev/null || true
+    nibble report complete "$TASK_ID" --exit-code "$EXIT_CODE" 2>/dev/null || true
 
     exit $EXIT_CODE
 }

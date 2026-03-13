@@ -19,7 +19,7 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 echo ""
-echo -e "${BOLD}=== Agent Inbox — Telegram Notification Setup ===${NC}"
+echo -e "${BOLD}=== Nibble — Telegram Notification Setup ===${NC}"
 echo ""
 
 # ── Step 1: BotFather instructions ───────────────────────────────────────────
@@ -130,7 +130,7 @@ echo ""
 TEST_RESPONSE=$(curl -s -X POST \
     "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
     -H "Content-Type: application/json" \
-    -d "{\"chat_id\": \"${CHAT_ID}\", \"text\": \"<b>Agent Inbox</b> — Telegram notifications are now active! You will be notified here whenever Claude Code or OpenCode finishes a turn.\", \"parse_mode\": \"HTML\"}" \
+    -d "{\"chat_id\": \"${CHAT_ID}\", \"text\": \"<b>Nibble</b> — Telegram notifications are now active! You will be notified here whenever Claude Code or OpenCode finishes a turn.\", \"parse_mode\": \"HTML\"}" \
     2>/dev/null)
 
 if echo "$TEST_RESPONSE" | grep -q '"ok":true'; then

@@ -1,6 +1,6 @@
 # Cron Feature Implementation Summary
 
-This document summarizes the cron feature implementation for agent-inbox.
+This document summarizes the cron feature implementation for nibble.
 
 ## Overview
 
@@ -63,13 +63,13 @@ Added `Cron` command with subcommands:
 
 ### Create a cron job via CLI:
 ```bash
-agent-inbox cron add ~/projects/myapp --schedule "0 9 * * 1-5" --prompt "Review yesterday's commits" --label "Daily Standup"
+nibble cron add ~/projects/myapp --schedule "0 9 * * 1-5" --prompt "Review yesterday's commits" --label "Daily Standup"
 ```
 
 ### Create a cron job via markdown file:
 ```bash
 # Create my-cron.md
-agent-inbox cron add ~/projects/myapp --file my-cron.md
+nibble cron add ~/projects/myapp --file my-cron.md
 ```
 
 Markdown format (`my-cron.md`):
@@ -88,8 +88,8 @@ Focus on the main branch changes.
 
 ### List cron jobs:
 ```bash
-agent-inbox cron list
-agent-inbox cron list ~/projects/myapp
+nibble cron list
+nibble cron list ~/projects/myapp
 ```
 
 ### Telegram commands:

@@ -1,4 +1,4 @@
-<!-- agent-inbox:begin -->
+<!-- nibble:begin -->
 # Agent Inbox Sandbox
 
 You are running inside an isolated Podman sandbox container for the **agent-inbox** project.
@@ -26,4 +26,4 @@ Always install dependencies before attempting to build, run, or test the project
 - Prefer making small, focused changes and running tests after each one
 - The container persists between sessions — installed packages and build artifacts are retained
 - When you finish a task, summarise what you did clearly so the notification sent to the user is informative
-<!-- agent-inbox:end -->
+<!-- nibble:end -->

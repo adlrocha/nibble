@@ -1,7 +1,7 @@
 #!/bin/bash
-# Set up the agent-inbox Telegram listener as a systemd user service.
+# Set up the nibble Telegram listener as a systemd user service.
 #
-# The listener runs `agent-inbox listen` in the background and routes
+# The listener runs `nibble listen` in the background and routes
 # Telegram replies back to running agent sessions on your machine.
 #
 # Usage:
@@ -10,9 +10,9 @@
 
 set -e
 
-AGENT_INBOX_BIN="${AGENT_INBOX_BIN:-$HOME/.local/bin/agent-inbox}"
+NIBBLE_BIN="${NIBBLE_BIN:-$HOME/.local/bin/nibble}"
 SERVICE_DIR="$HOME/.config/systemd/user"
-SERVICE_NAME="agent-inbox-listen"
+SERVICE_NAME="nibble-listener"
 SERVICE_FILE="$SERVICE_DIR/$SERVICE_NAME.service"
 
 BOLD='\033[1m'
@@ -34,8 +34,8 @@ if [ "${1:-}" = "--stop" ]; then
 fi
 
 # ── Prerequisites ─────────────────────────────────────────────────────────────
-if [ ! -x "$AGENT_INBOX_BIN" ]; then
-    die "agent-inbox not found at $AGENT_INBOX_BIN. Run ./install.sh first."
+if [ ! -x "$NIBBLE_BIN" ]; then
+    die "nibble not found at $NIBBLE_BIN. Run ./install.sh first."
 fi
 
 CONFIG_FILE="$HOME/.agent-tasks/config.toml"
@@ -48,13 +48,13 @@ mkdir -p "$SERVICE_DIR"
 
 cat > "$SERVICE_FILE" << EOF
 [Unit]
-Description=agent-inbox Telegram reply listener
+Description=nibble Telegram reply listener
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$AGENT_INBOX_BIN listen
+ExecStart=$NIBBLE_BIN listen
 Restart=on-failure
 RestartSec=10
 # Give the network time to come up after login

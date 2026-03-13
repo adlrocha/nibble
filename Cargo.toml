@@ -1,15 +1,15 @@
 [package]
-name = "agent-inbox"
+name = "nibble"
 version = "0.1.0"
 edition = "2021"
 authors = ["adlrocha"]
 
 [lib]
-name = "agent_inbox"
+name = "nibble"
 path = "src/lib.rs"
 
 [[bin]]
-name = "agent-inbox"
+name = "nibble"
 path = "src/main.rs"
 
 [[bin]]

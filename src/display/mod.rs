@@ -104,7 +104,7 @@ pub fn display_task_list(tasks: &[Task]) {
 
     // Footer with helpful info
     println!("{}{} Exited tasks auto-clear after 1 hour{}", DIM, GRAY, RESET);
-    println!("{}{} Run {}agent-inbox show <id>{} for details{}", DIM, GRAY, CYAN, GRAY, RESET);
+    println!("{}{} Run {}nibble show <id>{} for details{}", DIM, GRAY, CYAN, GRAY, RESET);
     println!();
 }
 

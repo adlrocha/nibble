@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 /// Base prefix for container names
-const CONTAINER_NAME_PREFIX: &str = "agent-inbox";
+const CONTAINER_NAME_PREFIX: &str = "nibble";
 
 /// Podman sandbox implementation
 pub struct PodmanSandbox;
@@ -115,7 +115,7 @@ CMD ["bash"]
     }
 
     /// Generate container name with timestamp for easy chronological sorting.
-    /// Format: agent-inbox-YYYYMMDD-HHMM-<short-id>
+    /// Format: nibble-YYYYMMDD-HHMM-<short-id>
     fn container_name(&self, task_id: &str) -> String {
         let ts = chrono::Local::now().format("%Y%m%d-%H%M");
         let short_id = &task_id[..task_id.len().min(8)];
@@ -241,7 +241,7 @@ impl Sandbox for PodmanSandbox {
             eprintln!("For security, please configure rootless podman.");
         }
 
-        self.ensure_image("agent-inbox-sandbox:latest")?;
+        self.ensure_image("nibble-sandbox:latest")?;
 
         Ok(())
     }
@@ -361,21 +361,21 @@ impl Sandbox for PodmanSandbox {
             args.push("CLAUDE_CONFIG_DIR=/home/node/.claude".to_string());
         }
 
-        // Mount the agent-inbox binary so hooks inside the container can call it.
+        // Mount the nibble binary so hooks inside the container can call it.
         // Prefer the musl (statically linked) build so it works regardless of
         // the container's glibc version. Fall back to the host binary.
-        let musl_bin = home_dir.join(".local/bin/agent-inbox-musl");
-        let host_bin = home_dir.join(".local/bin/agent-inbox");
-        let agent_inbox_bin = if musl_bin.exists() { musl_bin } else { host_bin };
-        if agent_inbox_bin.exists() {
+        let musl_bin = home_dir.join(".local/bin/nibble-musl");
+        let host_bin = home_dir.join(".local/bin/nibble");
+        let nibble_bin = if musl_bin.exists() { musl_bin } else { host_bin };
+        if nibble_bin.exists() {
             args.push("-v".to_string());
             args.push(format!(
-                "{}:/usr/local/bin/agent-inbox:ro",
-                agent_inbox_bin.display()
+                "{}:/usr/local/bin/nibble:ro",
+                nibble_bin.display()
             ));
         }
 
-        // Mount agent-inbox config (Telegram token etc.) so hooks can send notifications.
+        // Mount nibble config (Telegram token etc.) so hooks can send notifications.
         let agent_tasks_dir = home_dir.join(".agent-tasks");
         if agent_tasks_dir.exists() {
             args.push("-v".to_string());
@@ -487,7 +487,7 @@ impl Sandbox for PodmanSandbox {
                 "ps",
                 "-a",
                 "--filter",
-                "name=agent-inbox-",
+                "name=nibble-",
                 "--format",
                 "{{.Names}}",
             ])
@@ -563,12 +563,12 @@ mod tests {
     fn test_container_name_format() {
         let sandbox = PodmanSandbox::new();
         let name = sandbox.container_name("abcd1234-5678-90ef");
-        // Format: agent-inbox-YYYYMMDD-HHMM-<short8>
-        assert!(name.starts_with("agent-inbox-"));
+        // Format: nibble-YYYYMMDD-HHMM-<short8>
+        assert!(name.starts_with("nibble-"));
         assert!(name.contains("abcd1234"));
-        // Should have 4 dash-separated segments after the "agent-inbox" prefix
-        let parts: Vec<&str> = name.splitn(5, '-').collect();
-        assert_eq!(parts.len(), 5, "expected agent-inbox-DATE-TIME-SHORTID");
+        // Should have 4 dash-separated segments after the "nibble" prefix
+        let parts: Vec<&str> = name.splitn(4, '-').collect();
+        assert_eq!(parts.len(), 4, "expected nibble-DATE-TIME-SHORTID");
     }
 
     #[test]
