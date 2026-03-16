@@ -1,7 +1,7 @@
 <!-- nibble:begin -->
 # Agent Inbox Sandbox
 
-You are running inside an isolated Podman sandbox container for the **agent-inbox** project.
+You are running inside an isolated Podman sandbox container for the **nibble** project.
 
 ## Environment
 
