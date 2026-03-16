@@ -418,31 +418,18 @@ fn main() -> Result<()> {
 
 // ── Sandbox command handlers ──────────────────────────────────────────────────
 
-/// Find the most recent Claude Code session for a given repo path.
+/// Derive a deterministic UUID v5 for a repo, keyed on its canonical host path.
 ///
-/// First checks the database for any task with this repo path that has a stored
-/// session_id (enables repo-level conversation continuity across sandboxes).
-/// Falls back to scanning ~/.claude/projects/<url-encoded-path>/ for host-side
-/// sessions if no DB record exists.
-///
-/// This ensures repo-level isolation: sessions from repo A will never bleed into
-/// repo B, even though all sandboxes store sessions under the same "-workspace"
-/// Derive a deterministic UUID v5 for a repo path.
-///
-/// Every sandbox mounting the same repo will always get the same session UUID,
-/// so `claude --session-id <uuid>` resumes the right conversation regardless of
-/// which container the repo is mounted in or what its in-container path is.
-///
-/// Passing `--fresh` at spawn generates a new random v4 UUID instead, replacing
-/// the stored ID so that subsequent attaches start from the new session.
+/// Every sandbox on the same repo gets the same UUID, so Telegram injection and
+/// re-attach always resume the right conversation. `--resume <uuid>` is a direct
+/// UUID lookup by Claude — it doesn't depend on the in-container path.
 fn repo_session_id(repo_path: &str) -> Uuid {
-    // Canonicalise so /home/user/myrepo and ./myrepo resolve to the same UUID.
     let canonical = std::fs::canonicalize(repo_path)
         .unwrap_or_else(|_| std::path::PathBuf::from(repo_path));
     let key = canonical.to_string_lossy();
-    // UUID v5: SHA-1 hash of the path in the OID namespace — stable across runs.
     Uuid::new_v5(&Uuid::NAMESPACE_OID, key.as_bytes())
 }
+
 
 /// Spawn a sandboxed Claude Code agent.  Returns the new task_id on success.
 pub(crate) fn cmd_sandbox_spawn(
@@ -564,8 +551,8 @@ pub(crate) fn cmd_sandbox_spawn(
 
     // Determine the session UUID for this sandbox.
     // - Normal spawn: derive a deterministic UUID v5 from the canonical repo path.
-    //   Every sandbox on the same repo gets the same UUID, so `claude --session-id`
-    //   always resumes the right conversation regardless of in-container path (/workspace).
+    //   All sandboxes on the same repo share a session, enabling Telegram injection to always
+    //   reach the right conversation context without starting a new session.
     // - --fresh: generate a new random UUID v4, replacing the stored ID so subsequent
     //   attaches start from this new session.
     // - explicit --session-id: honour the caller's choice verbatim.
@@ -578,7 +565,7 @@ pub(crate) fn cmd_sandbox_spawn(
         new_sid
     } else {
         let det_sid = repo_session_id(&abs_repo_path).to_string();
-        println!("  Session:   {} (deterministic for this repo)", &det_sid[..8]);
+        println!("  Session:   {} (deterministic for repo)", &det_sid[..8]);
         det_sid
     };
 
@@ -1041,9 +1028,10 @@ fn resolve_cron_id(db: &Database, id_or_label: &str) -> Result<i64> {
 
 /// Attach to the Claude session inside a running sandbox.
 ///
-/// Uses `--session-id` to resume the deterministic session stored on the task.
-/// Pass `fresh = true` to generate a new random session UUID and persist it,
-/// so subsequent attaches continue from this new session.
+/// Resumes the session UUID stored on the task (derived deterministically from the repo
+/// path at spawn, then updated by the Stop hook after each session). All sandboxes on
+/// the same repo share one session, so Telegram injection always reaches the right context.
+/// Pass `fresh = true` to start a completely new conversation (ignores stored session_id).
 fn cmd_sandbox_attach(db: &Database, task_id: String, fresh: bool, kimi: bool, glm: bool) -> Result<()> {
     let task = db
         .get_task_by_id(&task_id)?
@@ -1070,8 +1058,8 @@ fn cmd_sandbox_attach(db: &Database, task_id: String, fresh: bool, kimi: bool, g
     let shell_cmd = if fresh {
         format!("cd /workspace && {claude}")
     } else {
-        // Use the session ID stored on the task (set at spawn time from the host-path
-        // session lookup, or updated later by the Stop hook).
+        // Use the session ID stored on the task (deterministic v5 UUID from repo path
+        // at spawn, updated by the Stop hook after each session ends).
         let session_id = task.context.as_ref().and_then(|c| c.session_id.as_deref());
         if let Some(sid) = session_id {
             // Try to resume the stored session; fall back to a fresh start if it fails.
