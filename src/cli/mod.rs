@@ -185,6 +185,19 @@ pub enum SandboxAction {
         #[arg(long)]
         rebuild: bool,
     },
+
+    /// Delete old Claude conversation files for a sandbox to free memory
+    ///
+    /// Removes .jsonl conversation files from ~/.claude/projects/ that belong
+    /// to this sandbox's repo. Keeps the most recent session intact.
+    /// Use before `attach --fresh` to start completely clean.
+    Gc {
+        /// Task ID (or prefix) OR repo path (e.g. "." or "/path/to/repo")
+        task_id_or_path: String,
+        /// Also delete the most recent session (full wipe, no resume possible)
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 #[derive(Subcommand)]
