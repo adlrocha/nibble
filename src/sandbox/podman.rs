@@ -129,6 +129,9 @@ CMD ["bash"]
         let caches = vec![
             ("npm", "/home/node/.npm"),
             ("npm-global", "/home/node/.npm-global"),
+            ("cargo-registry", "/home/node/.cargo/registry"),
+            ("cargo-git", "/home/node/.cargo/git"),
+            ("rustup", "/home/node/.rustup"),
         ];
 
         let mut volumes = Vec::new();

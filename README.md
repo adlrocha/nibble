@@ -7,9 +7,13 @@ A CLI tool that runs Claude Code agents inside isolated Podman sandboxes, monito
 ## Features
 
 - **Podman Sandboxes**: Run agents in rootless containers — repo mounted read-write, ports exposed, full dev flexibility inside
+- **Setup Scripts**: Drop a `.nibble/setup.sh` in any repo to auto-install its toolchain and dependencies at spawn time
+- **Persistent Session Continuity**: Every repo gets a stable session UUID — re-attaching and Telegram replies always resume the same conversation
+- **Session GC**: Clean up old Claude conversation history with `nibble sandbox gc`
 - **Telegram Notifications**: Receive the agent's last message on your phone when it finishes or needs a decision
 - **Telegram Replies**: Reply to notifications from your phone to unblock agents (input injected via `podman exec`)
 - **Auto-Resume**: Sandbox agents are tracked across host reboots
+- **Cron Jobs**: Schedule prompts to run automatically inside sandboxes
 - **Unified Task Tracking**: Track sandboxed and non-sandboxed agents in one dashboard
 - **3-State Model**: Running → Completed → Exited
 - **SQLite Backend**: Fast, reliable, concurrent-safe storage
@@ -112,9 +116,47 @@ On first run the sandbox image is built (~2-3 min). Subsequent spawns are fast.
 The container gets:
 - Your repo mounted read-write at `/workspace`
 - `ANTHROPIC_API_KEY` and other configured env vars forwarded from host
-- Ports `3000-3100` and `8000-8100` available on the host
+- Ports forwarded via host network (services on `:3000`, `:8080`, etc. are reachable from outside)
 - Full privileged mode inside (install anything with `apt`, `npm`, `pip`, etc.)
-- Dependency caches (`~/.npm`, `~/.npm-global`) persisted across restarts
+- Dependency caches persisted across container restarts via host-mounted volumes:
+  - `~/.npm`, `~/.npm-global` (Node)
+  - `~/.cargo/registry`, `~/.cargo/git`, `~/.rustup` (Rust)
+
+### Pre-installing dependencies with `.nibble/setup.sh`
+
+By default the sandbox image is a bare node+claude environment. To have your project's toolchain and dependencies ready **before the first attach**, add a setup script to your repo:
+
+```bash
+mkdir -p .nibble
+cat > .nibble/setup.sh << 'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Install build tools if missing
+if ! command -v cc &>/dev/null; then
+    sudo apt-get update -qq && sudo apt-get install -y -qq build-essential
+fi
+
+# Install your language toolchain and deps here, e.g. for Rust:
+export PATH="$HOME/.cargo/bin:$PATH"
+if ! command -v rustup &>/dev/null; then
+    curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --no-modify-path
+fi
+cd /workspace && cargo build
+EOF
+chmod +x .nibble/setup.sh
+```
+
+When nibble spawns a sandbox and finds `.nibble/setup.sh`, it runs the script inside the container (blocking, output streamed to your terminal) before handing off to Claude. By the time you attach, the toolchain is installed and the project is compiled.
+
+The script runs once per container lifetime (at spawn). Because cargo/npm/rustup caches are bind-mounted from the host, subsequent spawns skip downloads and complete in seconds.
+
+If no setup script is found, nibble prints a reminder:
+```
+Setup: ⚠️  No .nibble/setup.sh found — dependencies won't be pre-installed.
+       Create .nibble/setup.sh in the repo to auto-install deps on spawn.
+       (Ask Claude to write it for you once inside the sandbox.)
+```
 
 ### List open sandboxes
 
@@ -338,7 +380,37 @@ If you try to spawn a sandbox for a repo that already has one, nibble re-attache
 
 ### Session continuity
 
-When you attach, Claude resumes the most recent conversation for the repo using `--resume`. Every attach — whether interactive from the terminal or a Telegram reply injected remotely — picks up the same conversation history. Session state is stored inside the container at `/workspace/.claude/projects/`.
+Every repo gets a **deterministic session UUID** derived from its canonical path. This means:
+
+- Re-attaching to the same repo always resumes the same conversation — no matter how many times you detach and re-attach
+- Telegram replies land in the same session as your interactive terminal session
+- Container restarts after a reboot resume the same history
+
+Session history is stored in `~/.claude/projects/<hash>/<uuid>.jsonl` on the host (mounted into the container), so it survives container recreation.
+
+#### Starting fresh
+
+```bash
+# Back up the current session history and start a new conversation
+nibble sandbox attach . --fresh
+```
+
+`--fresh` renames the current `.jsonl` to `.jsonl.bak` (preserving it for recovery) and starts Claude with a blank slate. The session UUID stays the same so Telegram injection keeps working without any DB changes.
+
+#### Cleaning up old session history
+
+Claude conversation files accumulate over time and can grow large. Use `gc` to clean them up:
+
+```bash
+# Delete old sessions and backups, keep the most recent session
+nibble sandbox gc .
+nibble sandbox gc <task-id>
+
+# Wipe all sessions including the current one
+nibble sandbox gc . --all
+```
+
+The GC command finds the right `~/.claude/projects/` subdirectory for the repo (by matching the known session UUID, or by scanning file contents as a fallback), then deletes all `.jsonl.bak` backup files and all `.jsonl` session files except the most recent active one. It reports how many files were removed and how much disk was freed.
 
 ### Telegram injection
 
@@ -399,6 +471,8 @@ Network is host-mode, so services started inside the container (e.g. `npm run de
 | `nibble sandbox kill <id>` | Stop sandbox |
 | `nibble sandbox kill --all` | Stop all sandboxes |
 | `nibble sandbox resume --all` | Resume agents after reboot |
+| `nibble sandbox gc <id>` | Delete old session history, keep latest |
+| `nibble sandbox gc <id> --all` | Wipe all session history |
 | `nibble sandbox build` | Rebuild sandbox image |
 | `nibble cron add` | Schedule a prompt |
 | `nibble cron list` | List cron jobs |

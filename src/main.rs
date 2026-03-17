@@ -562,6 +562,36 @@ pub(crate) fn cmd_sandbox_spawn(
         }
     }
 
+    // Run .nibble/setup.sh if present, otherwise warn the user.
+    let setup_script = repo.join(".nibble").join("setup.sh");
+    if setup_script.exists() {
+        println!("  Setup:     running .nibble/setup.sh …");
+        let status = std::process::Command::new("podman")
+            .args([
+                "exec",
+                "--user", "node",
+                &info.id,
+                "/bin/bash", "/workspace/.nibble/setup.sh",
+            ])
+            .status()
+            .context("Failed to run .nibble/setup.sh")?;
+        if status.success() {
+            println!("  Setup:     .nibble/setup.sh completed successfully");
+        } else {
+            eprintln!("  Setup:     ⚠️  .nibble/setup.sh exited with non-zero status — dependencies may be missing");
+        }
+    } else {
+        eprintln!(
+            "  Setup:     ⚠️  No .nibble/setup.sh found — dependencies won't be pre-installed."
+        );
+        eprintln!(
+            "             Create .nibble/setup.sh in the repo to auto-install deps on spawn."
+        );
+        eprintln!(
+            "             (Ask Claude to write it for you once inside the sandbox.)"
+        );
+    }
+
     let repo_name = repo
         .canonicalize()
         .ok()
