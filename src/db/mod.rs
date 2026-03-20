@@ -7,7 +7,7 @@ use std::str::FromStr;
 
 use crate::models::{CronJob, SandboxConfig, SandboxType, Task, TaskContext, TaskStatus};
 
-const SCHEMA_VERSION: i32 = 6;
+const SCHEMA_VERSION: i32 = 7;
 
 pub struct Database {
     conn: Connection,
@@ -111,7 +111,7 @@ impl Database {
 
             CREATE TABLE cron_jobs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                task_id TEXT NOT NULL,
+                repo_path TEXT NOT NULL,
                 label TEXT,
                 schedule TEXT NOT NULL,
                 prompt TEXT NOT NULL,
@@ -120,8 +120,8 @@ impl Database {
                 running INTEGER NOT NULL DEFAULT 0,
                 last_run INTEGER,
                 next_run INTEGER NOT NULL,
-                created_at INTEGER NOT NULL,
-                FOREIGN KEY (task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+                expires_at INTEGER,
+                created_at INTEGER NOT NULL
             );
             CREATE INDEX idx_cron_next_run ON cron_jobs(next_run) WHERE enabled=1;
             ",
@@ -215,6 +215,52 @@ impl Database {
                     "ALTER TABLE cron_jobs ADD COLUMN expires_at INTEGER;",
                 )?;
             }
+        }
+
+        if from_version < 7 {
+            // Migrate cron_jobs from task_id FK to repo_path.
+            // Resolve repo_path by joining against container_state; disable jobs that can't be resolved.
+            self.conn.execute_batch(
+                "DROP TABLE IF EXISTS cron_jobs_v7;
+
+                CREATE TABLE cron_jobs_v7 (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    repo_path TEXT NOT NULL,
+                    label TEXT,
+                    schedule TEXT NOT NULL,
+                    prompt TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    skip_if_running INTEGER NOT NULL DEFAULT 1,
+                    running INTEGER NOT NULL DEFAULT 0,
+                    last_run INTEGER,
+                    next_run INTEGER NOT NULL,
+                    expires_at INTEGER,
+                    created_at INTEGER NOT NULL
+                );
+
+                INSERT INTO cron_jobs_v7
+                    (id, repo_path, label, schedule, prompt, enabled, skip_if_running,
+                     running, last_run, next_run, expires_at, created_at)
+                SELECT
+                    cj.id,
+                    COALESCE(
+                        (SELECT cs.repo_path FROM container_state cs
+                         WHERE cs.task_id = cj.task_id
+                         ORDER BY cs.created_at DESC LIMIT 1),
+                        '(unknown)'
+                    ),
+                    cj.label, cj.schedule, cj.prompt, cj.enabled, cj.skip_if_running,
+                    cj.running, cj.last_run, cj.next_run,
+                    cj.expires_at,
+                    cj.created_at
+                FROM cron_jobs cj;
+
+                UPDATE cron_jobs_v7 SET enabled = 0 WHERE repo_path = '(unknown)';
+
+                DROP TABLE cron_jobs;
+                ALTER TABLE cron_jobs_v7 RENAME TO cron_jobs;
+                CREATE INDEX idx_cron_next_run ON cron_jobs(next_run) WHERE enabled=1;",
+            )?;
         }
 
         self.conn.execute(
@@ -592,11 +638,11 @@ impl Database {
         let now = Utc::now().timestamp();
         self.conn.execute(
             "INSERT INTO cron_jobs (
-                task_id, label, schedule, prompt, enabled, skip_if_running,
+                repo_path, label, schedule, prompt, enabled, skip_if_running,
                 running, last_run, next_run, expires_at, created_at
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
-                job.task_id,
+                job.repo_path,
                 job.label,
                 job.schedule,
                 job.prompt,
@@ -653,7 +699,7 @@ impl Database {
 
     pub fn get_cron_job(&self, id: i64) -> Result<Option<CronJob>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, task_id, label, schedule, prompt, enabled, skip_if_running,
+            "SELECT id, repo_path, label, schedule, prompt, enabled, skip_if_running,
                     running, last_run, next_run, expires_at, created_at
              FROM cron_jobs WHERE id = ?1"
         )?;
@@ -665,21 +711,21 @@ impl Database {
         Ok(job)
     }
 
-    pub fn list_cron_jobs(&self, task_id_filter: Option<&str>) -> Result<Vec<CronJob>> {
-        let jobs = match task_id_filter {
-            Some(task_id) => {
+    pub fn list_cron_jobs(&self, repo_path_filter: Option<&str>) -> Result<Vec<CronJob>> {
+        let jobs = match repo_path_filter {
+            Some(repo_path) => {
                 let mut stmt = self.conn.prepare(
-                    "SELECT id, task_id, label, schedule, prompt, enabled, skip_if_running,
+                    "SELECT id, repo_path, label, schedule, prompt, enabled, skip_if_running,
                             running, last_run, next_run, expires_at, created_at
-                     FROM cron_jobs WHERE task_id = ?1 ORDER BY created_at DESC",
+                     FROM cron_jobs WHERE repo_path = ?1 ORDER BY created_at DESC",
                 )?;
-                let jobs = stmt.query_map(params![task_id], |row| self.row_to_cron_job(row))?
+                let jobs = stmt.query_map(params![repo_path], |row| self.row_to_cron_job(row))?
                     .collect::<Result<Vec<_>, _>>()?;
                 jobs
             }
             None => {
                 let mut stmt = self.conn.prepare(
-                    "SELECT id, task_id, label, schedule, prompt, enabled, skip_if_running,
+                    "SELECT id, repo_path, label, schedule, prompt, enabled, skip_if_running,
                             running, last_run, next_run, expires_at, created_at
                      FROM cron_jobs ORDER BY created_at DESC",
                 )?;
@@ -702,7 +748,7 @@ impl Database {
 
     pub fn get_cron_job_by_label(&self, label: &str) -> Result<Option<CronJob>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, task_id, label, schedule, prompt, enabled, skip_if_running,
+            "SELECT id, repo_path, label, schedule, prompt, enabled, skip_if_running,
                     running, last_run, next_run, expires_at, created_at
              FROM cron_jobs WHERE label = ?1 LIMIT 1",
         )?;
@@ -712,10 +758,10 @@ impl Database {
         Ok(job)
     }
 
-    pub fn label_exists_for_task(&self, task_id: &str, label: &str) -> Result<bool> {
+    pub fn label_exists_for_repo(&self, repo_path: &str, label: &str) -> Result<bool> {
         let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM cron_jobs WHERE task_id = ?1 AND label = ?2",
-            params![task_id, label],
+            "SELECT COUNT(*) FROM cron_jobs WHERE repo_path = ?1 AND label = ?2",
+            params![repo_path, label],
             |row| row.get(0),
         )?;
         Ok(count > 0)
@@ -724,7 +770,7 @@ impl Database {
     /// Get all cron jobs that are due to run (next_run <= now and enabled)
     pub fn get_due_cron_jobs(&self, now: DateTime<Utc>) -> Result<Vec<CronJob>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, task_id, label, schedule, prompt, enabled, skip_if_running,
+            "SELECT id, repo_path, label, schedule, prompt, enabled, skip_if_running,
                     running, last_run, next_run, expires_at, created_at
              FROM cron_jobs WHERE enabled = 1 AND next_run <= ?1
              ORDER BY next_run ASC"
@@ -745,7 +791,7 @@ impl Database {
 
         Ok(CronJob {
             id: Some(row.get(0)?),
-            task_id: row.get(1)?,
+            repo_path: row.get(1)?,
             label: row.get(2)?,
             schedule: row.get(3)?,
             prompt: row.get(4)?,

@@ -206,7 +206,9 @@ impl Task {
 #[derive(Debug, Clone)]
 pub struct CronJob {
     pub id: Option<i64>,
-    pub task_id: String,
+    /// Canonical absolute path of the repo this job targets.
+    /// At trigger time nibble finds or spawns a sandbox for this path.
+    pub repo_path: String,
     pub label: Option<String>,
     pub schedule: String,
     pub prompt: String,
@@ -225,7 +227,7 @@ pub struct CronJob {
 
 impl CronJob {
     pub fn new(
-        task_id: String,
+        repo_path: String,
         schedule: String,
         prompt: String,
         label: Option<String>,
@@ -233,7 +235,7 @@ impl CronJob {
     ) -> Self {
         Self {
             id: None,
-            task_id,
+            repo_path,
             label,
             schedule,
             prompt,

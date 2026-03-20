@@ -278,7 +278,7 @@ fn main() -> Result<()> {
         }
         Some(Commands::Cron { action }) => match action {
             CronAction::Add {
-                task_id_or_path,
+                repo,
                 schedule,
                 prompt,
                 file,
@@ -287,7 +287,7 @@ fn main() -> Result<()> {
             } => {
                 cmd_cron_add(
                     &db,
-                    task_id_or_path,
+                    repo,
                     schedule,
                     prompt,
                     file,
@@ -295,8 +295,8 @@ fn main() -> Result<()> {
                     expires,
                 )?;
             }
-            CronAction::List { task_id_or_path } => {
-                cmd_cron_list(&db, task_id_or_path)?;
+            CronAction::List { repo_path } => {
+                cmd_cron_list(&db, repo_path)?;
             }
             CronAction::Edit {
                 id,
@@ -685,35 +685,43 @@ pub(crate) fn cmd_sandbox_spawn(
 
 fn cmd_cron_add(
     db: &Database,
-    task_id_or_path: String,
+    repo_arg: Option<String>,
     schedule: Option<String>,
     prompt: Option<String>,
     file: Option<String>,
     label: Option<String>,
     expires: Option<String>,
 ) -> Result<()> {
-    // Resolve the sandbox
-    let task_id = resolve_sandbox_id(db, &task_id_or_path)?;
-    let task = db
-        .get_task_by_id(&task_id)?
-        .ok_or_else(|| anyhow::anyhow!("Task not found: {}", task_id))?;
-
-    if task.sandbox_type != SandboxType::Podman {
-        anyhow::bail!("Task {} is not a sandbox task", task_id);
-    }
-
     // Parse the cron definition
-    let (schedule, prompt, label, enabled, skip_if_running, file_expires) = if let Some(file_path) = file {
+    let (schedule, prompt, label, enabled, skip_if_running, file_expires, file_repo) = if let Some(file_path) = file {
         let content = std::fs::read_to_string(&file_path)
             .with_context(|| format!("Failed to read cron file: {}", file_path))?;
-        let (sched, prompt, lbl, en, skip, exp) = cron::parse_cron_markdown(&content)?;
-        (sched, prompt, lbl.or(label), en, skip, exp)
+        let (sched, prompt, lbl, en, skip, exp, rp) = cron::parse_cron_markdown(&content)?;
+        (sched, prompt, lbl.or(label), en, skip, exp, rp)
     } else {
         let schedule = schedule.context("Either --schedule or --file must be provided")?;
         let prompt = prompt.context("Either --prompt or --file must be provided")?;
         cron::validate_schedule(&schedule)?;
-        (schedule, prompt, label, true, true, None) // defaults: enabled, skip_if_running
+        (schedule, prompt, label, true, true, None, None)
     };
+
+    // Resolve repo path: --repo CLI arg takes precedence over markdown field
+    let raw_repo = repo_arg
+        .or(file_repo)
+        .context("repo_path is required — use --repo /path/to/repo or add 'repo_path = \"...\"' to the markdown file")?;
+
+    // Expand tilde and canonicalize
+    let expanded = if raw_repo.starts_with('~') {
+        let home = std::env::var("HOME").unwrap_or_default();
+        raw_repo.replacen('~', &home, 1)
+    } else {
+        raw_repo.clone()
+    };
+    let repo_path = std::fs::canonicalize(&expanded)
+        .with_context(|| format!("repo_path does not exist or cannot be resolved: {}", expanded))?
+        .to_string_lossy()
+        .to_string();
+
     // CLI --expires overrides file expires_at
     let expires = expires.or_else(|| file_expires.map(|exp| exp.to_rfc3339()));
 
@@ -722,7 +730,7 @@ fn cmd_cron_add(
 
     // Create the cron job
     let mut job = models::CronJob::new(
-        task_id.clone(),
+        repo_path.clone(),
         schedule.clone(),
         prompt,
         label,
@@ -739,9 +747,9 @@ fn cmd_cron_add(
     }
 
     if let Some(ref lbl) = job.label {
-        if db.label_exists_for_task(&task_id, lbl)? {
+        if db.label_exists_for_repo(&repo_path, lbl)? {
             anyhow::bail!(
-                "A cron job with label '{}' already exists for this sandbox. \
+                "A cron job with label '{}' already exists for this repo. \
                  Use `nibble cron edit {}` to update it or choose a different label.",
                 lbl, lbl
             );
@@ -750,7 +758,7 @@ fn cmd_cron_add(
 
     let id = db.insert_cron_job(&job)?;
 
-    println!("Created cron job {} for sandbox {}", id, task_id);
+    println!("Created cron job {} for repo {}", id, repo_path);
     println!("  Schedule: {}", job.schedule);
     println!("  Next run: {}", job.next_run);
     if let Some(ref lbl) = job.label {
@@ -764,18 +772,25 @@ fn cmd_cron_add(
     Ok(())
 }
 
-fn cmd_cron_list(db: &Database, task_id_or_path: Option<String>) -> Result<()> {
-    let task_id_filter = if let Some(input) = task_id_or_path {
-        Some(resolve_sandbox_id(db, &input)?)
-    } else {
-        None
-    };
+fn cmd_cron_list(db: &Database, repo_path_filter: Option<String>) -> Result<()> {
+    // Canonicalize the filter path if provided
+    let filter = repo_path_filter.map(|p| {
+        let expanded = if p.starts_with('~') {
+            let home = std::env::var("HOME").unwrap_or_default();
+            p.replacen('~', &home, 1)
+        } else {
+            p
+        };
+        std::fs::canonicalize(&expanded)
+            .map(|c| c.to_string_lossy().to_string())
+            .unwrap_or(expanded)
+    });
 
-    let jobs = db.list_cron_jobs(task_id_filter.as_deref())?;
+    let jobs = db.list_cron_jobs(filter.as_deref())?;
 
     if jobs.is_empty() {
-        if task_id_filter.is_some() {
-            println!("No cron jobs found for this sandbox.");
+        if filter.is_some() {
+            println!("No cron jobs found for this repo.");
         } else {
             println!("No cron jobs found.");
         }
@@ -783,13 +798,18 @@ fn cmd_cron_list(db: &Database, task_id_or_path: Option<String>) -> Result<()> {
     }
 
     println!("{:<5} {:<10} {:<20} {:<20} {:<10} {:<24} {}",
-        "ID", "TASK", "SCHEDULE", "NEXT RUN", "STATUS", "EXPIRES (UTC)", "LABEL");
+        "ID", "REPO", "SCHEDULE", "NEXT RUN", "STATUS", "EXPIRES (UTC)", "LABEL");
     println!("{}", "─".repeat(114));
 
     let now = chrono::Utc::now();
 
     for job in jobs {
-        let short_task = &job.task_id[..job.task_id.len().min(8)];
+        let short_task = std::path::Path::new(&job.repo_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(&job.repo_path)
+            .chars().take(10).collect::<String>();
+        let short_task = short_task.as_str();
         let label = job.label.as_deref().unwrap_or("-");
         let status = if job.enabled {
             if job.next_run <= now {
@@ -916,36 +936,36 @@ fn cmd_cron_run(db: &Database, id: i64) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("Cron job {} not found", id))?;
 
     println!("Running cron job {} ({})", id, job.label.as_deref().unwrap_or("unnamed"));
-    println!("Target sandbox: {}", job.task_id);
+    println!("Target repo: {}", job.repo_path);
     println!("Prompt: {}", job.prompt.chars().take(60).collect::<String>());
 
-    // Check if sandbox is running
-    let task = db
-        .get_task_by_id(&job.task_id)?
-        .ok_or_else(|| anyhow::anyhow!("Task {} not found", job.task_id))?;
+    let task = find_healthy_sandbox_for_repo(db, &job.repo_path)?
+        .ok_or_else(|| anyhow::anyhow!(
+            "No healthy sandbox found for repo {}.\n\
+             Start one with: nibble sandbox spawn {}",
+            job.repo_path, job.repo_path
+        ))?;
 
-    if task.sandbox_type != SandboxType::Podman {
-        anyhow::bail!("Task {} is not a sandbox task", job.task_id);
-    }
-
-    let container_id = task
-        .container_id
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("Task {} has no container_id", job.task_id))?;
-
-    let sandbox = PodmanSandbox::new();
-    match sandbox.health_check(container_id) {
-        SandboxHealth::Healthy => {
-            println!("Sandbox is healthy, injecting prompt...");
-            agent_input::inject(&task, &job.prompt)?;
-            println!("Prompt injected successfully.");
-        }
-        status => {
-            anyhow::bail!("Sandbox is not healthy ({:?}), cannot inject prompt", status);
-        }
-    }
+    println!("Injecting into sandbox {}...", &task.task_id[..task.task_id.len().min(8)]);
+    agent_input::inject(&task, &job.prompt)?;
+    println!("Prompt injected successfully.");
 
     Ok(())
+}
+
+/// Find a healthy sandbox for the given repo path. Returns None if no healthy container exists.
+fn find_healthy_sandbox_for_repo(db: &Database, repo_path: &str) -> Result<Option<models::Task>> {
+    let Some((task_id, container_name)) = db.get_container_state_by_repo_path(repo_path)? else {
+        return Ok(None);
+    };
+    let Some(task) = db.get_task_by_id(&task_id)? else {
+        return Ok(None);
+    };
+    let sandbox = PodmanSandbox::new();
+    match sandbox.health_check(&container_name) {
+        SandboxHealth::Healthy => Ok(Some(task)),
+        _ => Ok(None),
+    }
 }
 
 /// List all tracked sandboxes, auto-cleaning gone entries.

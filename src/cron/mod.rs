@@ -34,6 +34,7 @@ pub fn validate_schedule(schedule: &str) -> Result<()> {
 /// # My Cron Job Label
 ///
 /// schedule = "0 9 * * 1-5"
+/// repo_path = "/home/user/workspace/myproject"
 /// enabled = true
 /// skip_if_running = true
 /// expires_at = "2026-04-01T00:00:00Z"
@@ -44,10 +45,11 @@ pub fn validate_schedule(schedule: &str) -> Result<()> {
 /// It can span multiple lines.
 /// ```
 ///
-/// Returns `(schedule, prompt, label, enabled, skip_if_running, expires_at)`
-pub fn parse_cron_markdown(content: &str) -> Result<(String, String, Option<String>, bool, bool, Option<DateTime<Utc>>)> {
+/// Returns `(schedule, prompt, label, enabled, skip_if_running, expires_at, repo_path)`
+pub fn parse_cron_markdown(content: &str) -> Result<(String, String, Option<String>, bool, bool, Option<DateTime<Utc>>, Option<String>)> {
     let mut label = None;
     let mut schedule = None;
+    let mut repo_path: Option<String> = None;
     let mut enabled = true;
     let mut skip_if_running = true;
     let mut expires_at: Option<DateTime<Utc>> = None;
@@ -69,6 +71,13 @@ pub fn parse_cron_markdown(content: &str) -> Result<(String, String, Option<Stri
         if trimmed.starts_with("schedule") && trimmed.contains('=') {
             if let Some(value) = parse_string_value(trimmed) {
                 schedule = Some(value);
+            }
+            continue;
+        }
+
+        if trimmed.starts_with("repo_path") && trimmed.contains('=') {
+            if let Some(value) = parse_string_value(trimmed) {
+                repo_path = Some(value);
             }
             continue;
         }
@@ -124,7 +133,7 @@ pub fn parse_cron_markdown(content: &str) -> Result<(String, String, Option<Stri
     // Validate the schedule
     validate_schedule(&schedule)?;
 
-    Ok((schedule, prompt, label, enabled, skip_if_running, expires_at))
+    Ok((schedule, prompt, label, enabled, skip_if_running, expires_at, repo_path))
 }
 
 fn parse_string_value(line: &str) -> Option<String> {
@@ -167,6 +176,7 @@ pub fn format_cron_markdown(job: &CronJob) -> String {
         r#"# {}
 
 schedule = "{}"
+repo_path = "{}"
 enabled = {}
 skip_if_running = {}{}
 
@@ -176,6 +186,7 @@ skip_if_running = {}{}
 "#,
         label,
         job.schedule,
+        job.repo_path,
         job.enabled,
         job.skip_if_running,
         expires_line,
@@ -201,13 +212,14 @@ Please review yesterday's commits and prepare a summary.
 Focus on the main branch changes.
 "#;
 
-        let (schedule, prompt, label, enabled, skip_if_running, expires_at) = parse_cron_markdown(markdown).unwrap();
+        let (schedule, prompt, label, enabled, skip_if_running, expires_at, repo_path) = parse_cron_markdown(markdown).unwrap();
 
         assert_eq!(schedule, "0 9 * * 1-5");
         assert_eq!(label.unwrap(), "Daily Standup");
         assert!(enabled);
         assert!(skip_if_running);
         assert!(expires_at.is_none());
+        assert!(repo_path.is_none());
         assert!(prompt.contains("review yesterday's commits"));
         assert!(prompt.contains("main branch changes"));
     }
@@ -223,12 +235,13 @@ schedule = "*/5 * * * *"
 Hello world
 "#;
 
-        let (schedule, prompt, label, _enabled, skip_if_running, expires_at) = parse_cron_markdown(markdown).unwrap();
+        let (schedule, prompt, label, _enabled, skip_if_running, expires_at, repo_path) = parse_cron_markdown(markdown).unwrap();
 
         assert_eq!(schedule, "*/5 * * * *");
         assert_eq!(label.unwrap(), "Test");
         assert!(skip_if_running); // default
         assert!(expires_at.is_none());
+        assert!(repo_path.is_none());
         assert_eq!(prompt, "Hello world");
     }
 

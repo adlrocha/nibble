@@ -280,10 +280,13 @@ pub enum ReportAction {
 
 #[derive(Subcommand)]
 pub enum CronAction {
-    /// Add a new cron job for a sandbox
+    /// Add a new cron job targeting a repo path.
+    /// At trigger time nibble will find or spawn a sandbox for that repo automatically.
     Add {
-        /// Task ID or repo path of the sandbox
-        task_id_or_path: String,
+        /// Path to the repository this cron job targets.
+        /// If omitted, repo_path must be set in the --file markdown.
+        #[arg(short, long)]
+        repo: Option<String>,
 
         /// Cron schedule expression (e.g., "0 9 * * 1-5" for 9am weekdays)
         #[arg(short, long)]
@@ -307,10 +310,10 @@ pub enum CronAction {
         expires: Option<String>,
     },
 
-    /// List cron jobs (optionally filtered by task)
+    /// List cron jobs (optionally filtered by repo path)
     List {
-        /// Optional task ID or repo path to filter by
-        task_id_or_path: Option<String>,
+        /// Optional canonical repo path to filter by
+        repo_path: Option<String>,
     },
 
     /// Edit an existing cron job

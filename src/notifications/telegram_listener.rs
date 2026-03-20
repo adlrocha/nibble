@@ -36,7 +36,6 @@ use crate::agent_input;
 use crate::config::TelegramConfig;
 use crate::cron;
 use crate::db::Database;
-use crate::models::SandboxType;
 use crate::notifications::telegram;
 use crate::sandbox::podman::PodmanSandbox;
 use crate::sandbox::{Sandbox, SandboxHealth};
@@ -342,7 +341,7 @@ fn handle_help_command(config: &TelegramConfig, chat_id: i64) -> Result<()> {
 
 */cron* - Manage scheduled prompts
   `/cron list` - List all cron jobs
-  `/cron list <task_id>` - List cron jobs for a specific sandbox
+  `/cron list <repo_name>` - List cron jobs for a specific repo
 
 *Reply to any task notification* to send a message to that agent.
 "#;
@@ -360,34 +359,45 @@ fn handle_cron_command(
     let parts: Vec<&str> = args.split_whitespace().collect();
 
     if parts.is_empty() || parts[0] == "list" {
-        // List cron jobs
-        let task_filter = if parts.len() > 1 {
-            // Try prefix match against task IDs in container_state
-            let prefix = parts[1];
-            let states = db.list_container_states()?;
-            let matches: Vec<_> = states.iter()
-                .filter(|(tid, _, _, _)| tid.starts_with(prefix))
-                .collect();
-            match matches.len() {
-                0 => {
-                    send_notice(config, chat_id, &format!("⚠️ No sandbox found matching: {}", prefix))?;
-                    return Ok(());
-                }
-                1 => Some(matches[0].0.clone()),
-                _ => {
-                    send_notice(config, chat_id, "⚠️ Ambiguous prefix — be more specific.")?;
-                    return Ok(());
+        // Optional filter: if the arg looks like a path prefix, match against repo_path basename
+        let repo_filter: Option<String> = if parts.len() > 1 {
+            let arg = parts[1];
+            // If it starts with '/', treat as canonical path; otherwise match as repo basename suffix
+            if arg.starts_with('/') {
+                Some(arg.to_string())
+            } else {
+                // Find all cron jobs whose repo basename matches the arg
+                let all_jobs = db.list_cron_jobs(None)?;
+                let matched: Vec<_> = all_jobs.iter()
+                    .filter(|j| {
+                        std::path::Path::new(&j.repo_path)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .map(|n| n.starts_with(arg))
+                            .unwrap_or(false)
+                    })
+                    .map(|j| j.repo_path.clone())
+                    .collect::<std::collections::HashSet<_>>()
+                    .into_iter()
+                    .collect();
+                match matched.len() {
+                    0 => {
+                        send_notice(config, chat_id, &format!("⚠️ No cron jobs found for repo matching: {}", arg))?;
+                        return Ok(());
+                    }
+                    1 => Some(matched.into_iter().next().unwrap()),
+                    _ => None, // show all if ambiguous
                 }
             }
         } else {
             None
         };
 
-        let jobs = db.list_cron_jobs(task_filter.as_deref())?;
+        let jobs = db.list_cron_jobs(repo_filter.as_deref())?;
 
         if jobs.is_empty() {
-            if task_filter.is_some() {
-                send_notice(config, chat_id, "No cron jobs for this sandbox.")?;
+            if repo_filter.is_some() {
+                send_notice(config, chat_id, "No cron jobs for this repo.")?;
             } else {
                 send_notice(config, chat_id, "No cron jobs configured.")?;
             }
@@ -398,7 +408,10 @@ fn handle_cron_command(
         let mut lines = vec!["🕐 *Cron Jobs*\n".to_string()];
 
         for job in jobs {
-            let short_task = &job.task_id[..job.task_id.len().min(8)];
+            let repo_label = std::path::Path::new(&job.repo_path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&job.repo_path);
             let label = job.label.as_deref().unwrap_or("unnamed");
             let status = if job.enabled { "✅" } else { "⏹️" };
 
@@ -426,8 +439,8 @@ fn handle_cron_command(
                 None => String::new(),
             };
             lines.push(format!(
-                "{} *{}*\n  Sandbox: `{}` | Next: {}{}\n  Schedule: `{}`\n",
-                status, label, short_task, next_str, exp_str, job.schedule
+                "{} *{}*\n  Repo: `{}` | Next: {}{}\n  Schedule: `{}`\n",
+                status, label, repo_label, next_str, exp_str, job.schedule
             ));
         }
 
@@ -802,6 +815,51 @@ fn is_authorised(config: &TelegramConfig, from_id: i64, from_username: Option<&s
 
 // ── Cron job execution ────────────────────────────────────────────────────────
 
+/// Find a healthy sandbox for `repo_path`, or spawn a new one.
+/// Returns the Task to inject into.
+fn find_or_spawn_for_cron(
+    db: &Database,
+    repo_path: &str,
+    config: &TelegramConfig,
+) -> Result<crate::models::Task> {
+    let sandbox = PodmanSandbox::new();
+
+    // Check if an existing container is healthy.
+    if let Some((task_id, container_name)) = db.get_container_state_by_repo_path(repo_path)? {
+        if let Some(task) = db.get_task_by_id(&task_id)? {
+            match sandbox.health_check(&container_name) {
+                SandboxHealth::Healthy => return Ok(task),
+                status => {
+                    eprintln!("[cron] Existing container for {repo_path} is {status:?}, will spawn fresh");
+                }
+            }
+        }
+    }
+
+    // No healthy container — spawn one.
+    eprintln!("[cron] Spawning sandbox for {repo_path}");
+    let repo_label = std::path::Path::new(repo_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(repo_path);
+    let _ = telegram::send(config, &format!("⚙️ Spawning sandbox for '{repo_label}' (cron trigger)…"));
+
+    let new_task_id = crate::cmd_sandbox_spawn(
+        db,
+        repo_path.to_string(),
+        None,
+        "nibble-sandbox:latest".to_string(),
+        false,
+        None,
+        true,  // no_attach
+        false, // kimi
+        false, // glm
+    )?;
+
+    db.get_task_by_id(&new_task_id)?
+        .ok_or_else(|| anyhow::anyhow!("[cron] Spawned task {new_task_id} not found in DB"))
+}
+
 /// Check for due cron jobs and execute them.
 fn check_and_run_cron_jobs(db: &Database, config: &TelegramConfig) -> Result<()> {
     let now = chrono::Utc::now();
@@ -809,12 +867,13 @@ fn check_and_run_cron_jobs(db: &Database, config: &TelegramConfig) -> Result<()>
 
     for job in due_jobs {
         let job_id = job.id.unwrap_or(0);
-        // Own the label string up front so nothing borrows `job` past this point.
         let label = job.label.clone().unwrap_or_else(|| "unnamed".to_string());
-        eprintln!(
-            "[cron] Job {} ('{}') due for sandbox {}",
-            job_id, label, &job.task_id[..job.task_id.len().min(8)]
-        );
+        let repo_label = std::path::Path::new(&job.repo_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(&job.repo_path)
+            .to_string();
+        eprintln!("[cron] Job {} ('{}') due for repo {}", job_id, label, repo_label);
 
         // Auto-disable if the job has expired.
         if let Some(exp) = job.expires_at {
@@ -823,61 +882,20 @@ fn check_and_run_cron_jobs(db: &Database, config: &TelegramConfig) -> Result<()>
                 let mut expired_job = job.clone();
                 expired_job.enabled = false;
                 let _ = db.update_cron_job(&expired_job);
-                let msg = format!("⏹️ Cron job '{label}' expired and has been disabled.");
-                let _ = telegram::send(config, &msg);
+                let _ = telegram::send(config, &format!("⏹️ Cron job '{label}' expired and has been disabled."));
                 continue;
             }
         }
 
         // Skip if a previous execution is still in-flight.
         if job.skip_if_running && job.running {
-            let msg = format!("⏭️ Cron job '{label}' skipped: previous run still in progress");
-            let _ = telegram::send(config, &msg);
+            let _ = telegram::send(config, &format!("⏭️ Cron job '{label}' skipped: previous run still in progress"));
             eprintln!("[cron] Job {job_id} skipped (running flag set)");
             continue;
         }
 
-        // Resolve the task.
-        let task = match db.get_task_by_id(&job.task_id)? {
-            Some(t) => t,
-            None => {
-                eprintln!("[cron] Task {} not found, disabling job {job_id}", job.task_id);
-                let mut disabled = job.clone();
-                disabled.enabled = false;
-                let _ = db.update_cron_job(&disabled);
-                continue;
-            }
-        };
-
-        if task.sandbox_type != SandboxType::Podman {
-            eprintln!("[cron] Task {} is not a sandbox, skipping", job.task_id);
-            continue;
-        }
-
-        let container_id = match task.container_id.as_deref() {
-            Some(cid) => cid.to_string(),
-            None => {
-                eprintln!("[cron] Task {} has no container_id, skipping", job.task_id);
-                continue;
-            }
-        };
-
-        // Health check — this is the correct liveness gate (task.status is unreliable
-        // for sandboxes: it flips between Running/Completed on every Claude turn).
-        let sandbox = PodmanSandbox::new();
-        match sandbox.health_check(&container_id) {
-            SandboxHealth::Healthy => {}
-            status => {
-                let msg = format!("⏭️ Cron job '{label}' skipped: sandbox is {status:?}");
-                let _ = telegram::send(config, &msg);
-                eprintln!("[cron] Sandbox {} is {status:?}, skipping", job.task_id);
-                continue;
-            }
-        }
-
         // Mark running + advance timestamps before spawning the thread so that
-        // the next cron tick (which may arrive before the thread exits) sees
-        // running=true and skips accordingly.
+        // the next cron tick sees running=true and skips accordingly.
         let mut updated_job = job.clone();
         updated_job.running = true;
         updated_job.last_run = Some(now);
@@ -890,35 +908,50 @@ fn check_and_run_cron_jobs(db: &Database, config: &TelegramConfig) -> Result<()>
         }
         let _ = db.update_cron_job(&updated_job);
 
-        // Notify start, including a truncated preview of the injected prompt so
-        // the user knows what was sent to the agent.
         let prompt_preview = if job.prompt.chars().count() > 200 {
             format!("{}…", job.prompt.chars().take(200).collect::<String>())
         } else {
             job.prompt.clone()
         };
-        let start_msg = format!(
-            "🕐 Cron job '{label}' starting\n📁 Sandbox: {}\n📝 Prompt: {prompt_preview}",
-            task.title
-        );
-        let _ = telegram::send(config, &start_msg);
+        let _ = telegram::send(config, &format!(
+            "🕐 Cron job '{label}' starting\n📁 Repo: {repo_label}\n📝 Prompt: {prompt_preview}"
+        ));
 
-        // Record the bot message count BEFORE we start the inject.
-        // This is used by the safety-net to detect if Stop hook sent a notification.
-        let messages_before = db.bot_message_count_for_task(&job.task_id).unwrap_or(0);
-
-        // Reuse the existing inject_with_heartbeat path (same as Telegram replies).
+        // Dispatch to background thread: find-or-spawn sandbox, then inject.
         let db_path = crate::db::default_db_path();
         let config_clone = config.clone();
-        let task_clone = task.clone();
         let prompt_clone = job.prompt.clone();
-        let task_id_clone = job.task_id.clone();
+        let repo_path_clone = job.repo_path.clone();
 
         thread::spawn(move || {
-            inject_with_heartbeat(&task_clone, &prompt_clone, &config_clone, &task_id_clone, &db_path, messages_before);
+            // Open a fresh DB connection for the thread.
+            let db = match Database::open(&db_path) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("[cron] Thread DB open failed: {e}");
+                    return;
+                }
+            };
+
+            let task = match find_or_spawn_for_cron(&db, &repo_path_clone, &config_clone) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("[cron] Job {job_id} failed to find/spawn sandbox: {e:#}");
+                    let _ = telegram::send(&config_clone, &format!("❌ Cron job '{label}' failed: {e:#}"));
+                    let _ = db.set_cron_job_running(job_id, false);
+                    return;
+                }
+            };
+
+            // Read messages_before inside the thread (task is now known).
+            let messages_before = db.bot_message_count_for_task(&task.task_id).unwrap_or(0);
+            let task_id_clone = task.task_id.clone();
+
+            inject_with_heartbeat(&task, &prompt_clone, &config_clone, &task_id_clone, &db_path, messages_before);
+
             // Clear the running flag when the injection finishes.
-            if let Ok(db) = Database::open(&db_path) {
-                let _ = db.set_cron_job_running(job_id, false);
+            if let Ok(db2) = Database::open(&db_path) {
+                let _ = db2.set_cron_job_running(job_id, false);
             }
         });
     }
