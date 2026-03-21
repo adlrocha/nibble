@@ -1165,11 +1165,18 @@ fn cmd_sandbox_attach(db: &Database, task_id: String, fresh: bool, kimi: bool, g
     }
 
     // Build the shell command that runs inside the container.
+    // Strategy:
+    //  1. Try --resume <sid> to load existing history for this repo.
+    //  2. If that fails (first attach, session file missing, etc.), fall back
+    //     to --session-id <sid> which pins the UUID without requiring an existing
+    //     file — Claude creates a new session under that exact UUID.
+    // We never fall back to bare `claude` or `claude --continue` because those
+    // would resume the most-recent session across ALL repos (cross-repo contamination).
     let shell_cmd = if let Some(sid) = session_id {
-        // Resume the stored session (or start fresh if the file was just wiped).
-        format!("cd /workspace && {claude} --resume {sid} 2>&1 || {claude}")
+        format!("cd /workspace && {claude} --resume {sid} 2>&1 || {claude} --session-id {sid}")
     } else {
-        format!("cd /workspace && {claude} --continue 2>&1 || {claude}")
+        // No session ID stored yet — start fresh; the Stop hook will record the UUID.
+        format!("cd /workspace && {claude}")
     };
 
     // Build podman exec args, injecting Kimi credentials if requested.
@@ -1180,6 +1187,9 @@ fn cmd_sandbox_attach(db: &Database, task_id: String, fresh: bool, kimi: bool, g
         "-e".into(), "TERM=xterm-256color".into(),
         "-e".into(), "PATH=/home/node/.local/bin:/usr/local/bin:/usr/bin:/bin".into(),
         "-e".into(), "CLAUDE_CONFIG_DIR=/home/node/.claude".into(),
+        // Required by Stop/SessionEnd hooks inside the container so they can
+        // call `nibble report session-id` and update the stored session UUID.
+        "-e".into(), format!("AGENT_TASK_ID={}", task_id),
     ];
 
     if kimi {
