@@ -197,6 +197,7 @@ skip_if_running = {}{}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Timelike;
 
     #[test]
     fn test_parse_cron_markdown() {

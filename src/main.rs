@@ -333,25 +333,25 @@ fn main() -> Result<()> {
             SandboxAction::List => {
                 cmd_sandbox_list(&db)?;
             }
-            SandboxAction::Attach { task_id_or_path, fresh, kimi, glm } => {
-                match resolve_sandbox_id(&db, &task_id_or_path) {
+            SandboxAction::Attach { container_or_path, fresh, kimi, glm } => {
+                match resolve_sandbox_id(&db, &container_or_path) {
                     Ok(task_id) => {
                         cmd_sandbox_attach(&db, task_id, fresh, kimi, glm)?;
                     }
                     Err(e) => {
                         // If the input looks like a repo path and no sandbox exists,
                         // spawn one and then attach to it.
-                        let looks_like_path = task_id_or_path.starts_with('.')
-                            || task_id_or_path.starts_with('/')
-                            || task_id_or_path.starts_with('~')
-                            || task_id_or_path.contains('/')
-                            || std::path::Path::new(&task_id_or_path).exists();
+                        let looks_like_path = container_or_path.starts_with('.')
+                            || container_or_path.starts_with('/')
+                            || container_or_path.starts_with('~')
+                            || container_or_path.contains('/')
+                            || std::path::Path::new(&container_or_path).exists();
 
                         if looks_like_path {
-                            eprintln!("No sandbox found for '{}', spawning one...", task_id_or_path);
+                            eprintln!("No sandbox found for '{}', spawning one...", container_or_path);
                             let task_id = cmd_sandbox_spawn(
                                 &db,
-                                task_id_or_path,
+                                container_or_path,
                                 None, // task_desc
                                 "nibble-sandbox:latest".to_string(),
                                 fresh,
@@ -367,11 +367,11 @@ fn main() -> Result<()> {
                     }
                 }
             }
-            SandboxAction::Kill { task_id_or_path, all } => {
+            SandboxAction::Kill { container_or_path, all } => {
                 if all {
                     cmd_sandbox_kill_all(&db)?;
                 } else {
-                    let input = task_id_or_path.ok_or_else(|| anyhow::anyhow!("Provide a task ID, repo path, or --all"))?;
+                    let input = container_or_path.ok_or_else(|| anyhow::anyhow!("Provide a repo path, container name, or --all"))?;
                     let id = resolve_sandbox_id(&db, &input)?;
                     cmd_sandbox_kill(&db, id)?;
                 }
@@ -387,8 +387,8 @@ fn main() -> Result<()> {
                 sandbox.ensure_image_with_opts(&image, rebuild)?;
                 println!("Sandbox image ready.");
             }
-            SandboxAction::Gc { task_id_or_path, all } => {
-                let task_id = resolve_sandbox_id(&db, &task_id_or_path)?;
+            SandboxAction::Gc { container_or_path, all } => {
+                let task_id = resolve_sandbox_id(&db, &container_or_path)?;
                 cmd_sandbox_gc(&db, task_id, all)?;
             }
         },
@@ -990,6 +990,7 @@ fn cmd_sandbox_list(db: &Database) -> Result<()> {
         let status = match health {
             SandboxHealth::Healthy  => "healthy",
             SandboxHealth::Degraded => "degraded",
+            SandboxHealth::Stopped  => "stopped",
             SandboxHealth::Dead => {
                 // Container is gone — prune state silently
                 any_gone = true;
@@ -1471,9 +1472,8 @@ fn cmd_sandbox_resume(db: &Database, all: bool) -> Result<()> {
                 println!("  Degraded: {} (container up, Claude session gone, repo: {})", container_name, repo_path);
                 stale += 1;
             }
-            SandboxHealth::Dead => {
-                // Container may be stopped (reboot) rather than truly gone.
-                // Try to start it; if that succeeds re-check health.
+            SandboxHealth::Stopped => {
+                // Container stopped (e.g. host reboot) — try to restart it.
                 match sandbox.start(container_name) {
                     Ok(()) => {
                         match sandbox.health_check(container_name) {
@@ -1484,7 +1484,7 @@ fn cmd_sandbox_resume(db: &Database, all: bool) -> Result<()> {
                                         let _ = db.update_task(&task);
                                     }
                                 }
-                                println!("  Restarted: {} ({})", container_name, task_id);
+                                println!("  Restarted: {} ({})", container_name, repo_path);
                                 resumed += 1;
                             }
                             _ => {
@@ -1498,17 +1498,27 @@ fn cmd_sandbox_resume(db: &Database, all: bool) -> Result<()> {
                             }
                         }
                     }
-                    Err(_) => {
-                        // Container doesn't exist at all — clean up.
+                    Err(e) => {
+                        eprintln!("  Failed to restart {container_name}: {e:#}");
                         if let Ok(Some(mut task)) = db.get_task_by_id(task_id) {
                             task.set_exited(None);
                             let _ = db.update_task(&task);
                         }
                         let _ = db.delete_container_state(task_id);
-                        println!("  Cleaned: {} (gone, repo: {})", container_name, repo_path);
+                        println!("  Cleaned: {} (start error, repo: {})", container_name, repo_path);
                         stale += 1;
                     }
                 }
+            }
+            SandboxHealth::Dead => {
+                // Container no longer exists — clean up DB state.
+                if let Ok(Some(mut task)) = db.get_task_by_id(task_id) {
+                    task.set_exited(None);
+                    let _ = db.update_task(&task);
+                }
+                let _ = db.delete_container_state(task_id);
+                println!("  Cleaned: {} (gone, repo: {})", container_name, repo_path);
+                stale += 1;
             }
         }
     }
@@ -1553,6 +1563,31 @@ pub(crate) fn prune_stale_tasks(db: &Database) -> Result<usize> {
         for (task_id, container_name, repo_path, _) in &states {
             match sandbox.health_check(container_name) {
                 SandboxHealth::Healthy => {}
+                SandboxHealth::Stopped => {
+                    // Container stopped (reboot) — try to restart silently.
+                    eprintln!("[prune] Sandbox {} stopped → attempting restart", container_name);
+                    match sandbox.start(container_name) {
+                        Ok(()) if sandbox.health_check(container_name) == SandboxHealth::Healthy => {
+                            eprintln!("[prune] Sandbox {} restarted successfully", container_name);
+                            if let Ok(Some(mut task)) = db.get_task_by_id(task_id) {
+                                if task.status != TaskStatus::Running {
+                                    task.set_running();
+                                    let _ = db.update_task(&task);
+                                }
+                            }
+                        }
+                        _ => {
+                            // Start failed or not healthy after start — clean up.
+                            let _ = db.delete_container_state(task_id);
+                            if let Ok(Some(mut task)) = db.get_task_by_id(task_id) {
+                                task.set_exited(None);
+                                let _ = db.update_task(&task);
+                                pruned += 1;
+                            }
+                            eprintln!("[prune] Sandbox {} failed to restart → cleaned up", container_name);
+                        }
+                    }
+                }
                 SandboxHealth::Dead => {
                     let _ = db.delete_container_state(task_id);
                     if let Ok(Some(mut task)) = db.get_task_by_id(task_id) {
@@ -1593,6 +1628,8 @@ pub(crate) fn prune_stale_tasks(db: &Database) -> Result<usize> {
                             pruned += 1;
                         }
                     }
+                    // Also clean up container_state so it doesn't keep appearing as degraded.
+                    let _ = db.delete_container_state(task_id);
                 }
             }
         }

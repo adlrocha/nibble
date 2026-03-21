@@ -44,7 +44,10 @@ pub enum SandboxHealth {
     /// Container appears running but `podman exec` fails (zombie / OOM / etc.).
     /// The container should be killed and re-spawned.
     Degraded,
-    /// Container is not running (stopped, paused, or unknown).
+    /// Container exists but is stopped (e.g. after a host reboot).
+    /// Can be restarted with `sandbox.start()`.
+    Stopped,
+    /// Container no longer exists in the runtime.
     Dead,
 }
 
@@ -92,11 +95,13 @@ pub trait Sandbox: Send + Sync {
     ///
     /// Returns `SandboxHealth::Healthy` if the container is running and
     /// `podman exec` succeeds, `SandboxHealth::Degraded` if the container
-    /// appears running but exec fails (zombie/OOM/etc.), or
-    /// `SandboxHealth::Dead` if the container is not running.
+    /// appears running but exec fails (zombie/OOM/etc.),
+    /// `SandboxHealth::Stopped` if the container exists but is stopped (reboot),
+    /// or `SandboxHealth::Dead` if the container no longer exists.
     fn health_check(&self, container_id: &str) -> SandboxHealth {
         match self.status(container_id) {
             Ok(ContainerStatus::Running) => {}
+            Ok(ContainerStatus::Stopped) => return SandboxHealth::Stopped,
             _ => return SandboxHealth::Dead,
         }
 

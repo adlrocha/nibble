@@ -277,7 +277,7 @@ impl Sandbox for PodmanSandbox {
             // owned by the host user (e.g. ~/.claude) are accessible as node.
             "--userns=keep-id".to_string(),
             // Restart the container automatically after system reboots or crashes.
-            "--restart=on-failure".to_string(),
+            "--restart=always".to_string(),
         ];
 
         if config.privileged {

@@ -514,9 +514,8 @@ fn handle_spawn_command(
             false, // glm  — Telegram spawn doesn't support GLM backend
         ) {
             Ok(task_id) => {
-                let short_id = &task_id[..task_id.len().min(8)];
                 let msg = format!(
-                    "✅ Sandbox started for `{repo_label}`\nTask ID: `{short_id}`\n\nUse `/sandboxes` to interact."
+                    "✅ Sandbox started for `{repo_label}`\n\nUse `/sandboxes` to interact."
                 );
                 let _ = telegram::send_with_reply_button(&config_clone, &msg, &task_id)
                     .map(|msg_id| db.insert_bot_message(msg_id, &task_id));
@@ -829,6 +828,20 @@ fn find_or_spawn_for_cron(
         if let Some(task) = db.get_task_by_id(&task_id)? {
             match sandbox.health_check(&container_name) {
                 SandboxHealth::Healthy => return Ok(task),
+                SandboxHealth::Stopped => {
+                    eprintln!("[cron] Container {container_name} stopped → restarting for cron");
+                    match sandbox.start(&container_name) {
+                        Ok(()) => {
+                            if sandbox.health_check(&container_name) == SandboxHealth::Healthy {
+                                return Ok(task);
+                            }
+                            eprintln!("[cron] Container {container_name} not healthy after start, will spawn fresh");
+                        }
+                        Err(e) => {
+                            eprintln!("[cron] Failed to restart {container_name}: {e:#}, will spawn fresh");
+                        }
+                    }
+                }
                 status => {
                     eprintln!("[cron] Existing container for {repo_path} is {status:?}, will spawn fresh");
                 }

@@ -142,8 +142,8 @@ pub enum SandboxAction {
 
     /// Attach to a running sandbox container
     Attach {
-        /// Task ID (or a prefix) OR a repo path (e.g. "." or "/path/to/repo")
-        task_id_or_path: String,
+        /// Repo path (e.g. "." or "/path/to/repo") OR container name
+        container_or_path: String,
         /// Start a fresh session instead of resuming the last conversation
         #[arg(long)]
         fresh: bool,
@@ -157,8 +157,8 @@ pub enum SandboxAction {
 
     /// Stop and remove a sandbox container
     Kill {
-        /// Task ID (or prefix) OR repo path (e.g. "." or "/path/to/repo"). Omit when --all is set.
-        task_id_or_path: Option<String>,
+        /// Repo path (e.g. "." or "/path/to/repo") OR container name. Omit when --all is set.
+        container_or_path: Option<String>,
         /// Kill all running sandbox containers
         #[arg(long)]
         all: bool,
@@ -192,8 +192,8 @@ pub enum SandboxAction {
     /// to this sandbox's repo. Keeps the most recent session intact.
     /// Use before `attach --fresh` to start completely clean.
     Gc {
-        /// Task ID (or prefix) OR repo path (e.g. "." or "/path/to/repo")
-        task_id_or_path: String,
+        /// Repo path (e.g. "." or "/path/to/repo") OR container name
+        container_or_path: String,
         /// Also delete the most recent session (full wipe, no resume possible)
         #[arg(long)]
         all: bool,
