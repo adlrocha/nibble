@@ -70,40 +70,38 @@ pub fn run(db: &Database, config: &TelegramConfig) -> Result<()> {
     let mut poll_count: u32 = 0;
 
     loop {
-        let updates = match get_updates(config, offset) {
-            Ok(u) => u,
+        match get_updates(config, offset) {
+            Ok(updates) => {
+                for update in &updates {
+                    let update_id = update
+                        .get("update_id")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    offset = offset.max(update_id + 1);
+
+                    eprintln!("[listen] Processing update_id={update_id}");
+                    if let Err(e) = handle_update(update, config, db) {
+                        eprintln!("[listen] Error handling update {update_id}: {e:#}");
+                    }
+                }
+
+                // Persist offset after every batch (even if empty) to survive restarts.
+                let _ = db.kv_set(POLL_OFFSET_KEY, &offset.to_string());
+            }
             Err(e) => {
                 eprintln!("[listen] getUpdates error: {e}. Retrying in 5s…");
                 thread::sleep(Duration::from_secs(5));
-                continue;
-            }
-        };
-
-        for update in &updates {
-            let update_id = update
-                .get("update_id")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
-            offset = offset.max(update_id + 1);
-
-            eprintln!("[listen] Processing update_id={update_id}");
-            if let Err(e) = handle_update(update, config, db) {
-                eprintln!("[listen] Error handling update {update_id}: {e:#}");
             }
         }
 
-        // Persist offset after every batch (even if empty) to survive restarts.
-        let _ = db.kv_set(POLL_OFFSET_KEY, &offset.to_string());
-
-        // Periodically prune stale tasks (dead PIDs / gone containers).
+        // Periodically prune stale tasks and check cron jobs — runs regardless
+        // of whether getUpdates succeeded, so network errors don't freeze crons.
         poll_count += 1;
         if poll_count % PRUNE_EVERY_N_POLLS == 0 {
             if let Err(e) = crate::prune_stale_tasks(db) {
                 eprintln!("[listen] prune error: {e:#}");
             }
         }
-
-        // Periodically check for due cron jobs.
         if poll_count % CRON_CHECK_EVERY_N_POLLS == 0 {
             if let Err(e) = check_and_run_cron_jobs(db, config) {
                 eprintln!("[listen] cron error: {e:#}");
@@ -716,9 +714,14 @@ fn get_updates(config: &TelegramConfig, offset: i64) -> Result<Vec<serde_json::V
         "allowed_updates": ["message", "callback_query"],
     });
 
-    // Use a slightly longer HTTP timeout than the long-poll timeout.
+    // Use separate connect and read timeouts.  The long-poll keeps the TCP
+    // connection open for up to POLL_TIMEOUT_SECS waiting for updates, so the
+    // read timeout must be longer than that.  A single combined timeout of
+    // POLL_TIMEOUT_SECS+10 was too tight and fired before Telegram responded.
     let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(POLL_TIMEOUT_SECS + 10))
+        .timeout_connect(Duration::from_secs(10))
+        .timeout_read(Duration::from_secs(POLL_TIMEOUT_SECS + 15))
+        .timeout_write(Duration::from_secs(10))
         .build();
 
     let response = agent
