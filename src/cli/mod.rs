@@ -147,6 +147,10 @@ pub enum SandboxAction {
         /// Start a fresh session instead of resuming the last conversation
         #[arg(long)]
         fresh: bool,
+        /// Start an independent throwaway session that doesn't affect the main session history.
+        /// Useful for ad-hoc research or non-conflicting changes alongside a main session.
+        #[arg(long)]
+        btw: bool,
         /// Use Kimi as the LLM backend (reads KIMI_BASE_URL and KIMI_API_KEY from host env)
         #[arg(long)]
         kimi: bool,

@@ -333,10 +333,10 @@ fn main() -> Result<()> {
             SandboxAction::List => {
                 cmd_sandbox_list(&db)?;
             }
-            SandboxAction::Attach { container_or_path, fresh, kimi, glm } => {
+            SandboxAction::Attach { container_or_path, fresh, btw, kimi, glm } => {
                 match resolve_sandbox_id(&db, &container_or_path) {
                     Ok(task_id) => {
-                        cmd_sandbox_attach(&db, task_id, fresh, kimi, glm)?;
+                        cmd_sandbox_attach(&db, task_id, fresh, btw, kimi, glm)?;
                     }
                     Err(e) => {
                         // If the input looks like a repo path and no sandbox exists,
@@ -360,7 +360,7 @@ fn main() -> Result<()> {
                                 kimi,  // pass through kimi flag
                                 glm,   // pass through glm flag
                             )?;
-                            cmd_sandbox_attach(&db, task_id, fresh, kimi, glm)?;
+                            cmd_sandbox_attach(&db, task_id, fresh, btw, kimi, glm)?;
                         } else {
                             return Err(e);
                         }
@@ -517,7 +517,7 @@ pub(crate) fn cmd_sandbox_spawn(
                         eprintln!("Attach with:");
                         eprintln!("  nibble sandbox attach {}", abs_repo_path_early);
                     } else {
-                        cmd_sandbox_attach(db, existing_task_id.clone(), fresh, kimi, glm)?;
+                        cmd_sandbox_attach(db, existing_task_id.clone(), fresh, false, kimi, glm)?;
                     }
                     return Ok(existing_task_id);
                 }
@@ -675,7 +675,7 @@ pub(crate) fn cmd_sandbox_spawn(
         println!("Attaching to Claude session (exit to detach — container keeps running)…");
         println!("  Re-attach later: nibble sandbox attach {}  (or by path: {})", short_id, abs_repo_path);
         println!();
-        cmd_sandbox_attach(db, task_id.clone(), fresh, kimi, glm)?;
+        cmd_sandbox_attach(db, task_id.clone(), fresh, false, kimi, glm)?;
     }
 
     Ok(task_id)
@@ -1127,7 +1127,7 @@ fn resolve_cron_id(db: &Database, id_or_label: &str) -> Result<i64> {
 /// path at spawn, then updated by the Stop hook after each session). The UUID is stable
 /// for the lifetime of the sandbox — `--fresh` wipes the conversation history for that
 /// UUID rather than minting a new one, so Telegram injection always uses the same ID.
-fn cmd_sandbox_attach(db: &Database, task_id: String, fresh: bool, kimi: bool, glm: bool) -> Result<()> {
+fn cmd_sandbox_attach(db: &Database, task_id: String, fresh: bool, btw: bool, kimi: bool, glm: bool) -> Result<()> {
     let task = db
         .get_task_by_id(&task_id)?
         .ok_or_else(|| anyhow::anyhow!("Task not found: {}", task_id))?;
@@ -1155,7 +1155,7 @@ fn cmd_sandbox_attach(db: &Database, task_id: String, fresh: bool, kimi: bool, g
     // --fresh: delete the .jsonl for the current session so Claude starts with a
     // blank slate while still using the same UUID. The UUID stays stable so
     // Telegram injection keeps working without any DB changes.
-    if fresh {
+    if fresh && !btw {
         if let Some(sid) = session_id {
             backup_session_file(sid);
             eprintln!("  Session:   {} — previous history backed up, starting fresh", &sid[..8.min(sid.len())]);
@@ -1165,14 +1165,27 @@ fn cmd_sandbox_attach(db: &Database, task_id: String, fresh: bool, kimi: bool, g
     }
 
     // Build the shell command that runs inside the container.
-    // Strategy:
+    //
+    // Normal attach:
     //  1. Try --resume <sid> to load existing history for this repo.
-    //  2. If that fails (first attach, session file missing, etc.), fall back
-    //     to --session-id <sid> which pins the UUID without requiring an existing
-    //     file — Claude creates a new session under that exact UUID.
-    // We never fall back to bare `claude` or `claude --continue` because those
-    // would resume the most-recent session across ALL repos (cross-repo contamination).
-    let shell_cmd = if let Some(sid) = session_id {
+    //  2. Fall back to --session-id <sid> which pins the UUID without requiring
+    //     an existing file — Claude creates a new session under that exact UUID.
+    //  We never fall back to bare `claude` or `claude --continue` because those
+    //  would resume the most-recent session across ALL repos (cross-repo contamination).
+    //
+    // --btw (throwaway) session:
+    //  Start a completely independent session with a fresh random UUID so it
+    //  never touches the main session's history. The Stop hook is not injected
+    //  (AGENT_TASK_ID is omitted) so the main task's stored session_id is untouched.
+    let shell_cmd = if btw {
+        // Fresh throwaway: let Claude generate its own UUID (no --session-id).
+        // Use --continue to avoid the "resume last session?" prompt, which would
+        // otherwise pull in the most-recent session. Starting bare is fine here
+        // because the container's most-recent session IS the main one — we want
+        // a completely new session, so we pass a random UUID via --session-id.
+        let throwaway_id = uuid::Uuid::new_v4();
+        format!("cd /workspace && {claude} --session-id {throwaway_id}")
+    } else if let Some(sid) = session_id {
         format!("cd /workspace && {claude} --resume {sid} 2>&1 || {claude} --session-id {sid}")
     } else {
         // No session ID stored yet — start fresh; the Stop hook will record the UUID.
@@ -1187,10 +1200,16 @@ fn cmd_sandbox_attach(db: &Database, task_id: String, fresh: bool, kimi: bool, g
         "-e".into(), "TERM=xterm-256color".into(),
         "-e".into(), "PATH=/home/node/.local/bin:/usr/local/bin:/usr/bin:/bin".into(),
         "-e".into(), "CLAUDE_CONFIG_DIR=/home/node/.claude".into(),
-        // Required by Stop/SessionEnd hooks inside the container so they can
-        // call `nibble report session-id` and update the stored session UUID.
-        "-e".into(), format!("AGENT_TASK_ID={}", task_id),
     ];
+
+    // --btw sessions are throwaway: omit AGENT_TASK_ID so the Stop/SessionEnd
+    // hooks inside the container no-op and don't overwrite the main task's
+    // stored session_id.
+    if !btw {
+        podman_args.extend([
+            "-e".into(), format!("AGENT_TASK_ID={}", task_id),
+        ]);
+    }
 
     if kimi {
         let base_url = std::env::var("KIMI_BASE_URL")
@@ -1224,8 +1243,13 @@ fn cmd_sandbox_attach(db: &Database, task_id: String, fresh: bool, kimi: bool, g
         "/bin/bash".into(), "-c".into(), shell_cmd,
     ]);
 
-    eprintln!("Attaching to sandbox {} ({})…", task.title, container_id);
-    eprintln!("(Exit Claude or press Ctrl+C to detach — the container keeps running)");
+    if btw {
+        eprintln!("Attaching to sandbox {} ({}) [btw — throwaway session]…", task.title, container_id);
+        eprintln!("(Independent session — main history untouched. Exit to close.)");
+    } else {
+        eprintln!("Attaching to sandbox {} ({})…", task.title, container_id);
+        eprintln!("(Exit Claude or press Ctrl+C to detach — the container keeps running)");
+    }
 
     let err = std::os::unix::process::CommandExt::exec(
         std::process::Command::new("podman").args(&podman_args),
