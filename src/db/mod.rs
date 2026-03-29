@@ -614,6 +614,19 @@ impl Database {
         Ok(result)
     }
 
+    /// Return all containers for a given repo path, newest first.
+    pub fn get_all_containers_by_repo_path(&self, repo_path: &str) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT task_id, container_name FROM container_state WHERE repo_path = ?1 ORDER BY created_at DESC",
+        )?;
+        let rows = stmt
+            .query_map(params![repo_path], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// List all container states
     pub fn list_container_states(&self) -> Result<Vec<(String, String, String, i64)>> {
         let mut stmt = self.conn.prepare(

@@ -826,28 +826,27 @@ fn find_or_spawn_for_cron(
 ) -> Result<crate::models::Task> {
     let sandbox = PodmanSandbox::new();
 
-    // Check if an existing container is healthy.
-    if let Some((task_id, container_name)) = db.get_container_state_by_repo_path(repo_path)? {
-        if let Some(task) = db.get_task_by_id(&task_id)? {
-            match sandbox.health_check(&container_name) {
-                SandboxHealth::Healthy => return Ok(task),
-                SandboxHealth::Stopped => {
-                    eprintln!("[cron] Container {container_name} stopped → restarting for cron");
-                    match sandbox.start(&container_name) {
-                        Ok(()) => {
-                            if sandbox.health_check(&container_name) == SandboxHealth::Healthy {
-                                return Ok(task);
-                            }
-                            eprintln!("[cron] Container {container_name} not healthy after start, will spawn fresh");
+    // Walk all containers for this repo_path (newest first) and return the first healthy one.
+    for (task_id, container_name) in db.get_all_containers_by_repo_path(repo_path)? {
+        let Some(task) = db.get_task_by_id(&task_id)? else { continue };
+        match sandbox.health_check(&container_name) {
+            SandboxHealth::Healthy => return Ok(task),
+            SandboxHealth::Stopped => {
+                eprintln!("[cron] Container {container_name} stopped → restarting for cron");
+                match sandbox.start(&container_name) {
+                    Ok(()) => {
+                        if sandbox.health_check(&container_name) == SandboxHealth::Healthy {
+                            return Ok(task);
                         }
-                        Err(e) => {
-                            eprintln!("[cron] Failed to restart {container_name}: {e:#}, will spawn fresh");
-                        }
+                        eprintln!("[cron] Container {container_name} not healthy after start, trying next");
+                    }
+                    Err(e) => {
+                        eprintln!("[cron] Failed to restart {container_name}: {e:#}, trying next");
                     }
                 }
-                status => {
-                    eprintln!("[cron] Existing container for {repo_path} is {status:?}, will spawn fresh");
-                }
+            }
+            status => {
+                eprintln!("[cron] Container {container_name} for {repo_path} is {status:?}, trying next");
             }
         }
     }
