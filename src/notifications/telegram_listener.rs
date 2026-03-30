@@ -301,7 +301,7 @@ fn handle_sandboxes_command(
     // Ask Podman directly — DB task status is unreliable because sandbox tasks
     // flip between Running/Completed on every turn.
     let mut running: Vec<(String, String)> = Vec::new(); // (task_id, label)
-    for (task_id, container_name, repo_path, _created) in &states {
+    for (task_id, container_name, repo_path, _, _created) in &states {
         if let Ok(ContainerStatus::Running) = sandbox.status(container_name) {
             // Use the last component of the repo path as the display label.
             let label = std::path::Path::new(repo_path)

@@ -7,7 +7,7 @@ use std::str::FromStr;
 
 use crate::models::{CronJob, SandboxConfig, SandboxType, Task, TaskContext, TaskStatus};
 
-const SCHEMA_VERSION: i32 = 7;
+const SCHEMA_VERSION: i32 = 8;
 
 pub struct Database {
     conn: Connection,
@@ -105,6 +105,7 @@ impl Database {
                 task_id TEXT PRIMARY KEY,
                 container_name TEXT NOT NULL,
                 repo_path TEXT NOT NULL,
+                worktree_path TEXT,
                 created_at INTEGER NOT NULL,
                 FOREIGN KEY (task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
             );
@@ -260,6 +261,13 @@ impl Database {
                 DROP TABLE cron_jobs;
                 ALTER TABLE cron_jobs_v7 RENAME TO cron_jobs;
                 CREATE INDEX idx_cron_next_run ON cron_jobs(next_run) WHERE enabled=1;",
+            )?;
+        }
+
+        if from_version < 8 {
+            // Add worktree_path column to container_state for git worktree support.
+            self.conn.execute_batch(
+                "ALTER TABLE container_state ADD COLUMN worktree_path TEXT;",
             )?;
         }
 
@@ -557,13 +565,19 @@ impl Database {
         Ok(tasks)
     }
 
-    /// Insert or update container state for resume functionality
-    pub fn upsert_container_state(&self, task_id: &str, container_name: &str, repo_path: &str) -> Result<()> {
+    /// Insert or update container state, optionally recording an associated git worktree path.
+    pub fn upsert_container_state_with_worktree(
+        &self,
+        task_id: &str,
+        container_name: &str,
+        repo_path: &str,
+        worktree_path: Option<&str>,
+    ) -> Result<()> {
         let now = Utc::now().timestamp();
         self.conn.execute(
-            "INSERT OR REPLACE INTO container_state (task_id, container_name, repo_path, created_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![task_id, container_name, repo_path, now],
+            "INSERT OR REPLACE INTO container_state (task_id, container_name, repo_path, worktree_path, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![task_id, container_name, repo_path, worktree_path, now],
         )?;
         Ok(())
     }
@@ -627,10 +641,11 @@ impl Database {
         Ok(rows)
     }
 
-    /// List all container states
-    pub fn list_container_states(&self) -> Result<Vec<(String, String, String, i64)>> {
+    /// List all container states.
+    /// Returns (task_id, container_name, repo_path, worktree_path, created_at).
+    pub fn list_container_states(&self) -> Result<Vec<(String, String, String, Option<String>, i64)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT task_id, container_name, repo_path, created_at FROM container_state ORDER BY created_at DESC"
+            "SELECT task_id, container_name, repo_path, worktree_path, created_at FROM container_state ORDER BY created_at DESC"
         )?;
 
         let states = stmt
@@ -638,12 +653,26 @@ impl Database {
                 let task_id: String = row.get(0)?;
                 let name: String = row.get(1)?;
                 let path: String = row.get(2)?;
-                let created: i64 = row.get(3)?;
-                Ok((task_id, name, path, created))
+                let worktree: Option<String> = row.get(3)?;
+                let created: i64 = row.get(4)?;
+                Ok((task_id, name, path, worktree, created))
             })?
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(states)
+    }
+
+    /// Get the worktree path for a task, if any.
+    pub fn get_worktree_path(&self, task_id: &str) -> Result<Option<String>> {
+        let result = self
+            .conn
+            .query_row(
+                "SELECT worktree_path FROM container_state WHERE task_id = ?1",
+                params![task_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(result)
     }
 
     // Cron job methods

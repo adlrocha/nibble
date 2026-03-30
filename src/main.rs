@@ -327,31 +327,46 @@ fn main() -> Result<()> {
         // ── Sandbox subcommands ────────────────────────────────────────────
 
         Some(Commands::Sandbox { action }) => match action {
-            SandboxAction::Spawn { repo_path, task, image, fresh, session_id } => {
-                cmd_sandbox_spawn(&db, repo_path, task, image, fresh, session_id, false, false, false)?;
+            SandboxAction::Spawn { repo_path, task, image, fresh, session_id, branch } => {
+                let effective_repo_path = if let Some(ref branch_name) = branch {
+                    let worktree = create_worktree(std::path::Path::new(&repo_path), branch_name)?;
+                    worktree.to_string_lossy().to_string()
+                } else {
+                    repo_path
+                };
+                cmd_sandbox_spawn(&db, effective_repo_path, task, image, fresh, session_id, false, false, false)?;
             }
             SandboxAction::List => {
                 cmd_sandbox_list(&db)?;
             }
-            SandboxAction::Attach { container_or_path, fresh, btw, kimi, glm } => {
-                match resolve_sandbox_id(&db, &container_or_path) {
+            SandboxAction::Attach { container_or_path, fresh, btw, kimi, glm, branch } => {
+                // If --branch is given, resolve the worktree path (creating it if needed)
+                // and use that as the effective target instead of the original repo.
+                let effective_path = if let Some(ref branch_name) = branch {
+                    let worktree = create_worktree(std::path::Path::new(&container_or_path), branch_name)?;
+                    worktree.to_string_lossy().to_string()
+                } else {
+                    container_or_path.clone()
+                };
+
+                match resolve_sandbox_id(&db, &effective_path) {
                     Ok(task_id) => {
                         cmd_sandbox_attach(&db, task_id, fresh, btw, kimi, glm)?;
                     }
                     Err(e) => {
                         // If the input looks like a repo path and no sandbox exists,
                         // spawn one and then attach to it.
-                        let looks_like_path = container_or_path.starts_with('.')
-                            || container_or_path.starts_with('/')
-                            || container_or_path.starts_with('~')
-                            || container_or_path.contains('/')
-                            || std::path::Path::new(&container_or_path).exists();
+                        let looks_like_path = effective_path.starts_with('.')
+                            || effective_path.starts_with('/')
+                            || effective_path.starts_with('~')
+                            || effective_path.contains('/')
+                            || std::path::Path::new(&effective_path).exists();
 
                         if looks_like_path {
-                            eprintln!("No sandbox found for '{}', spawning one...", container_or_path);
+                            eprintln!("No sandbox found for '{}', spawning one...", effective_path);
                             let task_id = cmd_sandbox_spawn(
                                 &db,
-                                container_or_path,
+                                effective_path,
                                 None, // task_desc
                                 "nibble-sandbox:latest".to_string(),
                                 fresh,
@@ -367,13 +382,85 @@ fn main() -> Result<()> {
                     }
                 }
             }
-            SandboxAction::Kill { container_or_path, all } => {
+            SandboxAction::Kill { container_or_path, all, worktree, force, branch } => {
                 if all {
                     cmd_sandbox_kill_all(&db)?;
                 } else {
-                    let input = container_or_path.ok_or_else(|| anyhow::anyhow!("Provide a repo path, container name, or --all"))?;
-                    let id = resolve_sandbox_id(&db, &input)?;
-                    cmd_sandbox_kill(&db, id)?;
+                    let raw_input = container_or_path.ok_or_else(|| anyhow::anyhow!("Provide a repo path, container name, or --all"))?;
+
+                    // --branch <name> derives the worktree path from the repo + branch slug,
+                    // exactly mirroring how `spawn --branch` and `attach --branch` create it.
+                    let input = if let Some(ref branch_name) = branch {
+                        let branch_slug = branch_name
+                            .chars()
+                            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+                            .collect::<String>();
+                        let abs = std::fs::canonicalize(&raw_input)
+                            .unwrap_or_else(|_| std::path::PathBuf::from(&raw_input));
+                        let repo_name = abs.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or(&raw_input)
+                            .to_string();
+                        let parent = abs.parent().unwrap_or(&abs);
+                        parent.join(format!("{}--{}", repo_name, branch_slug))
+                            .to_string_lossy()
+                            .to_string()
+                    } else {
+                        raw_input
+                    };
+
+                    // --branch implies --worktree
+                    let remove_worktree_flag = worktree || force || branch.is_some();
+
+                    // Resolve the sandbox — but if --worktree is set and no sandbox is
+                    // running, we still want to remove the worktree directory.
+                    match resolve_sandbox_id(&db, &input) {
+                        Ok(id) => {
+                            // Check for worktree *before* killing (task record is deleted after).
+                            let wt_path = if remove_worktree_flag {
+                                db.get_worktree_path(&id)?
+                            } else {
+                                None
+                            };
+                            cmd_sandbox_kill(&db, id)?;
+                            if let Some(wt) = wt_path {
+                                let wt_pb = std::path::PathBuf::from(&wt);
+                                let removed = remove_worktree(&wt_pb, force)?;
+                                if removed {
+                                    // Disable any cron jobs pointing at this worktree.
+                                    let affected = db.list_cron_jobs(Some(&wt))?;
+                                    if !affected.is_empty() {
+                                        eprintln!("⚠️  Disabling {} cron job(s) that targeted this worktree:", affected.len());
+                                        for mut job in affected {
+                                            eprintln!("   - {} (id {})", job.label.as_deref().unwrap_or("unnamed"), job.id.unwrap_or(0));
+                                            job.enabled = false;
+                                            let _ = db.update_cron_job(&job);
+                                        }
+                                    }
+                                }
+                            } else if remove_worktree_flag {
+                                eprintln!("Note: no worktree recorded for this sandbox.");
+                            }
+                        }
+                        Err(_) if remove_worktree_flag => {
+                            // No sandbox running, but user asked to remove the worktree directory.
+                            let abs = std::fs::canonicalize(&input)
+                                .unwrap_or_else(|_| std::path::PathBuf::from(&input));
+                            let removed = remove_worktree(&abs, force)?;
+                            if removed {
+                                let affected = db.list_cron_jobs(Some(abs.to_str().unwrap_or(&input)))?;
+                                if !affected.is_empty() {
+                                    eprintln!("⚠️  Disabling {} cron job(s) that targeted this worktree:", affected.len());
+                                    for mut job in affected {
+                                        eprintln!("   - {} (id {})", job.label.as_deref().unwrap_or("unnamed"), job.id.unwrap_or(0));
+                                        job.enabled = false;
+                                        let _ = db.update_cron_job(&job);
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => return Err(e),
+                    }
                 }
             }
             SandboxAction::Restart => {
@@ -421,6 +508,163 @@ fn main() -> Result<()> {
 }
 
 // ── Sandbox command handlers ──────────────────────────────────────────────────
+
+/// Create a git worktree for `branch` next to `repo_path`, returning the worktree path.
+///
+/// The worktree is placed at `<repo_parent>/<repo_name>--<branch-slug>`, where the
+/// branch slug replaces `/` and non-alphanumeric chars with `-`.
+/// If the branch doesn't exist it is auto-created from the repo's current HEAD.
+fn create_worktree(repo_path: &std::path::Path, branch: &str) -> Result<std::path::PathBuf> {
+    let abs_repo = repo_path
+        .canonicalize()
+        .with_context(|| format!("Cannot resolve repo path: {}", repo_path.display()))?;
+
+    let repo_name = abs_repo
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| anyhow::anyhow!("Cannot determine repo name from path"))?;
+
+    let branch_slug = branch
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect::<String>();
+
+    let parent = abs_repo
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Repo path has no parent directory"))?;
+
+    let worktree_path = parent.join(format!("{}--{}", repo_name, branch_slug));
+
+    if worktree_path.exists() {
+        anyhow::bail!(
+            "Worktree path already exists: {}. \
+             Remove it first or use a different branch name.",
+            worktree_path.display()
+        );
+    }
+
+    // Check if branch already exists in the repo.
+    let branch_exists = std::process::Command::new("git")
+        .args(["-C", abs_repo.to_str().unwrap_or(""), "rev-parse", "--verify", branch])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if branch_exists {
+        // Check out the existing branch into the new worktree.
+        let out = std::process::Command::new("git")
+            .args([
+                "-C", abs_repo.to_str().unwrap_or(""),
+                "worktree", "add",
+                worktree_path.to_str().unwrap_or(""),
+                branch,
+            ])
+            .output()
+            .context("Failed to run git worktree add")?;
+        if !out.status.success() {
+            anyhow::bail!(
+                "git worktree add failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    } else {
+        // Auto-create the branch from current HEAD.
+        let out = std::process::Command::new("git")
+            .args([
+                "-C", abs_repo.to_str().unwrap_or(""),
+                "worktree", "add",
+                "-b", branch,
+                worktree_path.to_str().unwrap_or(""),
+            ])
+            .output()
+            .context("Failed to run git worktree add -b")?;
+        if !out.status.success() {
+            anyhow::bail!(
+                "git worktree add -b failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        println!("  Branch:    created '{}' from HEAD", branch);
+    }
+
+    println!(
+        "  Worktree:  {} → {}",
+        branch,
+        worktree_path.display()
+    );
+    Ok(worktree_path)
+}
+
+/// Remove a git worktree directory.
+///
+/// Returns `true` if removed, `false` if skipped by the user.
+/// `force` skips the dirty-check prompt (but still prints a warning).
+fn remove_worktree(
+    worktree_path: &std::path::Path,
+    force: bool,
+) -> Result<bool> {
+    use std::io::{BufRead, Write};
+
+    if !worktree_path.exists() {
+        return Ok(true); // already gone, nothing to do
+    }
+
+    // Detect uncommitted changes inside the worktree.
+    let dirty = std::process::Command::new("git")
+        .args([
+            "-C", worktree_path.to_str().unwrap_or(""),
+            "status", "--porcelain",
+        ])
+        .output()
+        .map(|o| !o.stdout.is_empty())
+        .unwrap_or(false);
+
+    if dirty {
+        if force {
+            eprintln!(
+                "⚠️  Warning: worktree {} has uncommitted changes — removing anyway (--force).",
+                worktree_path.display()
+            );
+        } else {
+            eprint!(
+                "⚠️  Worktree {} has uncommitted changes. Remove it anyway? [y/N] ",
+                worktree_path.display()
+            );
+            std::io::stderr().flush().ok();
+            let mut input = String::new();
+            std::io::BufReader::new(std::io::stdin()).read_line(&mut input).ok();
+            if !matches!(input.trim().to_lowercase().as_str(), "y" | "yes") {
+                println!("Aborted. Worktree kept.");
+                return Ok(false);
+            }
+        }
+    }
+
+    // `git worktree remove --force` removes the directory and unregisters from .git/worktrees.
+    let out = std::process::Command::new("git")
+        .args([
+            "worktree", "remove", "--force",
+            worktree_path.to_str().unwrap_or(""),
+        ])
+        .output()
+        .context("Failed to run git worktree remove")?;
+
+    if out.status.success() {
+        println!("Removed worktree: {}", worktree_path.display());
+    } else {
+        // Fall back to plain directory removal if git worktree remove fails
+        // (e.g. the .git link is already broken).
+        eprintln!(
+            "git worktree remove failed ({}), falling back to rm -rf",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+        std::fs::remove_dir_all(worktree_path)
+            .with_context(|| format!("Failed to remove {}", worktree_path.display()))?;
+        println!("Removed worktree directory: {}", worktree_path.display());
+    }
+
+    Ok(true)
+}
 
 /// Derive a deterministic UUID v5 for a repo, keyed on its canonical host path.
 ///
@@ -653,7 +897,12 @@ pub(crate) fn cmd_sandbox_spawn(
     });
     db.insert_task(&task)?;
 
-    db.upsert_container_state(&task_id, &info.name, &abs_repo_path)?;
+    // Detect if this repo is a git worktree (has a `.git` file rather than a directory).
+    // If so, record the worktree path so `kill --worktree` knows what to clean up.
+    let worktree_marker = repo.join(".git");
+    let is_worktree = worktree_marker.is_file();
+    let worktree_path_opt = if is_worktree { Some(abs_repo_path.as_str()) } else { None };
+    db.upsert_container_state_with_worktree(&task_id, &info.name, &abs_repo_path, worktree_path_opt)?;
 
     let short_id = &task_id[..task_id.len().min(8)];
     println!("\nSandbox started:");
@@ -984,7 +1233,7 @@ fn cmd_sandbox_list(db: &Database) -> Result<()> {
     println!("{}", "─".repeat(82));
 
     let mut any_gone = false;
-    for (task_id, container_name, repo_path, _created) in &states {
+    for (task_id, container_name, repo_path, worktree_path, _created) in &states {
         let health = sandbox.health_check(container_name);
 
         let status = match health {
@@ -1020,7 +1269,28 @@ fn cmd_sandbox_list(db: &Database) -> Result<()> {
             .unwrap_or_else(|| container_name.chars().take(17).collect());
 
         let short_id = &task_id[..task_id.len().min(8)];
-        println!("{:<20} {:<18} {:<12} {}", short_id, started, status, repo_path);
+
+        // For worktree sandboxes, derive and display the branch name from the path suffix.
+        let display_path = if worktree_path.is_some() {
+            // The worktree path IS the repo_path for worktree sandboxes; extract branch from suffix.
+            let branch_hint = std::path::Path::new(repo_path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|name| {
+                    // name is like "myrepo--feature-auth", extract part after first "--"
+                    name.find("--").map(|i| &name[i + 2..])
+                })
+                .unwrap_or("");
+            if branch_hint.is_empty() {
+                format!("{} [worktree]", repo_path)
+            } else {
+                format!("{} [branch: {}]", repo_path, branch_hint)
+            }
+        } else {
+            repo_path.clone()
+        };
+
+        println!("{:<20} {:<18} {:<12} {}", short_id, started, status, display_path);
     }
 
     if any_gone {
@@ -1088,14 +1358,14 @@ fn resolve_sandbox_id(db: &Database, input: &str) -> Result<String> {
     let states = db.list_container_states()?;
     let matches: Vec<_> = states
         .iter()
-        .filter(|(tid, _, _, _)| tid.starts_with(input))
+        .filter(|(tid, _, _, _, _)| tid.starts_with(input))
         .collect();
 
     match matches.len() {
         0 => anyhow::bail!("No sandbox found with ID or path: {}", input),
         1 => Ok(matches[0].0.clone()),
         _ => {
-            let ids: Vec<&str> = matches.iter().map(|(tid, _, _, _)| tid.as_str()).collect();
+            let ids: Vec<&str> = matches.iter().map(|(tid, _, _, _, _)| tid.as_str()).collect();
             anyhow::bail!(
                 "Ambiguous prefix '{}' matches multiple sandboxes:\n  {}",
                 input,
@@ -1448,7 +1718,7 @@ fn cmd_sandbox_kill_all(db: &Database) -> Result<()> {
     }
 
     let mut killed = 0;
-    for (task_id, container_name, _, _) in &states {
+    for (task_id, container_name, _, _, _) in &states {
         match sandbox.kill(container_name) {
             Ok(()) => {
                 if let Ok(Some(mut task)) = db.get_task_by_id(task_id) {
@@ -1485,7 +1755,7 @@ fn cmd_sandbox_resume(db: &Database, all: bool) -> Result<()> {
     let mut resumed = 0;
     let mut stale = 0;
 
-    for (task_id, container_name, repo_path, _) in &states {
+    for (task_id, container_name, repo_path, _, _) in &states {
         match sandbox.health_check(container_name) {
             SandboxHealth::Healthy => {
                 if let Ok(Some(mut task)) = db.get_task_by_id(task_id) {
@@ -1594,7 +1864,7 @@ pub(crate) fn prune_stale_tasks(db: &Database) -> Result<usize> {
     if !states.is_empty() {
         let sandbox = PodmanSandbox::new();
         let cfg = config::load().unwrap_or_default();
-        for (task_id, container_name, repo_path, _) in &states {
+        for (task_id, container_name, repo_path, _, _) in &states {
             match sandbox.health_check(container_name) {
                 SandboxHealth::Healthy => {}
                 SandboxHealth::Stopped => {

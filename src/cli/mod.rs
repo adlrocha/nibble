@@ -135,6 +135,11 @@ pub enum SandboxAction {
         /// Use a specific Claude session UUID instead of the deterministic repo UUID
         #[arg(long)]
         session_id: Option<String>,
+        /// Create a git worktree for this branch and spawn a sandbox for it.
+        /// The worktree is created at <repo_parent>/<repo_name>--<branch-slug>.
+        /// The branch is auto-created from the repo's current HEAD if it doesn't exist.
+        #[arg(long)]
+        branch: Option<String>,
     },
 
     /// List all sandbox containers and their status
@@ -157,6 +162,11 @@ pub enum SandboxAction {
         /// Use GLM as the LLM backend (reads GLM_BASE_URL and GLM_API_KEY from host env)
         #[arg(long)]
         glm: bool,
+        /// Create a git worktree for this branch and spawn+attach a sandbox for it.
+        /// The worktree is created at <repo_parent>/<repo_name>--<branch-slug>.
+        /// The branch is auto-created from the repo's current HEAD if it doesn't exist.
+        #[arg(long)]
+        branch: Option<String>,
     },
 
     /// Stop and remove a sandbox container
@@ -166,6 +176,17 @@ pub enum SandboxAction {
         /// Kill all running sandbox containers
         #[arg(long)]
         all: bool,
+        /// Also remove the git worktree associated with this sandbox (if any).
+        /// Warns and prompts if the worktree has uncommitted changes, unless --force is set.
+        #[arg(long)]
+        worktree: bool,
+        /// Skip the dirty-worktree confirmation prompt and remove immediately (implies --worktree).
+        #[arg(short, long)]
+        force: bool,
+        /// Derive the worktree path from this branch name and use it as the kill target.
+        /// Equivalent to: nibble sandbox kill <repo>--<branch-slug> --worktree
+        #[arg(long)]
+        branch: Option<String>,
     },
 
     /// Restart all stopped sandbox containers (e.g. after a host reboot)
