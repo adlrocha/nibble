@@ -46,7 +46,17 @@ pub fn validate_schedule(schedule: &str) -> Result<()> {
 /// ```
 ///
 /// Returns `(schedule, prompt, label, enabled, skip_if_running, expires_at, repo_path)`
-pub fn parse_cron_markdown(content: &str) -> Result<(String, String, Option<String>, bool, bool, Option<DateTime<Utc>>, Option<String>)> {
+pub fn parse_cron_markdown(
+    content: &str,
+) -> Result<(
+    String,
+    String,
+    Option<String>,
+    bool,
+    bool,
+    Option<DateTime<Utc>>,
+    Option<String>,
+)> {
     let mut label = None;
     let mut schedule = None;
     let mut repo_path: Option<String> = None;
@@ -133,7 +143,15 @@ pub fn parse_cron_markdown(content: &str) -> Result<(String, String, Option<Stri
     // Validate the schedule
     validate_schedule(&schedule)?;
 
-    Ok((schedule, prompt, label, enabled, skip_if_running, expires_at, repo_path))
+    Ok((
+        schedule,
+        prompt,
+        label,
+        enabled,
+        skip_if_running,
+        expires_at,
+        repo_path,
+    ))
 }
 
 fn parse_string_value(line: &str) -> Option<String> {
@@ -213,7 +231,8 @@ Please review yesterday's commits and prepare a summary.
 Focus on the main branch changes.
 "#;
 
-        let (schedule, prompt, label, enabled, skip_if_running, expires_at, repo_path) = parse_cron_markdown(markdown).unwrap();
+        let (schedule, prompt, label, enabled, skip_if_running, expires_at, repo_path) =
+            parse_cron_markdown(markdown).unwrap();
 
         assert_eq!(schedule, "0 9 * * 1-5");
         assert_eq!(label.unwrap(), "Daily Standup");
@@ -236,7 +255,8 @@ schedule = "*/5 * * * *"
 Hello world
 "#;
 
-        let (schedule, prompt, label, _enabled, skip_if_running, expires_at, repo_path) = parse_cron_markdown(markdown).unwrap();
+        let (schedule, prompt, label, _enabled, skip_if_running, expires_at, repo_path) =
+            parse_cron_markdown(markdown).unwrap();
 
         assert_eq!(schedule, "*/5 * * * *");
         assert_eq!(label.unwrap(), "Test");

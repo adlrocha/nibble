@@ -89,10 +89,19 @@ pub fn send_sandbox_list(
 
     let lines: Vec<String> = sandboxes
         .iter()
-        .map(|(task_id, repo)| format!("• <code>{}</code>  {}", &task_id[..task_id.len().min(8)], repo))
+        .map(|(task_id, repo)| {
+            format!(
+                "• <code>{}</code>  {}",
+                &task_id[..task_id.len().min(8)],
+                repo
+            )
+        })
         .collect();
 
-    let text = format!("🤖 <b>Running sandboxes</b>\n\n{}\n\nTap a button to send a message.", lines.join("\n"));
+    let text = format!(
+        "🤖 <b>Running sandboxes</b>\n\n{}\n\nTap a button to send a message.",
+        lines.join("\n")
+    );
 
     let payload = serde_json::json!({
         "chat_id": config.chat_id,
@@ -262,7 +271,10 @@ mod tests {
         let msg = line.repeat(40);
         let chunks = split_chunks(&msg);
         for chunk in &chunks[..chunks.len().saturating_sub(1)] {
-            assert!(chunk.ends_with('\n'), "intermediate chunk should end at newline boundary");
+            assert!(
+                chunk.ends_with('\n'),
+                "intermediate chunk should end at newline boundary"
+            );
         }
     }
 

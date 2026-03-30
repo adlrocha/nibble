@@ -46,8 +46,7 @@ fn main() -> Result<()> {
         }
         Some(Commands::List { all, status }) => {
             let tasks = if let Some(status_str) = status {
-                let status = TaskStatus::from_str(&status_str)
-                    .map_err(|e| anyhow::anyhow!(e))?;
+                let status = TaskStatus::from_str(&status_str).map_err(|e| anyhow::anyhow!(e))?;
                 db.list_tasks(Some(status))?
             } else if all {
                 db.list_tasks(None)?
@@ -226,7 +225,10 @@ fn main() -> Result<()> {
                 task.attention_reason = Some(message);
                 db.update_task(&task)?;
             }
-            ReportAction::SessionId { task_id, session_id } => {
+            ReportAction::SessionId {
+                task_id,
+                session_id,
+            } => {
                 let mut task = db
                     .get_task_by_id(&task_id)?
                     .ok_or_else(|| anyhow::anyhow!("Task not found: {}", task_id))?;
@@ -246,7 +248,11 @@ fn main() -> Result<()> {
             let monitor = monitor::TaskMonitor::new(db);
             monitor.monitor_task(task_id, pid)?;
         }
-        Some(Commands::Notify { message, task_id, attention }) => {
+        Some(Commands::Notify {
+            message,
+            task_id,
+            attention,
+        }) => {
             let cfg = config::load().unwrap_or_default();
 
             if !cfg.telegram.is_configured() {
@@ -285,15 +291,7 @@ fn main() -> Result<()> {
                 label,
                 expires,
             } => {
-                cmd_cron_add(
-                    &db,
-                    repo,
-                    schedule,
-                    prompt,
-                    file,
-                    label,
-                    expires,
-                )?;
+                cmd_cron_add(&db, repo, schedule, prompt, file, label, expires)?;
             }
             CronAction::List { repo_path } => {
                 cmd_cron_list(&db, repo_path)?;
@@ -308,7 +306,9 @@ fn main() -> Result<()> {
                 expires,
             } => {
                 let cron_id = resolve_cron_id(&db, &id)?;
-                cmd_cron_edit(&db, cron_id, schedule, prompt, label, enable, disable, expires)?;
+                cmd_cron_edit(
+                    &db, cron_id, schedule, prompt, label, enable, disable, expires,
+                )?;
             }
             CronAction::Del { id } => {
                 let cron_id = resolve_cron_id(&db, &id)?;
@@ -325,25 +325,49 @@ fn main() -> Result<()> {
             }
         },
         // ── Sandbox subcommands ────────────────────────────────────────────
-
         Some(Commands::Sandbox { action }) => match action {
-            SandboxAction::Spawn { repo_path, task, image, fresh, session_id, branch } => {
+            SandboxAction::Spawn {
+                repo_path,
+                task,
+                image,
+                fresh,
+                session_id,
+                branch,
+            } => {
                 let effective_repo_path = if let Some(ref branch_name) = branch {
                     let worktree = create_worktree(std::path::Path::new(&repo_path), branch_name)?;
                     worktree.to_string_lossy().to_string()
                 } else {
                     repo_path
                 };
-                cmd_sandbox_spawn(&db, effective_repo_path, task, image, fresh, session_id, false, false, false)?;
+                cmd_sandbox_spawn(
+                    &db,
+                    effective_repo_path,
+                    task,
+                    image,
+                    fresh,
+                    session_id,
+                    false,
+                    false,
+                    false,
+                )?;
             }
             SandboxAction::List => {
                 cmd_sandbox_list(&db)?;
             }
-            SandboxAction::Attach { container_or_path, fresh, btw, kimi, glm, branch } => {
+            SandboxAction::Attach {
+                container_or_path,
+                fresh,
+                btw,
+                kimi,
+                glm,
+                branch,
+            } => {
                 // If --branch is given, resolve the worktree path (creating it if needed)
                 // and use that as the effective target instead of the original repo.
                 let effective_path = if let Some(ref branch_name) = branch {
-                    let worktree = create_worktree(std::path::Path::new(&container_or_path), branch_name)?;
+                    let worktree =
+                        create_worktree(std::path::Path::new(&container_or_path), branch_name)?;
                     worktree.to_string_lossy().to_string()
                 } else {
                     container_or_path.clone()
@@ -382,27 +406,43 @@ fn main() -> Result<()> {
                     }
                 }
             }
-            SandboxAction::Kill { container_or_path, all, worktree, force, branch } => {
+            SandboxAction::Kill {
+                container_or_path,
+                all,
+                worktree,
+                force,
+                branch,
+            } => {
                 if all {
                     cmd_sandbox_kill_all(&db)?;
                 } else {
-                    let raw_input = container_or_path.ok_or_else(|| anyhow::anyhow!("Provide a repo path, container name, or --all"))?;
+                    let raw_input = container_or_path.ok_or_else(|| {
+                        anyhow::anyhow!("Provide a repo path, container name, or --all")
+                    })?;
 
                     // --branch <name> derives the worktree path from the repo + branch slug,
                     // exactly mirroring how `spawn --branch` and `attach --branch` create it.
                     let input = if let Some(ref branch_name) = branch {
                         let branch_slug = branch_name
                             .chars()
-                            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+                            .map(|c| {
+                                if c.is_alphanumeric() || c == '-' || c == '_' {
+                                    c
+                                } else {
+                                    '-'
+                                }
+                            })
                             .collect::<String>();
                         let abs = std::fs::canonicalize(&raw_input)
                             .unwrap_or_else(|_| std::path::PathBuf::from(&raw_input));
-                        let repo_name = abs.file_name()
+                        let repo_name = abs
+                            .file_name()
                             .and_then(|n| n.to_str())
                             .unwrap_or(&raw_input)
                             .to_string();
                         let parent = abs.parent().unwrap_or(&abs);
-                        parent.join(format!("{}--{}", repo_name, branch_slug))
+                        parent
+                            .join(format!("{}--{}", repo_name, branch_slug))
                             .to_string_lossy()
                             .to_string()
                     } else {
@@ -432,7 +472,11 @@ fn main() -> Result<()> {
                                     if !affected.is_empty() {
                                         eprintln!("⚠️  Disabling {} cron job(s) that targeted this worktree:", affected.len());
                                         for mut job in affected {
-                                            eprintln!("   - {} (id {})", job.label.as_deref().unwrap_or("unnamed"), job.id.unwrap_or(0));
+                                            eprintln!(
+                                                "   - {} (id {})",
+                                                job.label.as_deref().unwrap_or("unnamed"),
+                                                job.id.unwrap_or(0)
+                                            );
                                             job.enabled = false;
                                             let _ = db.update_cron_job(&job);
                                         }
@@ -448,11 +492,19 @@ fn main() -> Result<()> {
                                 .unwrap_or_else(|_| std::path::PathBuf::from(&input));
                             let removed = remove_worktree(&abs, force)?;
                             if removed {
-                                let affected = db.list_cron_jobs(Some(abs.to_str().unwrap_or(&input)))?;
+                                let affected =
+                                    db.list_cron_jobs(Some(abs.to_str().unwrap_or(&input)))?;
                                 if !affected.is_empty() {
-                                    eprintln!("⚠️  Disabling {} cron job(s) that targeted this worktree:", affected.len());
+                                    eprintln!(
+                                        "⚠️  Disabling {} cron job(s) that targeted this worktree:",
+                                        affected.len()
+                                    );
                                     for mut job in affected {
-                                        eprintln!("   - {} (id {})", job.label.as_deref().unwrap_or("unnamed"), job.id.unwrap_or(0));
+                                        eprintln!(
+                                            "   - {} (id {})",
+                                            job.label.as_deref().unwrap_or("unnamed"),
+                                            job.id.unwrap_or(0)
+                                        );
                                         job.enabled = false;
                                         let _ = db.update_cron_job(&job);
                                     }
@@ -474,7 +526,10 @@ fn main() -> Result<()> {
                 sandbox.ensure_image_with_opts(&image, rebuild)?;
                 println!("Sandbox image ready.");
             }
-            SandboxAction::Gc { container_or_path, all } => {
+            SandboxAction::Gc {
+                container_or_path,
+                all,
+            } => {
                 let task_id = resolve_sandbox_id(&db, &container_or_path)?;
                 cmd_sandbox_gc(&db, task_id, all)?;
             }
@@ -491,9 +546,7 @@ fn main() -> Result<()> {
             let cfg = config::load().unwrap_or_default();
 
             if !cfg.telegram.is_configured() {
-                anyhow::bail!(
-                    "Telegram is not configured. Run scripts/setup-telegram.sh first."
-                );
+                anyhow::bail!("Telegram is not configured. Run scripts/setup-telegram.sh first.");
             }
 
             // Run an initial prune before entering the listener loop so stale
@@ -526,7 +579,13 @@ fn create_worktree(repo_path: &std::path::Path, branch: &str) -> Result<std::pat
 
     let branch_slug = branch
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect::<String>();
 
     let parent = abs_repo
@@ -545,7 +604,13 @@ fn create_worktree(repo_path: &std::path::Path, branch: &str) -> Result<std::pat
 
     // Check if branch already exists in the repo.
     let branch_exists = std::process::Command::new("git")
-        .args(["-C", abs_repo.to_str().unwrap_or(""), "rev-parse", "--verify", branch])
+        .args([
+            "-C",
+            abs_repo.to_str().unwrap_or(""),
+            "rev-parse",
+            "--verify",
+            branch,
+        ])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
@@ -554,8 +619,10 @@ fn create_worktree(repo_path: &std::path::Path, branch: &str) -> Result<std::pat
         // Check out the existing branch into the new worktree.
         let out = std::process::Command::new("git")
             .args([
-                "-C", abs_repo.to_str().unwrap_or(""),
-                "worktree", "add",
+                "-C",
+                abs_repo.to_str().unwrap_or(""),
+                "worktree",
+                "add",
                 worktree_path.to_str().unwrap_or(""),
                 branch,
             ])
@@ -571,9 +638,12 @@ fn create_worktree(repo_path: &std::path::Path, branch: &str) -> Result<std::pat
         // Auto-create the branch from current HEAD.
         let out = std::process::Command::new("git")
             .args([
-                "-C", abs_repo.to_str().unwrap_or(""),
-                "worktree", "add",
-                "-b", branch,
+                "-C",
+                abs_repo.to_str().unwrap_or(""),
+                "worktree",
+                "add",
+                "-b",
+                branch,
                 worktree_path.to_str().unwrap_or(""),
             ])
             .output()
@@ -587,11 +657,7 @@ fn create_worktree(repo_path: &std::path::Path, branch: &str) -> Result<std::pat
         println!("  Branch:    created '{}' from HEAD", branch);
     }
 
-    println!(
-        "  Worktree:  {} → {}",
-        branch,
-        worktree_path.display()
-    );
+    println!("  Worktree:  {} → {}", branch, worktree_path.display());
     Ok(worktree_path)
 }
 
@@ -599,10 +665,7 @@ fn create_worktree(repo_path: &std::path::Path, branch: &str) -> Result<std::pat
 ///
 /// Returns `true` if removed, `false` if skipped by the user.
 /// `force` skips the dirty-check prompt (but still prints a warning).
-fn remove_worktree(
-    worktree_path: &std::path::Path,
-    force: bool,
-) -> Result<bool> {
+fn remove_worktree(worktree_path: &std::path::Path, force: bool) -> Result<bool> {
     use std::io::{BufRead, Write};
 
     if !worktree_path.exists() {
@@ -612,8 +675,10 @@ fn remove_worktree(
     // Detect uncommitted changes inside the worktree.
     let dirty = std::process::Command::new("git")
         .args([
-            "-C", worktree_path.to_str().unwrap_or(""),
-            "status", "--porcelain",
+            "-C",
+            worktree_path.to_str().unwrap_or(""),
+            "status",
+            "--porcelain",
         ])
         .output()
         .map(|o| !o.stdout.is_empty())
@@ -632,7 +697,9 @@ fn remove_worktree(
             );
             std::io::stderr().flush().ok();
             let mut input = String::new();
-            std::io::BufReader::new(std::io::stdin()).read_line(&mut input).ok();
+            std::io::BufReader::new(std::io::stdin())
+                .read_line(&mut input)
+                .ok();
             if !matches!(input.trim().to_lowercase().as_str(), "y" | "yes") {
                 println!("Aborted. Worktree kept.");
                 return Ok(false);
@@ -643,7 +710,9 @@ fn remove_worktree(
     // `git worktree remove --force` removes the directory and unregisters from .git/worktrees.
     let out = std::process::Command::new("git")
         .args([
-            "worktree", "remove", "--force",
+            "worktree",
+            "remove",
+            "--force",
             worktree_path.to_str().unwrap_or(""),
         ])
         .output()
@@ -672,8 +741,8 @@ fn remove_worktree(
 /// re-attach always resume the right conversation. `--resume <uuid>` is a direct
 /// UUID lookup by Claude — it doesn't depend on the in-container path.
 fn repo_session_id(repo_path: &str) -> Uuid {
-    let canonical = std::fs::canonicalize(repo_path)
-        .unwrap_or_else(|_| std::path::PathBuf::from(repo_path));
+    let canonical =
+        std::fs::canonicalize(repo_path).unwrap_or_else(|_| std::path::PathBuf::from(repo_path));
     let key = canonical.to_string_lossy();
     Uuid::new_v5(&Uuid::NAMESPACE_OID, key.as_bytes())
 }
@@ -689,19 +758,29 @@ fn backup_session_file(session_id: &str) {
         None => return,
     };
     let projects_dir = home.join(".claude").join("projects");
-    if !projects_dir.exists() { return; }
+    if !projects_dir.exists() {
+        return;
+    }
 
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    for entry in std::fs::read_dir(&projects_dir).into_iter().flatten().flatten() {
-        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) { continue; }
+    for entry in std::fs::read_dir(&projects_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
         let candidate = entry.path().join(format!("{}.jsonl", session_id));
         if candidate.exists() {
             let size = std::fs::metadata(&candidate).map(|m| m.len()).unwrap_or(0);
-            let backup = entry.path().join(format!("{}.{}.jsonl.bak", session_id, ts));
+            let backup = entry
+                .path()
+                .join(format!("{}.{}.jsonl.bak", session_id, ts));
             match std::fs::rename(&candidate, &backup) {
                 Ok(()) => eprintln!(
                     "  Backed up: {} → {}.{}.jsonl.bak ({:.1} MB)",
@@ -710,14 +789,17 @@ fn backup_session_file(session_id: &str) {
                     ts,
                     size as f64 / 1_048_576.0
                 ),
-                Err(e) => eprintln!("  Warning:   could not back up {}: {}", candidate.display(), e),
+                Err(e) => eprintln!(
+                    "  Warning:   could not back up {}: {}",
+                    candidate.display(),
+                    e
+                ),
             }
             return;
         }
     }
     // File not found — session hasn't started yet, nothing to back up.
 }
-
 
 /// Spawn a sandboxed Claude Code agent.  Returns the new task_id on success.
 pub(crate) fn cmd_sandbox_spawn(
@@ -746,7 +828,9 @@ pub(crate) fn cmd_sandbox_spawn(
         .canonicalize()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| repo_path.clone());
-    if let Some((existing_task_id, _)) = db.get_container_state_by_repo_path(&abs_repo_path_early)? {
+    if let Some((existing_task_id, _)) =
+        db.get_container_state_by_repo_path(&abs_repo_path_early)?
+    {
         if let Some(task) = db.get_task_by_id(&existing_task_id)? {
             if let Some(ref cid) = task.container_id {
                 if let Ok(crate::sandbox::ContainerStatus::Running) = sandbox.status(cid) {
@@ -755,7 +839,9 @@ pub(crate) fn cmd_sandbox_spawn(
                         abs_repo_path_early,
                         &existing_task_id[..existing_task_id.len().min(8)]
                     );
-                    eprintln!("   Attaching to the existing sandbox instead of spawning a new one.");
+                    eprintln!(
+                        "   Attaching to the existing sandbox instead of spawning a new one."
+                    );
                     eprintln!();
                     if no_attach {
                         eprintln!("Attach with:");
@@ -774,13 +860,22 @@ pub(crate) fn cmd_sandbox_spawn(
     let task_id = uuid::Uuid::new_v4().to_string();
 
     let mut env_vars = HashMap::new();
-    for key in &["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "HOME", "CLAUDE_CONFIG_DIR"] {
+    for key in &[
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "HOME",
+        "CLAUDE_CONFIG_DIR",
+    ] {
         if let Ok(val) = std::env::var(key) {
             env_vars.insert(key.to_string(), val);
         }
     }
 
-    let config = SandboxConfig { image, env_vars, ..SandboxConfig::default() };
+    let config = SandboxConfig {
+        image,
+        env_vars,
+        ..SandboxConfig::default()
+    };
 
     println!("Spawning sandbox for '{}'…", repo_path);
     let info = sandbox.spawn(&task_id, &repo, &config)?;
@@ -813,9 +908,11 @@ pub(crate) fn cmd_sandbox_spawn(
         let status = std::process::Command::new("podman")
             .args([
                 "exec",
-                "--user", "node",
+                "--user",
+                "node",
                 &info.id,
-                "/bin/bash", "/workspace/.nibble/setup.sh",
+                "/bin/bash",
+                "/workspace/.nibble/setup.sh",
             ])
             .status()
             .context("Failed to run .nibble/setup.sh")?;
@@ -831,9 +928,7 @@ pub(crate) fn cmd_sandbox_spawn(
         eprintln!(
             "             Create .nibble/setup.sh in the repo to auto-install deps on spawn."
         );
-        eprintln!(
-            "             (Ask Claude to write it for you once inside the sandbox.)"
-        );
+        eprintln!("             (Ask Claude to write it for you once inside the sandbox.)");
     }
 
     let repo_name = repo
@@ -852,7 +947,10 @@ pub(crate) fn cmd_sandbox_spawn(
                 println!("  Context:   CLAUDE.md written (no toolchain detected)");
             } else {
                 let names: Vec<&str> = toolchains.iter().map(|(e, _, _)| *e).collect();
-                println!("  Context:   CLAUDE.md written (detected: {})", names.join(", "));
+                println!(
+                    "  Context:   CLAUDE.md written (detected: {})",
+                    names.join(", ")
+                );
             }
         }
         Err(e) => eprintln!("  Warning:   Could not write CLAUDE.md: {e:#}"),
@@ -860,7 +958,13 @@ pub(crate) fn cmd_sandbox_spawn(
 
     let title = task_desc.unwrap_or_else(|| format!("[{}:sandbox]", repo_name));
 
-    let mut task = Task::new(task_id.clone(), "claude_code".to_string(), title, None, None);
+    let mut task = Task::new(
+        task_id.clone(),
+        "claude_code".to_string(),
+        title,
+        None,
+        None,
+    );
     task.sandbox_type = SandboxType::Podman;
     let abs_repo_path = repo
         .canonicalize()
@@ -901,8 +1005,17 @@ pub(crate) fn cmd_sandbox_spawn(
     // If so, record the worktree path so `kill --worktree` knows what to clean up.
     let worktree_marker = repo.join(".git");
     let is_worktree = worktree_marker.is_file();
-    let worktree_path_opt = if is_worktree { Some(abs_repo_path.as_str()) } else { None };
-    db.upsert_container_state_with_worktree(&task_id, &info.name, &abs_repo_path, worktree_path_opt)?;
+    let worktree_path_opt = if is_worktree {
+        Some(abs_repo_path.as_str())
+    } else {
+        None
+    };
+    db.upsert_container_state_with_worktree(
+        &task_id,
+        &info.name,
+        &abs_repo_path,
+        worktree_path_opt,
+    )?;
 
     let short_id = &task_id[..task_id.len().min(8)];
     println!("\nSandbox started:");
@@ -913,16 +1026,25 @@ pub(crate) fn cmd_sandbox_spawn(
 
     if no_attach {
         println!("Attach to the Claude session:");
-        println!("  nibble sandbox attach {}          (by repo path)", abs_repo_path);
+        println!(
+            "  nibble sandbox attach {}          (by repo path)",
+            abs_repo_path
+        );
         println!("  nibble sandbox attach {}   (by task ID)", short_id);
-        println!("  nibble sandbox attach {} --fresh  (start a new conversation)", short_id);
+        println!(
+            "  nibble sandbox attach {} --fresh  (start a new conversation)",
+            short_id
+        );
         println!("  (The container keeps running after you exit — re-attach any time)");
         println!();
         println!("After a system reboot, restart stopped containers with:");
         println!("  nibble sandbox resume --all");
     } else {
         println!("Attaching to Claude session (exit to detach — container keeps running)…");
-        println!("  Re-attach later: nibble sandbox attach {}  (or by path: {})", short_id, abs_repo_path);
+        println!(
+            "  Re-attach later: nibble sandbox attach {}  (or by path: {})",
+            short_id, abs_repo_path
+        );
         println!();
         cmd_sandbox_attach(db, task_id.clone(), fresh, false, kimi, glm)?;
     }
@@ -942,17 +1064,18 @@ fn cmd_cron_add(
     expires: Option<String>,
 ) -> Result<()> {
     // Parse the cron definition
-    let (schedule, prompt, label, enabled, skip_if_running, file_expires, file_repo) = if let Some(file_path) = file {
-        let content = std::fs::read_to_string(&file_path)
-            .with_context(|| format!("Failed to read cron file: {}", file_path))?;
-        let (sched, prompt, lbl, en, skip, exp, rp) = cron::parse_cron_markdown(&content)?;
-        (sched, prompt, lbl.or(label), en, skip, exp, rp)
-    } else {
-        let schedule = schedule.context("Either --schedule or --file must be provided")?;
-        let prompt = prompt.context("Either --prompt or --file must be provided")?;
-        cron::validate_schedule(&schedule)?;
-        (schedule, prompt, label, true, true, None, None)
-    };
+    let (schedule, prompt, label, enabled, skip_if_running, file_expires, file_repo) =
+        if let Some(file_path) = file {
+            let content = std::fs::read_to_string(&file_path)
+                .with_context(|| format!("Failed to read cron file: {}", file_path))?;
+            let (sched, prompt, lbl, en, skip, exp, rp) = cron::parse_cron_markdown(&content)?;
+            (sched, prompt, lbl.or(label), en, skip, exp, rp)
+        } else {
+            let schedule = schedule.context("Either --schedule or --file must be provided")?;
+            let prompt = prompt.context("Either --prompt or --file must be provided")?;
+            cron::validate_schedule(&schedule)?;
+            (schedule, prompt, label, true, true, None, None)
+        };
 
     // Resolve repo path: --repo CLI arg takes precedence over markdown field
     let raw_repo = repo_arg
@@ -967,7 +1090,12 @@ fn cmd_cron_add(
         raw_repo.clone()
     };
     let repo_path = std::fs::canonicalize(&expanded)
-        .with_context(|| format!("repo_path does not exist or cannot be resolved: {}", expanded))?
+        .with_context(|| {
+            format!(
+                "repo_path does not exist or cannot be resolved: {}",
+                expanded
+            )
+        })?
         .to_string_lossy()
         .to_string();
 
@@ -978,13 +1106,8 @@ fn cmd_cron_add(
     let next_run = cron::compute_next_run(&schedule, chrono::Utc::now())?;
 
     // Create the cron job
-    let mut job = models::CronJob::new(
-        repo_path.clone(),
-        schedule.clone(),
-        prompt,
-        label,
-        next_run,
-    );
+    let mut job =
+        models::CronJob::new(repo_path.clone(), schedule.clone(), prompt, label, next_run);
     job.enabled = enabled;
     job.skip_if_running = skip_if_running;
     if let Some(exp_str) = expires {
@@ -1000,7 +1123,8 @@ fn cmd_cron_add(
             anyhow::bail!(
                 "A cron job with label '{}' already exists for this repo. \
                  Use `nibble cron edit {}` to update it or choose a different label.",
-                lbl, lbl
+                lbl,
+                lbl
             );
         }
     }
@@ -1046,8 +1170,10 @@ fn cmd_cron_list(db: &Database, repo_path_filter: Option<String>) -> Result<()> 
         return Ok(());
     }
 
-    println!("{:<5} {:<10} {:<20} {:<20} {:<10} {:<24} {}",
-        "ID", "REPO", "SCHEDULE", "NEXT RUN", "STATUS", "EXPIRES (UTC)", "LABEL");
+    println!(
+        "{:<5} {:<10} {:<20} {:<20} {:<10} {:<24} {}",
+        "ID", "REPO", "SCHEDULE", "NEXT RUN", "STATUS", "EXPIRES (UTC)", "LABEL"
+    );
     println!("{}", "─".repeat(114));
 
     let now = chrono::Utc::now();
@@ -1057,7 +1183,9 @@ fn cmd_cron_list(db: &Database, repo_path_filter: Option<String>) -> Result<()> 
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or(&job.repo_path)
-            .chars().take(10).collect::<String>();
+            .chars()
+            .take(10)
+            .collect::<String>();
         let short_task = short_task.as_str();
         let label = job.label.as_deref().unwrap_or("-");
         let status = if job.enabled {
@@ -1094,7 +1222,8 @@ fn cmd_cron_list(db: &Database, repo_path_filter: Option<String>) -> Result<()> 
             None => "-".to_string(),
         };
 
-        println!("{:<5} {:<10} {:<20} {:<20} {:<10} {:<24} {}",
+        println!(
+            "{:<5} {:<10} {:<20} {:<20} {:<10} {:<24} {}",
             job.id.unwrap_or(0),
             short_task,
             job.schedule,
@@ -1184,18 +1313,30 @@ fn cmd_cron_run(db: &Database, id: i64) -> Result<()> {
         .get_cron_job(id)?
         .ok_or_else(|| anyhow::anyhow!("Cron job {} not found", id))?;
 
-    println!("Running cron job {} ({})", id, job.label.as_deref().unwrap_or("unnamed"));
+    println!(
+        "Running cron job {} ({})",
+        id,
+        job.label.as_deref().unwrap_or("unnamed")
+    );
     println!("Target repo: {}", job.repo_path);
-    println!("Prompt: {}", job.prompt.chars().take(60).collect::<String>());
+    println!(
+        "Prompt: {}",
+        job.prompt.chars().take(60).collect::<String>()
+    );
 
-    let task = find_healthy_sandbox_for_repo(db, &job.repo_path)?
-        .ok_or_else(|| anyhow::anyhow!(
+    let task = find_healthy_sandbox_for_repo(db, &job.repo_path)?.ok_or_else(|| {
+        anyhow::anyhow!(
             "No healthy sandbox found for repo {}.\n\
              Start one with: nibble sandbox spawn {}",
-            job.repo_path, job.repo_path
-        ))?;
+            job.repo_path,
+            job.repo_path
+        )
+    })?;
 
-    println!("Injecting into sandbox {}...", &task.task_id[..task.task_id.len().min(8)]);
+    println!(
+        "Injecting into sandbox {}...",
+        &task.task_id[..task.task_id.len().min(8)]
+    );
     agent_input::inject(&task, &job.prompt)?;
     println!("Prompt injected successfully.");
 
@@ -1229,7 +1370,10 @@ fn cmd_sandbox_list(db: &Database) -> Result<()> {
 
     let sandbox = PodmanSandbox::new();
 
-    println!("{:<20} {:<18} {:<12} {}", "TASK ID", "STARTED", "STATUS", "REPO");
+    println!(
+        "{:<20} {:<18} {:<12} {}",
+        "TASK ID", "STARTED", "STATUS", "REPO"
+    );
     println!("{}", "─".repeat(82));
 
     let mut any_gone = false;
@@ -1237,9 +1381,9 @@ fn cmd_sandbox_list(db: &Database) -> Result<()> {
         let health = sandbox.health_check(container_name);
 
         let status = match health {
-            SandboxHealth::Healthy  => "healthy",
+            SandboxHealth::Healthy => "healthy",
             SandboxHealth::Degraded => "degraded",
-            SandboxHealth::Stopped  => "stopped",
+            SandboxHealth::Stopped => "stopped",
             SandboxHealth::Dead => {
                 // Container is gone — prune state silently
                 any_gone = true;
@@ -1259,8 +1403,11 @@ fn cmd_sandbox_list(db: &Database) -> Result<()> {
                     if date.len() == 8 && time.len() == 4 {
                         return Some(format!(
                             "{}-{}-{} {}:{}",
-                            &date[..4], &date[4..6], &date[6..8],
-                            &time[..2], &time[2..4]
+                            &date[..4],
+                            &date[4..6],
+                            &date[6..8],
+                            &time[..2],
+                            &time[2..4]
                         ));
                     }
                 }
@@ -1290,7 +1437,10 @@ fn cmd_sandbox_list(db: &Database) -> Result<()> {
             repo_path.clone()
         };
 
-        println!("{:<20} {:<18} {:<12} {}", short_id, started, status, display_path);
+        println!(
+            "{:<20} {:<18} {:<12} {}",
+            short_id, started, status, display_path
+        );
     }
 
     if any_gone {
@@ -1365,7 +1515,10 @@ fn resolve_sandbox_id(db: &Database, input: &str) -> Result<String> {
         0 => anyhow::bail!("No sandbox found with ID or path: {}", input),
         1 => Ok(matches[0].0.clone()),
         _ => {
-            let ids: Vec<&str> = matches.iter().map(|(tid, _, _, _, _)| tid.as_str()).collect();
+            let ids: Vec<&str> = matches
+                .iter()
+                .map(|(tid, _, _, _, _)| tid.as_str())
+                .collect();
             anyhow::bail!(
                 "Ambiguous prefix '{}' matches multiple sandboxes:\n  {}",
                 input,
@@ -1397,7 +1550,14 @@ fn resolve_cron_id(db: &Database, id_or_label: &str) -> Result<i64> {
 /// path at spawn, then updated by the Stop hook after each session). The UUID is stable
 /// for the lifetime of the sandbox — `--fresh` wipes the conversation history for that
 /// UUID rather than minting a new one, so Telegram injection always uses the same ID.
-fn cmd_sandbox_attach(db: &Database, task_id: String, fresh: bool, btw: bool, kimi: bool, glm: bool) -> Result<()> {
+fn cmd_sandbox_attach(
+    db: &Database,
+    task_id: String,
+    fresh: bool,
+    btw: bool,
+    kimi: bool,
+    glm: bool,
+) -> Result<()> {
     let task = db
         .get_task_by_id(&task_id)?
         .ok_or_else(|| anyhow::anyhow!("Task not found: {}", task_id))?;
@@ -1428,7 +1588,10 @@ fn cmd_sandbox_attach(db: &Database, task_id: String, fresh: bool, btw: bool, ki
     if fresh && !btw {
         if let Some(sid) = session_id {
             backup_session_file(sid);
-            eprintln!("  Session:   {} — previous history backed up, starting fresh", &sid[..8.min(sid.len())]);
+            eprintln!(
+                "  Session:   {} — previous history backed up, starting fresh",
+                &sid[..8.min(sid.len())]
+            );
         } else {
             eprintln!("  Session:   no stored session, starting fresh");
         }
@@ -1466,19 +1629,21 @@ fn cmd_sandbox_attach(db: &Database, task_id: String, fresh: bool, btw: bool, ki
     // KIMI_BASE_URL and KIMI_API_KEY must be set in the host environment
     // (e.g. via the claude-kimi alias definition in ~/.zshrc).
     let mut podman_args: Vec<String> = vec![
-        "exec".into(), "-it".into(),
-        "-e".into(), "TERM=xterm-256color".into(),
-        "-e".into(), "PATH=/home/node/.local/bin:/usr/local/bin:/usr/bin:/bin".into(),
-        "-e".into(), "CLAUDE_CONFIG_DIR=/home/node/.claude".into(),
+        "exec".into(),
+        "-it".into(),
+        "-e".into(),
+        "TERM=xterm-256color".into(),
+        "-e".into(),
+        "PATH=/home/node/.local/bin:/usr/local/bin:/usr/bin:/bin".into(),
+        "-e".into(),
+        "CLAUDE_CONFIG_DIR=/home/node/.claude".into(),
     ];
 
     // --btw sessions are throwaway: omit AGENT_TASK_ID so the Stop/SessionEnd
     // hooks inside the container no-op and don't overwrite the main task's
     // stored session_id.
     if !btw {
-        podman_args.extend([
-            "-e".into(), format!("AGENT_TASK_ID={}", task_id),
-        ]);
+        podman_args.extend(["-e".into(), format!("AGENT_TASK_ID={}", task_id)]);
     }
 
     if kimi {
@@ -1488,9 +1653,12 @@ fn cmd_sandbox_attach(db: &Database, task_id: String, fresh: bool, btw: bool, ki
             .context("--kimi requires KIMI_API_KEY to be set in the host environment")?;
         eprintln!("Using Kimi backend ({})", base_url);
         podman_args.extend([
-            "-e".into(), format!("ANTHROPIC_BASE_URL={}", base_url),
-            "-e".into(), format!("ANTHROPIC_API_KEY={}", api_key),
-            "-e".into(), "ENABLE_TOOL_SEARCH=FALSE".into(),
+            "-e".into(),
+            format!("ANTHROPIC_BASE_URL={}", base_url),
+            "-e".into(),
+            format!("ANTHROPIC_API_KEY={}", api_key),
+            "-e".into(),
+            "ENABLE_TOOL_SEARCH=FALSE".into(),
         ]);
     }
 
@@ -1501,20 +1669,35 @@ fn cmd_sandbox_attach(db: &Database, task_id: String, fresh: bool, btw: bool, ki
             .context("--glm requires GLM_API_KEY to be set in the host environment")?;
         eprintln!("Using GLM backend ({})", base_url);
         podman_args.extend([
-            "-e".into(), format!("ANTHROPIC_BASE_URL={}", base_url),
-            "-e".into(), format!("ANTHROPIC_API_KEY={}", api_key),
-            "-e".into(), "ENABLE_TOOL_SEARCH=FALSE".into(),
+            "-e".into(),
+            format!("ANTHROPIC_BASE_URL={}", base_url),
+            "-e".into(),
+            format!("ANTHROPIC_API_KEY={}", api_key),
+            "-e".into(),
+            "ENABLE_TOOL_SEARCH=FALSE".into(),
+            "-e".into(),
+            "ANTHROPIC_DEFAULT_SONNET_MODEL=glm-5.1".into(),
+            "-e".into(),
+            "ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.1".into(),
+            "-e".into(),
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL=glm-5-turbo".into(),
         ]);
     }
 
     podman_args.extend([
-        "-w".into(), "/workspace".into(),
+        "-w".into(),
+        "/workspace".into(),
         container_id.clone(),
-        "/bin/bash".into(), "-c".into(), shell_cmd,
+        "/bin/bash".into(),
+        "-c".into(),
+        shell_cmd,
     ]);
 
     if btw {
-        eprintln!("Attaching to sandbox {} ({}) [btw — throwaway session]…", task.title, container_id);
+        eprintln!(
+            "Attaching to sandbox {} ({}) [btw — throwaway session]…",
+            task.title, container_id
+        );
         eprintln!("(Independent session — main history untouched. Exit to close.)");
     } else {
         eprintln!("Attaching to sandbox {} ({})…", task.title, container_id);
@@ -1526,7 +1709,6 @@ fn cmd_sandbox_attach(db: &Database, task_id: String, fresh: bool, btw: bool, ki
     );
     anyhow::bail!("Failed to exec podman: {}", err)
 }
-
 
 /// Kill a sandbox container and mark its task as exited.
 fn cmd_sandbox_kill(db: &Database, task_id: String) -> Result<()> {
@@ -1571,10 +1753,7 @@ fn cmd_sandbox_gc(db: &Database, task_id: String, all: bool) -> Result<()> {
         .and_then(|c| c.project_path.as_deref())
         .ok_or_else(|| anyhow::anyhow!("Task {} has no repo path in context", task_id))?;
 
-    let current_session_id = task
-        .context
-        .as_ref()
-        .and_then(|c| c.session_id.as_deref());
+    let current_session_id = task.context.as_ref().and_then(|c| c.session_id.as_deref());
 
     // Claude Code hashes the working directory path to produce the project folder name.
     // The hash is a URL-safe base64 of the SHA256 of the canonical path.
@@ -1584,7 +1763,10 @@ fn cmd_sandbox_gc(db: &Database, task_id: String, all: bool) -> Result<()> {
     let projects_dir = home.join(".claude").join("projects");
 
     if !projects_dir.exists() {
-        println!("No Claude projects directory found at {}", projects_dir.display());
+        println!(
+            "No Claude projects directory found at {}",
+            projects_dir.display()
+        );
         return Ok(());
     }
 
@@ -1597,7 +1779,9 @@ fn cmd_sandbox_gc(db: &Database, task_id: String, all: bool) -> Result<()> {
         // Fast path: look for the known session file
         for entry in std::fs::read_dir(&projects_dir)? {
             let entry = entry?;
-            if !entry.file_type()?.is_dir() { continue; }
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
             if entry.path().join(format!("{}.jsonl", sid)).exists() {
                 target_dir = Some(entry.path());
                 break;
@@ -1612,10 +1796,14 @@ fn cmd_sandbox_gc(db: &Database, task_id: String, all: bool) -> Result<()> {
             .unwrap_or_else(|_| std::path::PathBuf::from(repo_path));
         'outer: for entry in std::fs::read_dir(&projects_dir)? {
             let entry = entry?;
-            if !entry.file_type()?.is_dir() { continue; }
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
             for file in std::fs::read_dir(entry.path())? {
                 let file = file?;
-                if file.path().extension().and_then(|e| e.to_str()) != Some("jsonl") { continue; }
+                if file.path().extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                    continue;
+                }
                 if let Ok(content) = std::fs::read_to_string(file.path()) {
                     if let Some(first_line) = content.lines().next() {
                         if first_line.contains(canonical_repo.to_string_lossy().as_ref()) {
@@ -1647,7 +1835,9 @@ fn cmd_sandbox_gc(db: &Database, task_id: String, all: bool) -> Result<()> {
                 let name = path.file_name()?.to_string_lossy().to_string();
                 let is_bak = name.ends_with(".jsonl.bak");
                 let is_jsonl = !is_bak && name.ends_with(".jsonl");
-                if !is_jsonl && !is_bak { return None; }
+                if !is_jsonl && !is_bak {
+                    return None;
+                }
                 let mtime = e.metadata().ok()?.modified().ok()?;
                 Some((path, mtime, is_bak))
             })
@@ -1656,7 +1846,7 @@ fn cmd_sandbox_gc(db: &Database, task_id: String, all: bool) -> Result<()> {
     all_files.sort_by_key(|(_, mtime, _)| *mtime);
 
     let jsonl_count = all_files.iter().filter(|(_, _, is_bak)| !is_bak).count();
-    let bak_count   = all_files.iter().filter(|(_, _, is_bak)| *is_bak).count();
+    let bak_count = all_files.iter().filter(|(_, _, is_bak)| *is_bak).count();
 
     if all_files.is_empty() {
         println!("No conversation files found in {}", dir.display());
@@ -1670,7 +1860,9 @@ fn cmd_sandbox_gc(db: &Database, task_id: String, all: bool) -> Result<()> {
     } else {
         // Split: delete all .bak + all .jsonl except the most recent active one.
         let last_jsonl_idx = all_files.iter().rposition(|(_, _, is_bak)| !is_bak);
-        all_files.into_iter().enumerate()
+        all_files
+            .into_iter()
+            .enumerate()
             .filter(|(i, (_, _, is_bak))| *is_bak || Some(*i) != last_jsonl_idx)
             .map(|(_, f)| f)
             .collect()
@@ -1686,7 +1878,10 @@ fn cmd_sandbox_gc(db: &Database, task_id: String, all: bool) -> Result<()> {
     for (path, _, _) in &to_delete {
         let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
         match std::fs::remove_file(path) {
-            Ok(()) => { deleted += 1; freed_bytes += size; }
+            Ok(()) => {
+                deleted += 1;
+                freed_bytes += size;
+            }
             Err(e) => eprintln!("  Warning: could not delete {}: {}", path.display(), e),
         }
     }
@@ -1773,35 +1968,39 @@ fn cmd_sandbox_resume(db: &Database, all: bool) -> Result<()> {
                     task.set_exited(None);
                     let _ = db.update_task(&task);
                 }
-                println!("  Degraded: {} (container up, Claude session gone, repo: {})", container_name, repo_path);
+                println!(
+                    "  Degraded: {} (container up, Claude session gone, repo: {})",
+                    container_name, repo_path
+                );
                 stale += 1;
             }
             SandboxHealth::Stopped => {
                 // Container stopped (e.g. host reboot) — try to restart it.
                 match sandbox.start(container_name) {
-                    Ok(()) => {
-                        match sandbox.health_check(container_name) {
-                            SandboxHealth::Healthy => {
-                                if let Ok(Some(mut task)) = db.get_task_by_id(task_id) {
-                                    if task.status != TaskStatus::Running {
-                                        task.set_running();
-                                        let _ = db.update_task(&task);
-                                    }
-                                }
-                                println!("  Restarted: {} ({})", container_name, repo_path);
-                                resumed += 1;
-                            }
-                            _ => {
-                                if let Ok(Some(mut task)) = db.get_task_by_id(task_id) {
-                                    task.set_exited(None);
+                    Ok(()) => match sandbox.health_check(container_name) {
+                        SandboxHealth::Healthy => {
+                            if let Ok(Some(mut task)) = db.get_task_by_id(task_id) {
+                                if task.status != TaskStatus::Running {
+                                    task.set_running();
                                     let _ = db.update_task(&task);
                                 }
-                                let _ = db.delete_container_state(task_id);
-                                println!("  Cleaned: {} (start failed health check, repo: {})", container_name, repo_path);
-                                stale += 1;
                             }
+                            println!("  Restarted: {} ({})", container_name, repo_path);
+                            resumed += 1;
                         }
-                    }
+                        _ => {
+                            if let Ok(Some(mut task)) = db.get_task_by_id(task_id) {
+                                task.set_exited(None);
+                                let _ = db.update_task(&task);
+                            }
+                            let _ = db.delete_container_state(task_id);
+                            println!(
+                                "  Cleaned: {} (start failed health check, repo: {})",
+                                container_name, repo_path
+                            );
+                            stale += 1;
+                        }
+                    },
                     Err(e) => {
                         eprintln!("  Failed to restart {container_name}: {e:#}");
                         if let Ok(Some(mut task)) = db.get_task_by_id(task_id) {
@@ -1809,7 +2008,10 @@ fn cmd_sandbox_resume(db: &Database, all: bool) -> Result<()> {
                             let _ = db.update_task(&task);
                         }
                         let _ = db.delete_container_state(task_id);
-                        println!("  Cleaned: {} (start error, repo: {})", container_name, repo_path);
+                        println!(
+                            "  Cleaned: {} (start error, repo: {})",
+                            container_name, repo_path
+                        );
                         stale += 1;
                     }
                 }
@@ -1849,7 +2051,11 @@ pub(crate) fn prune_stale_tasks(db: &Database) -> Result<usize> {
                 if !alive {
                     task.set_exited(None);
                     db.update_task(&task)?;
-                    eprintln!("[prune] Task {} (pid {}) is dead → exited", &task.task_id[..8.min(task.task_id.len())], pid);
+                    eprintln!(
+                        "[prune] Task {} (pid {}) is dead → exited",
+                        &task.task_id[..8.min(task.task_id.len())],
+                        pid
+                    );
                     pruned += 1;
                 }
             }
@@ -1869,9 +2075,14 @@ pub(crate) fn prune_stale_tasks(db: &Database) -> Result<usize> {
                 SandboxHealth::Healthy => {}
                 SandboxHealth::Stopped => {
                     // Container stopped (reboot) — try to restart silently.
-                    eprintln!("[prune] Sandbox {} stopped → attempting restart", container_name);
+                    eprintln!(
+                        "[prune] Sandbox {} stopped → attempting restart",
+                        container_name
+                    );
                     match sandbox.start(container_name) {
-                        Ok(()) if sandbox.health_check(container_name) == SandboxHealth::Healthy => {
+                        Ok(())
+                            if sandbox.health_check(container_name) == SandboxHealth::Healthy =>
+                        {
                             eprintln!("[prune] Sandbox {} restarted successfully", container_name);
                             if let Ok(Some(mut task)) = db.get_task_by_id(task_id) {
                                 if task.status != TaskStatus::Running {
@@ -1888,7 +2099,10 @@ pub(crate) fn prune_stale_tasks(db: &Database) -> Result<usize> {
                                 let _ = db.update_task(&task);
                                 pruned += 1;
                             }
-                            eprintln!("[prune] Sandbox {} failed to restart → cleaned up", container_name);
+                            eprintln!(
+                                "[prune] Sandbox {} failed to restart → cleaned up",
+                                container_name
+                            );
                         }
                     }
                 }
@@ -1912,7 +2126,9 @@ pub(crate) fn prune_stale_tasks(db: &Database) -> Result<usize> {
                                 .and_then(|n| n.to_str())
                                 .unwrap_or(repo_path.as_str());
                             let msg = format!("💥 Sandbox for `{}` crashed or was killed by the OS.\nRe-spawn with: `nibble sandbox spawn {}`", repo_label, repo_path);
-                            if let Ok(text) = build_notification_text(db, Some(task_id), &msg, false) {
+                            if let Ok(text) =
+                                build_notification_text(db, Some(task_id), &msg, false)
+                            {
                                 let _ = notifications::telegram::send(&cfg.telegram, &text);
                             }
                         }
@@ -1949,23 +2165,85 @@ pub(crate) fn prune_stale_tasks(db: &Database) -> Result<usize> {
 /// Returns a list of (ecosystem, install_command, run_hint) tuples for every
 /// recognised manifest found so Claude can install deps and run the project
 /// without guessing.
-fn detect_toolchains(repo_path: &std::path::Path) -> Vec<(&'static str, &'static str, &'static str)> {
+fn detect_toolchains(
+    repo_path: &std::path::Path,
+) -> Vec<(&'static str, &'static str, &'static str)> {
     let checks: &[(&str, &str, &str, &str)] = &[
         // (manifest file, ecosystem label, install cmd, run hint)
-        ("package.json",    "Node.js",  "npm install",          "npm start / npm test / npm run dev"),
-        ("yarn.lock",       "Node.js",  "yarn install",         "yarn start / yarn test / yarn dev"),
-        ("pnpm-lock.yaml",  "Node.js",  "pnpm install",         "pnpm start / pnpm test / pnpm dev"),
-        ("Cargo.toml",      "Rust",     "cargo build",          "cargo run / cargo test"),
-        ("go.mod",          "Go",       "go mod download",      "go run . / go test ./..."),
-        ("requirements.txt","Python",   "pip install -r requirements.txt", "python main.py / pytest"),
-        ("pyproject.toml",  "Python",   "pip install -e .",     "python -m pytest / python -m <module>"),
-        ("Pipfile",         "Python",   "pipenv install",       "pipenv run python ... / pipenv run pytest"),
-        ("composer.json",   "PHP",      "composer install",     "php artisan serve / php -S localhost:8000"),
-        ("Gemfile",         "Ruby",     "bundle install",       "bundle exec rails s / bundle exec rspec"),
-        ("build.gradle",    "JVM",      "./gradlew build",      "./gradlew run / ./gradlew test"),
-        ("pom.xml",         "JVM",      "mvn install -DskipTests", "mvn exec:java / mvn test"),
-        ("mix.exs",         "Elixir",   "mix deps.get",         "mix run / mix test"),
-        ("Makefile",        "Make",     "make",                 "make run / make test"),
+        (
+            "package.json",
+            "Node.js",
+            "npm install",
+            "npm start / npm test / npm run dev",
+        ),
+        (
+            "yarn.lock",
+            "Node.js",
+            "yarn install",
+            "yarn start / yarn test / yarn dev",
+        ),
+        (
+            "pnpm-lock.yaml",
+            "Node.js",
+            "pnpm install",
+            "pnpm start / pnpm test / pnpm dev",
+        ),
+        (
+            "Cargo.toml",
+            "Rust",
+            "cargo build",
+            "cargo run / cargo test",
+        ),
+        (
+            "go.mod",
+            "Go",
+            "go mod download",
+            "go run . / go test ./...",
+        ),
+        (
+            "requirements.txt",
+            "Python",
+            "pip install -r requirements.txt",
+            "python main.py / pytest",
+        ),
+        (
+            "pyproject.toml",
+            "Python",
+            "pip install -e .",
+            "python -m pytest / python -m <module>",
+        ),
+        (
+            "Pipfile",
+            "Python",
+            "pipenv install",
+            "pipenv run python ... / pipenv run pytest",
+        ),
+        (
+            "composer.json",
+            "PHP",
+            "composer install",
+            "php artisan serve / php -S localhost:8000",
+        ),
+        (
+            "Gemfile",
+            "Ruby",
+            "bundle install",
+            "bundle exec rails s / bundle exec rspec",
+        ),
+        (
+            "build.gradle",
+            "JVM",
+            "./gradlew build",
+            "./gradlew run / ./gradlew test",
+        ),
+        (
+            "pom.xml",
+            "JVM",
+            "mvn install -DskipTests",
+            "mvn exec:java / mvn test",
+        ),
+        ("mix.exs", "Elixir", "mix deps.get", "mix run / mix test"),
+        ("Makefile", "Make", "make", "make run / make test"),
     ];
 
     // Deduplicate: if yarn.lock is present package.json will also be — prefer
@@ -2040,11 +2318,18 @@ fn build_sandbox_claude_md(repo_name: &str, toolchains: &[(&str, &str, &str)]) -
     lines.push(String::new());
     lines.push("## Important notes".to_string());
     lines.push(String::new());
-    lines.push("- Prefer making small, focused changes and running tests after each one".to_string());
+    lines.push(
+        "- Prefer making small, focused changes and running tests after each one".to_string(),
+    );
     lines.push("- The container persists between sessions — installed packages and build artifacts are retained".to_string());
     lines.push("- When you finish a task, summarise what you did clearly so the notification sent to the user is informative".to_string());
 
-    format!("{}\n{}\n{}", CLAUDE_MD_BEGIN, lines.join("\n"), CLAUDE_MD_END)
+    format!(
+        "{}\n{}\n{}",
+        CLAUDE_MD_BEGIN,
+        lines.join("\n"),
+        CLAUDE_MD_END
+    )
 }
 
 /// Write the sandbox section of `.claude/CLAUDE.md` inside the container.
@@ -2192,10 +2477,10 @@ fn format_header(task: &Task, attention: bool) -> String {
 fn agent_display(agent_type: &str) -> (&'static str, String) {
     match agent_type {
         "claude_code" => ("🤖", "Claude Code".to_string()),
-        "opencode"    => ("⚡", "OpenCode".to_string()),
-        "claude_web"  => ("🌐", "Claude Web".to_string()),
-        "gemini_web"  => ("✨", "Gemini".to_string()),
-        other         => ("🔧", other.to_string()),
+        "opencode" => ("⚡", "OpenCode".to_string()),
+        "claude_web" => ("🌐", "Claude Web".to_string()),
+        "gemini_web" => ("✨", "Gemini".to_string()),
+        other => ("🔧", other.to_string()),
     }
 }
 
@@ -2289,10 +2574,16 @@ mod notification_tests {
 
     #[test]
     fn test_agent_display_known_types() {
-        assert_eq!(agent_display("claude_code"), ("🤖", "Claude Code".to_string()));
-        assert_eq!(agent_display("opencode"),    ("⚡", "OpenCode".to_string()));
-        assert_eq!(agent_display("claude_web"),  ("🌐", "Claude Web".to_string()));
-        assert_eq!(agent_display("gemini_web"),  ("✨", "Gemini".to_string()));
+        assert_eq!(
+            agent_display("claude_code"),
+            ("🤖", "Claude Code".to_string())
+        );
+        assert_eq!(agent_display("opencode"), ("⚡", "OpenCode".to_string()));
+        assert_eq!(
+            agent_display("claude_web"),
+            ("🌐", "Claude Web".to_string())
+        );
+        assert_eq!(agent_display("gemini_web"), ("✨", "Gemini".to_string()));
     }
 
     #[test]

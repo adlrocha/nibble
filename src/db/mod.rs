@@ -188,13 +188,15 @@ impl Database {
 
         if from_version < 5 {
             // Add `running` column to cron_jobs if it was missing from the v4 migration
-            let has_running: bool = self.conn
+            let has_running: bool = self
+                .conn
                 .query_row(
                     "SELECT COUNT(*) FROM pragma_table_info('cron_jobs') WHERE name='running'",
                     [],
                     |row| row.get::<_, i64>(0),
                 )
-                .unwrap_or(0) > 0;
+                .unwrap_or(0)
+                > 0;
             if !has_running {
                 self.conn.execute_batch(
                     "ALTER TABLE cron_jobs ADD COLUMN running INTEGER NOT NULL DEFAULT 0;",
@@ -204,17 +206,18 @@ impl Database {
 
         if from_version < 6 {
             // Add `expires_at` column for optional job expiry
-            let has_expires: bool = self.conn
+            let has_expires: bool = self
+                .conn
                 .query_row(
                     "SELECT COUNT(*) FROM pragma_table_info('cron_jobs') WHERE name='expires_at'",
                     [],
                     |row| row.get::<_, i64>(0),
                 )
-                .unwrap_or(0) > 0;
+                .unwrap_or(0)
+                > 0;
             if !has_expires {
-                self.conn.execute_batch(
-                    "ALTER TABLE cron_jobs ADD COLUMN expires_at INTEGER;",
-                )?;
+                self.conn
+                    .execute_batch("ALTER TABLE cron_jobs ADD COLUMN expires_at INTEGER;")?;
             }
         }
 
@@ -266,9 +269,8 @@ impl Database {
 
         if from_version < 8 {
             // Add worktree_path column to container_state for git worktree support.
-            self.conn.execute_batch(
-                "ALTER TABLE container_state ADD COLUMN worktree_path TEXT;",
-            )?;
+            self.conn
+                .execute_batch("ALTER TABLE container_state ADD COLUMN worktree_path TEXT;")?;
         }
 
         self.conn.execute(
@@ -527,7 +529,8 @@ impl Database {
 
     pub fn kv_delete(&self, key: &str) -> Result<()> {
         // Used by the Telegram listener to clear pending-reply state.
-        self.conn.execute("DELETE FROM kv_store WHERE key = ?1", params![key])?;
+        self.conn
+            .execute("DELETE FROM kv_store WHERE key = ?1", params![key])?;
         Ok(())
     }
 
@@ -612,7 +615,10 @@ impl Database {
 
     /// Find the most recent container state for a given repo path.
     /// Returns (task_id, container_name) if found.
-    pub fn get_container_state_by_repo_path(&self, repo_path: &str) -> Result<Option<(String, String)>> {
+    pub fn get_container_state_by_repo_path(
+        &self,
+        repo_path: &str,
+    ) -> Result<Option<(String, String)>> {
         let result = self
             .conn
             .query_row(
@@ -629,7 +635,10 @@ impl Database {
     }
 
     /// Return all containers for a given repo path, newest first.
-    pub fn get_all_containers_by_repo_path(&self, repo_path: &str) -> Result<Vec<(String, String)>> {
+    pub fn get_all_containers_by_repo_path(
+        &self,
+        repo_path: &str,
+    ) -> Result<Vec<(String, String)>> {
         let mut stmt = self.conn.prepare(
             "SELECT task_id, container_name FROM container_state WHERE repo_path = ?1 ORDER BY created_at DESC",
         )?;
@@ -643,7 +652,9 @@ impl Database {
 
     /// List all container states.
     /// Returns (task_id, container_name, repo_path, worktree_path, created_at).
-    pub fn list_container_states(&self) -> Result<Vec<(String, String, String, Option<String>, i64)>> {
+    pub fn list_container_states(
+        &self,
+    ) -> Result<Vec<(String, String, String, Option<String>, i64)>> {
         let mut stmt = self.conn.prepare(
             "SELECT task_id, container_name, repo_path, worktree_path, created_at FROM container_state ORDER BY created_at DESC"
         )?;
@@ -735,7 +746,8 @@ impl Database {
     /// Clear the running flag on all cron jobs.  Called on daemon startup to
     /// recover from a crash where in-flight jobs were left with running=1.
     pub fn reset_all_cron_running_flags(&self) -> Result<()> {
-        self.conn.execute("UPDATE cron_jobs SET running = 0 WHERE running = 1", [])?;
+        self.conn
+            .execute("UPDATE cron_jobs SET running = 0 WHERE running = 1", [])?;
         Ok(())
     }
 
@@ -743,7 +755,7 @@ impl Database {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_path, label, schedule, prompt, enabled, skip_if_running,
                     running, last_run, next_run, expires_at, created_at
-             FROM cron_jobs WHERE id = ?1"
+             FROM cron_jobs WHERE id = ?1",
         )?;
 
         let job = stmt
@@ -761,7 +773,8 @@ impl Database {
                             running, last_run, next_run, expires_at, created_at
                      FROM cron_jobs WHERE repo_path = ?1 ORDER BY created_at DESC",
                 )?;
-                let jobs = stmt.query_map(params![repo_path], |row| self.row_to_cron_job(row))?
+                let jobs = stmt
+                    .query_map(params![repo_path], |row| self.row_to_cron_job(row))?
                     .collect::<Result<Vec<_>, _>>()?;
                 jobs
             }
@@ -771,7 +784,8 @@ impl Database {
                             running, last_run, next_run, expires_at, created_at
                      FROM cron_jobs ORDER BY created_at DESC",
                 )?;
-                let jobs = stmt.query_map([], |row| self.row_to_cron_job(row))?
+                let jobs = stmt
+                    .query_map([], |row| self.row_to_cron_job(row))?
                     .collect::<Result<Vec<_>, _>>()?;
                 jobs
             }
@@ -815,7 +829,7 @@ impl Database {
             "SELECT id, repo_path, label, schedule, prompt, enabled, skip_if_running,
                     running, last_run, next_run, expires_at, created_at
              FROM cron_jobs WHERE enabled = 1 AND next_run <= ?1
-             ORDER BY next_run ASC"
+             ORDER BY next_run ASC",
         )?;
 
         let jobs = stmt
@@ -853,19 +867,19 @@ impl Database {
         let completed_ts: Option<i64> = row.get(7)?;
 
         let context_json: Option<String> = row.get(13)?;
-        let context: Option<TaskContext> = context_json
-            .and_then(|s| serde_json::from_str(&s).ok());
+        let context: Option<TaskContext> = context_json.and_then(|s| serde_json::from_str(&s).ok());
 
         let metadata_json: Option<String> = row.get(14)?;
-        let metadata: Option<HashMap<String, serde_json::Value>> = metadata_json
-            .and_then(|s| serde_json::from_str(&s).ok());
+        let metadata: Option<HashMap<String, serde_json::Value>> =
+            metadata_json.and_then(|s| serde_json::from_str(&s).ok());
 
         let status_str: String = row.get(4)?;
-        let status = TaskStatus::from_str(&status_str)
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+        let status = TaskStatus::from_str(&status_str).map_err(|e| {
+            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 e,
-            ))))?;
+            )))
+        })?;
 
         // Sandbox fields (may be NULL for old records)
         let container_id: Option<String> = row.get(15)?;
@@ -874,8 +888,8 @@ impl Database {
             .and_then(|s| SandboxType::from_str(&s).ok())
             .unwrap_or(SandboxType::None);
         let sandbox_config_json: Option<String> = row.get(17)?;
-        let sandbox_config: Option<SandboxConfig> = sandbox_config_json
-            .and_then(|s| serde_json::from_str(&s).ok());
+        let sandbox_config: Option<SandboxConfig> =
+            sandbox_config_json.and_then(|s| serde_json::from_str(&s).ok());
 
         Ok(Task {
             id: Some(row.get(0)?),
@@ -902,9 +916,7 @@ impl Database {
 
 pub fn default_db_path() -> PathBuf {
     let home = std::env::var("HOME").expect("HOME environment variable not set");
-    PathBuf::from(home)
-        .join(".agent-tasks")
-        .join("tasks.db")
+    PathBuf::from(home).join(".agent-tasks").join("tasks.db")
 }
 
 pub fn ensure_data_dir() -> Result<PathBuf> {
@@ -912,8 +924,7 @@ pub fn ensure_data_dir() -> Result<PathBuf> {
     let data_dir = PathBuf::from(home).join(".agent-tasks");
 
     if !data_dir.exists() {
-        std::fs::create_dir_all(&data_dir)
-            .context("Failed to create data directory")?;
+        std::fs::create_dir_all(&data_dir).context("Failed to create data directory")?;
     }
 
     Ok(data_dir)

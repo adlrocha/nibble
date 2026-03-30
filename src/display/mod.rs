@@ -41,22 +41,40 @@ pub fn display_task_list(tasks: &[Task]) {
 
     if running.is_empty() && completed.is_empty() && exited.is_empty() {
         println!("{}{}No active tasks{}", DIM, GRAY, RESET);
-        println!("{}Start a conversation in Claude.ai or Gemini to create tasks{}", DIM, RESET);
+        println!(
+            "{}Start a conversation in Claude.ai or Gemini to create tasks{}",
+            DIM, RESET
+        );
         return;
     }
 
     // Header with box drawing
     println!();
-    println!("{}{}╭─────────────────────────────────────────────╮{}", BOLD, CYAN, RESET);
-    println!("{}{}│  {}Agent Inbox{}                              │{}", BOLD, CYAN, WHITE, CYAN, RESET);
-    println!("{}{}╰─────────────────────────────────────────────╯{}", BOLD, CYAN, RESET);
+    println!(
+        "{}{}╭─────────────────────────────────────────────╮{}",
+        BOLD, CYAN, RESET
+    );
+    println!(
+        "{}{}│  {}Agent Inbox{}                              │{}",
+        BOLD, CYAN, WHITE, CYAN, RESET
+    );
+    println!(
+        "{}{}╰─────────────────────────────────────────────╯{}",
+        BOLD, CYAN, RESET
+    );
     println!();
 
     // Summary line with colors
     let mut summary_parts = Vec::new();
 
     if !running.is_empty() {
-        summary_parts.push(format!("{}{}{} running{}", BOLD, BRIGHT_BLUE, running.len(), RESET));
+        summary_parts.push(format!(
+            "{}{}{} running{}",
+            BOLD,
+            BRIGHT_BLUE,
+            running.len(),
+            RESET
+        ));
     }
     if !completed.is_empty() {
         summary_parts.push(format!("{}{} completed{}", GREEN, completed.len(), RESET));
@@ -103,8 +121,14 @@ pub fn display_task_list(tasks: &[Task]) {
     }
 
     // Footer with helpful info
-    println!("{}{} Exited tasks auto-clear after 1 hour{}", DIM, GRAY, RESET);
-    println!("{}{} Run {}nibble show <id>{} for details{}", DIM, GRAY, CYAN, GRAY, RESET);
+    println!(
+        "{}{} Exited tasks auto-clear after 1 hour{}",
+        DIM, GRAY, RESET
+    );
+    println!(
+        "{}{} Run {}nibble show <id>{} for details{}",
+        DIM, GRAY, CYAN, GRAY, RESET
+    );
     println!();
 }
 
@@ -150,9 +174,18 @@ fn print_task_summary(idx: usize, task: &Task) {
 
 pub fn display_task_detail(task: &Task) {
     println!();
-    println!("{}{}╭─────────────────────────────────────────────╮{}", BOLD, CYAN, RESET);
-    println!("{}{}│  {}Task Details{}                            │{}", BOLD, CYAN, WHITE, CYAN, RESET);
-    println!("{}{}╰─────────────────────────────────────────────╯{}", BOLD, CYAN, RESET);
+    println!(
+        "{}{}╭─────────────────────────────────────────────╮{}",
+        BOLD, CYAN, RESET
+    );
+    println!(
+        "{}{}│  {}Task Details{}                            │{}",
+        BOLD, CYAN, WHITE, CYAN, RESET
+    );
+    println!(
+        "{}{}╰─────────────────────────────────────────────╯{}",
+        BOLD, CYAN, RESET
+    );
     println!();
 
     // Status badge
@@ -162,19 +195,49 @@ pub fn display_task_detail(task: &Task) {
         TaskStatus::Exited => (GRAY, "EXITED"),
     };
 
-    println!("{}{}Status:{} {}{}{}{}", BOLD, GRAY, RESET, BOLD, status_color, status_text, RESET);
+    println!(
+        "{}{}Status:{} {}{}{}{}",
+        BOLD, GRAY, RESET, BOLD, status_color, status_text, RESET
+    );
     println!();
 
-    println!("{}{}ID:{} {}{}{}", BOLD, GRAY, RESET, CYAN, task.task_id, RESET);
-    println!("{}{}Agent:{} {}{}{}", BOLD, GRAY, RESET, MAGENTA, task.agent_type, RESET);
-    println!("{}{}Title:{} {}{}{}", BOLD, GRAY, RESET, WHITE, task.title, RESET);
+    println!(
+        "{}{}ID:{} {}{}{}",
+        BOLD, GRAY, RESET, CYAN, task.task_id, RESET
+    );
+    println!(
+        "{}{}Agent:{} {}{}{}",
+        BOLD, GRAY, RESET, MAGENTA, task.agent_type, RESET
+    );
+    println!(
+        "{}{}Title:{} {}{}{}",
+        BOLD, GRAY, RESET, WHITE, task.title, RESET
+    );
     println!();
 
     println!("{}{}Timestamps:{}", BOLD, GRAY, RESET);
-    println!("  {}Created:  {}{}{}", GRAY, RESET, format_datetime(&task.created_at), RESET);
-    println!("  {}Updated:  {}{}{}", GRAY, RESET, format_datetime(&task.updated_at), RESET);
+    println!(
+        "  {}Created:  {}{}{}",
+        GRAY,
+        RESET,
+        format_datetime(&task.created_at),
+        RESET
+    );
+    println!(
+        "  {}Updated:  {}{}{}",
+        GRAY,
+        RESET,
+        format_datetime(&task.updated_at),
+        RESET
+    );
     if let Some(completed) = task.completed_at {
-        println!("  {}Completed: {}{}{}", GRAY, GREEN, format_datetime(&completed), RESET);
+        println!(
+            "  {}Completed: {}{}{}",
+            GRAY,
+            GREEN,
+            format_datetime(&completed),
+            RESET
+        );
     }
     println!();
 
@@ -193,12 +256,18 @@ pub fn display_task_detail(task: &Task) {
     }
 
     if let Some(reason) = &task.attention_reason {
-        println!("{}{} Attention Reason:{} {}{}{}", BOLD, YELLOW, RESET, YELLOW, reason, RESET);
+        println!(
+            "{}{} Attention Reason:{} {}{}{}",
+            BOLD, YELLOW, RESET, YELLOW, reason, RESET
+        );
         println!();
     }
 
     if let Some(code) = task.exit_code {
-        println!("{}{} Exit Code:{} {}{}{}", BOLD, RED, RESET, RED, code, RESET);
+        println!(
+            "{}{} Exit Code:{} {}{}{}",
+            BOLD, RED, RESET, RED, code, RESET
+        );
         println!();
     }
 

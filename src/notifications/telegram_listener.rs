@@ -112,11 +112,7 @@ pub fn run(db: &Database, config: &TelegramConfig) -> Result<()> {
 
 // ── Update dispatch ───────────────────────────────────────────────────────────
 
-fn handle_update(
-    update: &serde_json::Value,
-    config: &TelegramConfig,
-    db: &Database,
-) -> Result<()> {
+fn handle_update(update: &serde_json::Value, config: &TelegramConfig, db: &Database) -> Result<()> {
     if let Some(cq) = update.get("callback_query") {
         return handle_callback_query(cq, config, db);
     }
@@ -141,10 +137,7 @@ fn handle_callback_query(
         .unwrap_or("")
         .to_string();
 
-    let from_id = cq
-        .pointer("/from/id")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
+    let from_id = cq.pointer("/from/id").and_then(|v| v.as_i64()).unwrap_or(0);
     let from_username = cq.pointer("/from/username").and_then(|v| v.as_str());
 
     // Always acknowledge first (removes the loading spinner).
@@ -185,13 +178,13 @@ fn handle_callback_query(
 
 // ── Text message handler ──────────────────────────────────────────────────────
 
-fn handle_message(
-    msg: &serde_json::Value,
-    config: &TelegramConfig,
-    db: &Database,
-) -> Result<()> {
+fn handle_message(msg: &serde_json::Value, config: &TelegramConfig, db: &Database) -> Result<()> {
     // Ignore messages sent by the bot itself.
-    if msg.pointer("/from/is_bot").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if msg
+        .pointer("/from/is_bot")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         return Ok(());
     }
 
@@ -216,7 +209,10 @@ fn handle_message(
         None => return Ok(()),
     };
 
-    eprintln!("[listen] Text message from {from_id}: {:?}", &text[..text.len().min(80)]);
+    eprintln!(
+        "[listen] Text message from {from_id}: {:?}",
+        &text[..text.len().min(80)]
+    );
 
     // Priority 0: Help command
     if text.trim() == "/help" {
@@ -250,7 +246,11 @@ fn handle_message(
         } else {
             let mut parts = args.splitn(2, char::is_whitespace);
             let path = parts.next().map(str::trim).filter(|s| !s.is_empty());
-            let desc = parts.next().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+            let desc = parts
+                .next()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
             (path.map(str::to_string), desc)
         };
         return handle_spawn_command(config, db, chat_id, repo_path, task_desc);
@@ -288,11 +288,7 @@ fn handle_message(
     Ok(())
 }
 
-fn handle_sandboxes_command(
-    config: &TelegramConfig,
-    db: &Database,
-    _chat_id: i64,
-) -> Result<()> {
+fn handle_sandboxes_command(config: &TelegramConfig, db: &Database, _chat_id: i64) -> Result<()> {
     use crate::sandbox::ContainerStatus;
 
     let sandbox = PodmanSandbox::new();
@@ -366,7 +362,8 @@ fn handle_cron_command(
             } else {
                 // Find all cron jobs whose repo basename matches the arg
                 let all_jobs = db.list_cron_jobs(None)?;
-                let matched: Vec<_> = all_jobs.iter()
+                let matched: Vec<_> = all_jobs
+                    .iter()
                     .filter(|j| {
                         std::path::Path::new(&j.repo_path)
                             .file_name()
@@ -380,7 +377,11 @@ fn handle_cron_command(
                     .collect();
                 match matched.len() {
                     0 => {
-                        send_notice(config, chat_id, &format!("⚠️ No cron jobs found for repo matching: {}", arg))?;
+                        send_notice(
+                            config,
+                            chat_id,
+                            &format!("⚠️ No cron jobs found for repo matching: {}", arg),
+                        )?;
                         return Ok(());
                     }
                     1 => Some(matched.into_iter().next().unwrap()),
@@ -447,11 +448,7 @@ fn handle_cron_command(
     }
 
     // Unknown subcommand
-    send_notice(
-        config,
-        chat_id,
-        "Unknown /cron command. Try:\n/cron list",
-    )?;
+    send_notice(config, chat_id, "Unknown /cron command. Try:\n/cron list")?;
     Ok(())
 }
 
@@ -571,7 +568,14 @@ fn route_text_to_task(
     let db_path = crate::db::default_db_path();
 
     thread::spawn(move || {
-        inject_with_heartbeat(&task, &text_owned, &config_clone, &task_id_owned, &db_path, messages_before);
+        inject_with_heartbeat(
+            &task,
+            &text_owned,
+            &config_clone,
+            &task_id_owned,
+            &db_path,
+            messages_before,
+        );
     });
 
     Ok(())
@@ -599,7 +603,6 @@ fn inject_with_heartbeat(
     db_path: &std::path::Path,
     messages_before: i64,
 ) {
-
     // Spawn the Claude process.
     let mut child = match agent_input::inject_returning_child(task, text) {
         Ok(c) => c,
@@ -664,10 +667,15 @@ fn inject_with_heartbeat(
     let mut hook_notified = false;
     for i in 0..STOP_HOOK_TIMEOUT_SECS {
         thread::sleep(Duration::from_secs(1));
-        let count_now = db.bot_message_count_for_task(task_id).unwrap_or(messages_before);
+        let count_now = db
+            .bot_message_count_for_task(task_id)
+            .unwrap_or(messages_before);
         if count_now > messages_before {
             hook_notified = true;
-            eprintln!("[listen] Stop hook notified after {}s, suppressing safety-net", i + 1);
+            eprintln!(
+                "[listen] Stop hook notified after {}s, suppressing safety-net",
+                i + 1
+            );
             break;
         }
     }
@@ -798,7 +806,10 @@ fn is_authorised(config: &TelegramConfig, from_id: i64, from_username: Option<&s
 
     // Check 2: username must match when one is configured.
     if !config.allowed_username.is_empty() {
-        let allowed = config.allowed_username.trim_start_matches('@').to_lowercase();
+        let allowed = config
+            .allowed_username
+            .trim_start_matches('@')
+            .to_lowercase();
         let sender = from_username
             .unwrap_or("")
             .trim_start_matches('@')
@@ -828,7 +839,9 @@ fn find_or_spawn_for_cron(
 
     // Walk all containers for this repo_path (newest first) and return the first healthy one.
     for (task_id, container_name) in db.get_all_containers_by_repo_path(repo_path)? {
-        let Some(task) = db.get_task_by_id(&task_id)? else { continue };
+        let Some(task) = db.get_task_by_id(&task_id)? else {
+            continue;
+        };
         match sandbox.health_check(&container_name) {
             SandboxHealth::Healthy => return Ok(task),
             SandboxHealth::Stopped => {
@@ -846,7 +859,9 @@ fn find_or_spawn_for_cron(
                 }
             }
             status => {
-                eprintln!("[cron] Container {container_name} for {repo_path} is {status:?}, trying next");
+                eprintln!(
+                    "[cron] Container {container_name} for {repo_path} is {status:?}, trying next"
+                );
             }
         }
     }
@@ -857,7 +872,10 @@ fn find_or_spawn_for_cron(
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or(repo_path);
-    let _ = telegram::send(config, &format!("⚙️ Spawning sandbox for '{repo_label}' (cron trigger)…"));
+    let _ = telegram::send(
+        config,
+        &format!("⚙️ Spawning sandbox for '{repo_label}' (cron trigger)…"),
+    );
 
     let new_task_id = crate::cmd_sandbox_spawn(
         db,
@@ -888,7 +906,10 @@ fn check_and_run_cron_jobs(db: &Database, config: &TelegramConfig) -> Result<()>
             .and_then(|n| n.to_str())
             .unwrap_or(&job.repo_path)
             .to_string();
-        eprintln!("[cron] Job {} ('{}') due for repo {}", job_id, label, repo_label);
+        eprintln!(
+            "[cron] Job {} ('{}') due for repo {}",
+            job_id, label, repo_label
+        );
 
         // Auto-disable if the job has expired.
         if let Some(exp) = job.expires_at {
@@ -897,14 +918,20 @@ fn check_and_run_cron_jobs(db: &Database, config: &TelegramConfig) -> Result<()>
                 let mut expired_job = job.clone();
                 expired_job.enabled = false;
                 let _ = db.update_cron_job(&expired_job);
-                let _ = telegram::send(config, &format!("⏹️ Cron job '{label}' expired and has been disabled."));
+                let _ = telegram::send(
+                    config,
+                    &format!("⏹️ Cron job '{label}' expired and has been disabled."),
+                );
                 continue;
             }
         }
 
         // Skip if a previous execution is still in-flight.
         if job.skip_if_running && job.running {
-            let _ = telegram::send(config, &format!("⏭️ Cron job '{label}' skipped: previous run still in progress"));
+            let _ = telegram::send(
+                config,
+                &format!("⏭️ Cron job '{label}' skipped: previous run still in progress"),
+            );
             eprintln!("[cron] Job {job_id} skipped (running flag set)");
             continue;
         }
@@ -928,9 +955,12 @@ fn check_and_run_cron_jobs(db: &Database, config: &TelegramConfig) -> Result<()>
         } else {
             job.prompt.clone()
         };
-        let _ = telegram::send(config, &format!(
+        let _ = telegram::send(
+            config,
+            &format!(
             "🕐 Cron job '{label}' starting\n📁 Repo: {repo_label}\n📝 Prompt: {prompt_preview}"
-        ));
+        ),
+        );
 
         // Dispatch to background thread: find-or-spawn sandbox, then inject.
         let db_path = crate::db::default_db_path();
@@ -952,7 +982,10 @@ fn check_and_run_cron_jobs(db: &Database, config: &TelegramConfig) -> Result<()>
                 Ok(t) => t,
                 Err(e) => {
                     eprintln!("[cron] Job {job_id} failed to find/spawn sandbox: {e:#}");
-                    let _ = telegram::send(&config_clone, &format!("❌ Cron job '{label}' failed: {e:#}"));
+                    let _ = telegram::send(
+                        &config_clone,
+                        &format!("❌ Cron job '{label}' failed: {e:#}"),
+                    );
                     let _ = db.set_cron_job_running(job_id, false);
                     return;
                 }
@@ -962,7 +995,14 @@ fn check_and_run_cron_jobs(db: &Database, config: &TelegramConfig) -> Result<()>
             let messages_before = db.bot_message_count_for_task(&task.task_id).unwrap_or(0);
             let task_id_clone = task.task_id.clone();
 
-            inject_with_heartbeat(&task, &prompt_clone, &config_clone, &task_id_clone, &db_path, messages_before);
+            inject_with_heartbeat(
+                &task,
+                &prompt_clone,
+                &config_clone,
+                &task_id_clone,
+                &db_path,
+                messages_before,
+            );
 
             // Clear the running flag when the injection finishes.
             if let Ok(db2) = Database::open(&db_path) {
@@ -1000,28 +1040,48 @@ mod tests {
 
     #[test]
     fn test_correct_id_and_username() {
-        assert!(is_authorised(&cfg("123", "adlrocha"), 123, Some("adlrocha")));
+        assert!(is_authorised(
+            &cfg("123", "adlrocha"),
+            123,
+            Some("adlrocha")
+        ));
     }
 
     #[test]
     fn test_correct_id_wrong_username_rejected() {
-        assert!(!is_authorised(&cfg("123", "adlrocha"), 123, Some("attacker")));
+        assert!(!is_authorised(
+            &cfg("123", "adlrocha"),
+            123,
+            Some("attacker")
+        ));
     }
 
     #[test]
     fn test_at_prefix_stripped_from_config() {
         // Stored as "@adlrocha" in config but should still match sender "adlrocha"
-        assert!(is_authorised(&cfg("123", "@adlrocha"), 123, Some("adlrocha")));
+        assert!(is_authorised(
+            &cfg("123", "@adlrocha"),
+            123,
+            Some("adlrocha")
+        ));
     }
 
     #[test]
     fn test_at_prefix_stripped_from_sender() {
-        assert!(is_authorised(&cfg("123", "adlrocha"), 123, Some("@adlrocha")));
+        assert!(is_authorised(
+            &cfg("123", "adlrocha"),
+            123,
+            Some("@adlrocha")
+        ));
     }
 
     #[test]
     fn test_username_check_case_insensitive() {
-        assert!(is_authorised(&cfg("123", "AdlRocha"), 123, Some("adlrocha")));
+        assert!(is_authorised(
+            &cfg("123", "AdlRocha"),
+            123,
+            Some("adlrocha")
+        ));
     }
 
     #[test]

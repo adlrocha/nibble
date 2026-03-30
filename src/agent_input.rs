@@ -22,7 +22,9 @@ use crate::sandbox::{ContainerStatus, Sandbox};
 /// supported.  Returns an error for any other task type.
 pub fn inject(task: &Task, message: &str) -> Result<()> {
     let mut child = inject_returning_child(task, message)?;
-    child.wait().context("podman exec inject did not exit cleanly")?;
+    child
+        .wait()
+        .context("podman exec inject did not exit cleanly")?;
     Ok(())
 }
 
@@ -58,7 +60,10 @@ pub fn check_container_health(container_id: &str) -> Result<()> {
     match sandbox.status(container_id) {
         Ok(ContainerStatus::Running) => Ok(()),
         Ok(ContainerStatus::Stopped) => {
-            bail!("Container is stopped — restart it with `agent-sandbox resume {}`", &container_id[..container_id.len().min(8)])
+            bail!(
+                "Container is stopped — restart it with `agent-sandbox resume {}`",
+                &container_id[..container_id.len().min(8)]
+            )
         }
         Ok(ContainerStatus::Paused) => {
             bail!("Container is paused — unpause it first")
@@ -79,7 +84,12 @@ pub fn check_container_health(container_id: &str) -> Result<()> {
 ///
 /// Run `claude --continue` inside the container with the message on stdin.
 /// Returns the child process handle.
-fn spawn_inject(container_id: &str, _session_id: Option<&str>, task_id: &str, message: &str) -> Result<std::process::Child> {
+fn spawn_inject(
+    container_id: &str,
+    _session_id: Option<&str>,
+    task_id: &str,
+    message: &str,
+) -> Result<std::process::Child> {
     let claude = "/home/node/.local/bin/claude";
 
     // AGENT_TASK_ID must be set so the Stop/SessionEnd hooks inside the
@@ -88,12 +98,18 @@ fn spawn_inject(container_id: &str, _session_id: Option<&str>, task_id: &str, me
 
     let mut child = std::process::Command::new("podman")
         .args([
-            "exec", "-i",
-            "-e", "TERM=xterm-256color",
-            "-e", "PATH=/home/node/.local/bin:/usr/local/bin:/usr/bin:/bin",
-            "-e", "CLAUDE_CONFIG_DIR=/home/node/.claude",
-            "-e", agent_task_id_env.as_str(),
-            "-w", "/workspace",
+            "exec",
+            "-i",
+            "-e",
+            "TERM=xterm-256color",
+            "-e",
+            "PATH=/home/node/.local/bin:/usr/local/bin:/usr/bin:/bin",
+            "-e",
+            "CLAUDE_CONFIG_DIR=/home/node/.claude",
+            "-e",
+            agent_task_id_env.as_str(),
+            "-w",
+            "/workspace",
             container_id,
             claude,
             "--continue",
@@ -115,7 +131,6 @@ fn spawn_inject(container_id: &str, _session_id: Option<&str>, task_id: &str, me
 
     Ok(child)
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -144,14 +159,21 @@ mod tests {
     fn test_inject_fails_for_non_sandbox_task() {
         let task = make_non_sandbox_task();
         let err = inject(&task, "hello").unwrap_err().to_string();
-        assert!(err.contains("only supported for Podman-sandboxed tasks"), "got: {err}");
+        assert!(
+            err.contains("only supported for Podman-sandboxed tasks"),
+            "got: {err}"
+        );
     }
 
     #[test]
     fn test_inject_returning_child_fails_for_non_sandbox_task() {
         let task = make_non_sandbox_task();
-        let err = inject_returning_child(&task, "hello").unwrap_err().to_string();
-        assert!(err.contains("only supported for Podman-sandboxed tasks"), "got: {err}");
+        let err = inject_returning_child(&task, "hello")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("only supported for Podman-sandboxed tasks"),
+            "got: {err}"
+        );
     }
-
 }

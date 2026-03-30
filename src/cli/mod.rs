@@ -76,7 +76,6 @@ pub enum Commands {
     },
 
     // ── Sandbox subcommands ────────────────────────────────────────────────────
-
     /// Manage sandboxed agent containers
     Sandbox {
         #[command(subcommand)]

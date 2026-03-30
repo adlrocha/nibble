@@ -120,9 +120,7 @@ pub trait Sandbox: Send + Sync {
 #[allow(dead_code)]
 pub fn get_sandbox(sandbox_type: SandboxType) -> Result<Box<dyn Sandbox>> {
     match sandbox_type {
-        SandboxType::None => Err(anyhow::anyhow!(
-            "No sandbox implementation for type 'none'"
-        )),
+        SandboxType::None => Err(anyhow::anyhow!("No sandbox implementation for type 'none'")),
         SandboxType::Podman => Ok(Box::new(podman::PodmanSandbox::new())),
     }
 }
@@ -166,7 +164,10 @@ mod tests {
     fn test_sandbox_type_deserialization() {
         use std::str::FromStr;
         assert_eq!(SandboxType::from_str("none").unwrap(), SandboxType::None);
-        assert_eq!(SandboxType::from_str("podman").unwrap(), SandboxType::Podman);
+        assert_eq!(
+            SandboxType::from_str("podman").unwrap(),
+            SandboxType::Podman
+        );
         assert!(SandboxType::from_str("invalid").is_err());
     }
 

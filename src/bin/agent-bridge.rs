@@ -1,9 +1,9 @@
 //! Native messaging host for browser extension.
 //! Receives task updates from extension and writes to nibble database.
 
+use anyhow::{Context, Result};
 use nibble::db::{default_db_path, Database};
 use nibble::models::{Task, TaskContext, TaskStatus};
-use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};

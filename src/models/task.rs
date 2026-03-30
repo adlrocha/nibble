@@ -342,11 +342,20 @@ mod tests {
 
     #[test]
     fn test_status_deserialization() {
-        assert_eq!(TaskStatus::from_str("running").unwrap(), TaskStatus::Running);
-        assert_eq!(TaskStatus::from_str("completed").unwrap(), TaskStatus::Completed);
+        assert_eq!(
+            TaskStatus::from_str("running").unwrap(),
+            TaskStatus::Running
+        );
+        assert_eq!(
+            TaskStatus::from_str("completed").unwrap(),
+            TaskStatus::Completed
+        );
         assert_eq!(TaskStatus::from_str("exited").unwrap(), TaskStatus::Exited);
         // Legacy support
-        assert_eq!(TaskStatus::from_str("needs_attention").unwrap(), TaskStatus::Completed);
+        assert_eq!(
+            TaskStatus::from_str("needs_attention").unwrap(),
+            TaskStatus::Completed
+        );
         assert_eq!(TaskStatus::from_str("failed").unwrap(), TaskStatus::Exited);
         assert!(TaskStatus::from_str("invalid").is_err());
     }

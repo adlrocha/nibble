@@ -138,15 +138,18 @@ CMD ["bash"]
         for (name, container_path) in caches {
             let host_path = cache_base.join(name);
             std::fs::create_dir_all(&host_path)?;
-            volumes.push((host_path.to_string_lossy().to_string(), container_path.to_string()));
+            volumes.push((
+                host_path.to_string_lossy().to_string(),
+                container_path.to_string(),
+            ));
         }
 
         Ok(volumes)
     }
 
     fn parse_container_status(&self, json_str: &str) -> Result<ContainerStatus> {
-        let json: serde_json::Value = serde_json::from_str(json_str)
-            .context("Failed to parse container inspect output")?;
+        let json: serde_json::Value =
+            serde_json::from_str(json_str).context("Failed to parse container inspect output")?;
 
         let state = json
             .get(0)
@@ -164,8 +167,8 @@ CMD ["bash"]
     }
 
     fn parse_container_info(&self, json_str: &str) -> Result<ContainerInfo> {
-        let json: serde_json::Value = serde_json::from_str(json_str)
-            .context("Failed to parse container inspect output")?;
+        let json: serde_json::Value =
+            serde_json::from_str(json_str).context("Failed to parse container inspect output")?;
 
         let container = json.get(0).context("Empty inspect output")?;
 
@@ -341,7 +344,10 @@ impl Sandbox for PodmanSandbox {
         // duplicating the global hooks already in ~/.claude/settings.json.
         let repo_claude_settings = repo_abs.join(".claude").join("settings.json");
         if repo_claude_settings.exists() {
-            let empty_settings_path = home_dir.join(".agent-tasks").join("cache").join("empty-claude-settings.json");
+            let empty_settings_path = home_dir
+                .join(".agent-tasks")
+                .join("cache")
+                .join("empty-claude-settings.json");
             if let Some(parent) = empty_settings_path.parent() {
                 std::fs::create_dir_all(parent).ok();
             }
@@ -369,13 +375,14 @@ impl Sandbox for PodmanSandbox {
         // the container's glibc version. Fall back to the host binary.
         let musl_bin = home_dir.join(".local/bin/nibble-musl");
         let host_bin = home_dir.join(".local/bin/nibble");
-        let nibble_bin = if musl_bin.exists() { musl_bin } else { host_bin };
+        let nibble_bin = if musl_bin.exists() {
+            musl_bin
+        } else {
+            host_bin
+        };
         if nibble_bin.exists() {
             args.push("-v".to_string());
-            args.push(format!(
-                "{}:/usr/local/bin/nibble:ro",
-                nibble_bin.display()
-            ));
+            args.push(format!("{}:/usr/local/bin/nibble:ro", nibble_bin.display()));
         }
 
         // Mount nibble config (Telegram token etc.) so hooks can send notifications.
@@ -419,9 +426,8 @@ impl Sandbox for PodmanSandbox {
             .output()
             .context("Failed to inspect container")?;
 
-        let info = self.parse_container_info(
-            String::from_utf8_lossy(&inspect_output.stdout).as_ref(),
-        )?;
+        let info =
+            self.parse_container_info(String::from_utf8_lossy(&inspect_output.stdout).as_ref())?;
 
         println!(
             "Container '{}' started (ID: {})",
@@ -509,13 +515,11 @@ impl Sandbox for PodmanSandbox {
             if name.is_empty() {
                 continue;
             }
-            let inspect_output = Command::new("podman")
-                .args(["inspect", name])
-                .output()?;
+            let inspect_output = Command::new("podman").args(["inspect", name]).output()?;
             if inspect_output.status.success() {
-                if let Ok(info) = self.parse_container_info(
-                    String::from_utf8_lossy(&inspect_output.stdout).as_ref(),
-                ) {
+                if let Ok(info) = self
+                    .parse_container_info(String::from_utf8_lossy(&inspect_output.stdout).as_ref())
+                {
                     containers.push(info);
                 }
             }
