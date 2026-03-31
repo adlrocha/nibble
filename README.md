@@ -107,11 +107,10 @@ nibble sandbox spawn /path/to/repo --task "Fix the authentication bug"
 # Spawn without attaching (run in background)
 nibble sandbox spawn /path/to/repo --task "Fix the authentication bug"
 
-# Build/refresh the sandbox image only (no agent)
-nibble sandbox build
 ```
 
 On first run the sandbox image is built (~2-3 min). Subsequent spawns are fast.
+To rebuild the image (e.g. after upgrading nibble): `./install.sh --rebuild`
 
 The container gets:
 - Your repo mounted read-write at `/workspace`
@@ -473,7 +472,7 @@ Network is host-mode, so services started inside the container (e.g. `npm run de
 | `nibble sandbox resume --all` | Resume agents after reboot |
 | `nibble sandbox gc <id>` | Delete old session history, keep latest |
 | `nibble sandbox gc <id> --all` | Wipe all session history |
-| `nibble sandbox build` | Rebuild sandbox image |
+| `./install.sh --rebuild` | Rebuild sandbox image |
 | `nibble cron add` | Schedule a prompt |
 | `nibble cron list` | List cron jobs |
 | `nibble cron edit <id>` | Modify a cron job |

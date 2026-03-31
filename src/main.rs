@@ -347,9 +347,10 @@ fn main() -> Result<()> {
                     image,
                     fresh,
                     session_id,
-                    false,
-                    false,
-                    false,
+                    false, // no_attach
+                    false, // kimi
+                    false, // glm
+                    false, // opencode — spawn is always Claude-centric
                 )?;
             }
             SandboxAction::List => {
@@ -361,6 +362,7 @@ fn main() -> Result<()> {
                 btw,
                 kimi,
                 glm,
+                opencode,
                 branch,
             } => {
                 // If --branch is given, resolve the worktree path (creating it if needed)
@@ -375,7 +377,7 @@ fn main() -> Result<()> {
 
                 match resolve_sandbox_id(&db, &effective_path) {
                     Ok(task_id) => {
-                        cmd_sandbox_attach(&db, task_id, fresh, btw, kimi, glm)?;
+                        cmd_sandbox_attach(&db, task_id, fresh, btw, kimi, glm, opencode)?;
                     }
                     Err(e) => {
                         // If the input looks like a repo path and no sandbox exists,
@@ -394,12 +396,13 @@ fn main() -> Result<()> {
                                 None, // task_desc
                                 "nibble-sandbox:latest".to_string(),
                                 fresh,
-                                None,  // session_id
-                                false, // no_attach - we will attach below
-                                kimi,  // pass through kimi flag
-                                glm,   // pass through glm flag
+                                None, // session_id
+                                true, // no_attach — we attach below with the correct flags
+                                kimi,
+                                glm,
+                                opencode,
                             )?;
-                            cmd_sandbox_attach(&db, task_id, fresh, btw, kimi, glm)?;
+                            cmd_sandbox_attach(&db, task_id, fresh, btw, kimi, glm, opencode)?;
                         } else {
                             return Err(e);
                         }
@@ -812,6 +815,7 @@ pub(crate) fn cmd_sandbox_spawn(
     no_attach: bool,
     kimi: bool,
     glm: bool,
+    opencode: bool,
 ) -> Result<String> {
     let repo = PathBuf::from(&repo_path);
     if !repo.exists() {
@@ -847,7 +851,15 @@ pub(crate) fn cmd_sandbox_spawn(
                         eprintln!("Attach with:");
                         eprintln!("  nibble sandbox attach {}", abs_repo_path_early);
                     } else {
-                        cmd_sandbox_attach(db, existing_task_id.clone(), fresh, false, kimi, glm)?;
+                        cmd_sandbox_attach(
+                            db,
+                            existing_task_id.clone(),
+                            fresh,
+                            false,
+                            kimi,
+                            glm,
+                            opencode,
+                        )?;
                     }
                     return Ok(existing_task_id);
                 }
@@ -1040,13 +1052,17 @@ pub(crate) fn cmd_sandbox_spawn(
         println!("After a system reboot, restart stopped containers with:");
         println!("  nibble sandbox resume --all");
     } else {
-        println!("Attaching to Claude session (exit to detach — container keeps running)…");
+        let agent_label = if opencode { "opencode" } else { "Claude" };
+        println!(
+            "Attaching to {} session (exit to detach — container keeps running)…",
+            agent_label
+        );
         println!(
             "  Re-attach later: nibble sandbox attach {}  (or by path: {})",
             short_id, abs_repo_path
         );
         println!();
-        cmd_sandbox_attach(db, task_id.clone(), fresh, false, kimi, glm)?;
+        cmd_sandbox_attach(db, task_id.clone(), fresh, false, kimi, glm, opencode)?;
     }
 
     Ok(task_id)
@@ -1557,6 +1573,7 @@ fn cmd_sandbox_attach(
     btw: bool,
     kimi: bool,
     glm: bool,
+    opencode: bool,
 ) -> Result<()> {
     let task = db
         .get_task_by_id(&task_id)?
@@ -1577,52 +1594,81 @@ fn cmd_sandbox_attach(
         _ => anyhow::bail!("Container {} is not running", container_id),
     }
 
-    let claude = "/home/node/.local/bin/claude --dangerously-skip-permissions";
-
-    // Resolve the session ID to use (stable across attach calls).
-    let session_id = task.context.as_ref().and_then(|c| c.session_id.as_deref());
-
-    // --fresh: delete the .jsonl for the current session so Claude starts with a
-    // blank slate while still using the same UUID. The UUID stays stable so
-    // Telegram injection keeps working without any DB changes.
-    if fresh && !btw {
-        if let Some(sid) = session_id {
-            backup_session_file(sid);
-            eprintln!(
-                "  Session:   {} — previous history backed up, starting fresh",
-                &sid[..8.min(sid.len())]
+    // Validate flag combinations before doing anything.
+    if opencode {
+        if btw {
+            anyhow::bail!(
+                "--btw is not supported with --opencode (throwaway sessions require Claude Code hooks)"
             );
-        } else {
-            eprintln!("  Session:   no stored session, starting fresh");
+        }
+        if kimi {
+            anyhow::bail!(
+                "--kimi is not supported with --opencode (Kimi backend routing requires Claude Code)"
+            );
+        }
+        if glm {
+            anyhow::bail!(
+                "--glm is not supported with --opencode (GLM backend routing requires Claude Code)"
+            );
         }
     }
 
-    // Build the shell command that runs inside the container.
-    //
-    // Normal attach:
-    //  1. Try --resume <sid> to load existing history for this repo.
-    //  2. Fall back to --session-id <sid> which pins the UUID without requiring
-    //     an existing file — Claude creates a new session under that exact UUID.
-    //  We never fall back to bare `claude` or `claude --continue` because those
-    //  would resume the most-recent session across ALL repos (cross-repo contamination).
-    //
-    // --btw (throwaway) session:
-    //  Start a completely independent session with a fresh random UUID so it
-    //  never touches the main session's history. The Stop hook is not injected
-    //  (AGENT_TASK_ID is omitted) so the main task's stored session_id is untouched.
-    let shell_cmd = if btw {
-        // Fresh throwaway: let Claude generate its own UUID (no --session-id).
-        // Use --continue to avoid the "resume last session?" prompt, which would
-        // otherwise pull in the most-recent session. Starting bare is fine here
-        // because the container's most-recent session IS the main one — we want
-        // a completely new session, so we pass a random UUID via --session-id.
-        let throwaway_id = uuid::Uuid::new_v4();
-        format!("cd /workspace && {claude} --session-id {throwaway_id}")
-    } else if let Some(sid) = session_id {
-        format!("cd /workspace && {claude} --resume {sid} 2>&1 || {claude} --session-id {sid}")
+    // Resolve the session ID stored for this task (set by the Claude Stop hook).
+    let session_id = task.context.as_ref().and_then(|c| c.session_id.as_deref());
+
+    let shell_cmd = if opencode {
+        // opencode mode: session resume via --session <id>, or bare opencode for
+        // a fresh start. Hooks / AGENT_TASK_ID are not used — Telegram integration
+        // is Claude Code-only for now.
+        let opencode = "/home/node/.opencode/bin/opencode";
+        if fresh {
+            eprintln!("  Session:   starting fresh opencode session");
+            format!("cd /workspace && {opencode}")
+        } else if let Some(sid) = session_id {
+            format!("cd /workspace && {opencode} --session {sid}")
+        } else {
+            format!("cd /workspace && {opencode}")
+        }
     } else {
-        // No session ID stored yet — start fresh; the Stop hook will record the UUID.
-        format!("cd /workspace && {claude}")
+        let claude = "/home/node/.local/bin/claude --dangerously-skip-permissions";
+
+        // --fresh: delete the .jsonl for the current session so Claude starts with a
+        // blank slate while still using the same UUID. The UUID stays stable so
+        // Telegram injection keeps working without any DB changes.
+        if fresh && !btw {
+            if let Some(sid) = session_id {
+                backup_session_file(sid);
+                eprintln!(
+                    "  Session:   {} — previous history backed up, starting fresh",
+                    &sid[..8.min(sid.len())]
+                );
+            } else {
+                eprintln!("  Session:   no stored session, starting fresh");
+            }
+        }
+
+        // Build the shell command that runs inside the container.
+        //
+        // Normal attach:
+        //  1. Try --resume <sid> to load existing history for this repo.
+        //  2. Fall back to --session-id <sid> which pins the UUID without requiring
+        //     an existing file — Claude creates a new session under that exact UUID.
+        //  We never fall back to bare `claude` or `claude --continue` because those
+        //  would resume the most-recent session across ALL repos (cross-repo contamination).
+        //
+        // --btw (throwaway) session:
+        //  Start a completely independent session with a fresh random UUID so it
+        //  never touches the main session's history. The Stop hook is not injected
+        //  (AGENT_TASK_ID is omitted) so the main task's stored session_id is untouched.
+        if btw {
+            let throwaway_id = uuid::Uuid::new_v4();
+            format!("cd /workspace && {claude} --session-id {throwaway_id}")
+        } else if let Some(sid) = session_id {
+            format!("cd /workspace && {claude} --resume {sid} 2>&1 || {claude} --session-id {sid}")
+        } else {
+            // No session ID stored yet — start fresh; the Stop hook will record the UUID.
+            format!("cd /workspace && {claude}")
+        }
     };
 
     // Build podman exec args, injecting Kimi credentials if requested.
@@ -1642,7 +1688,8 @@ fn cmd_sandbox_attach(
     // --btw sessions are throwaway: omit AGENT_TASK_ID so the Stop/SessionEnd
     // hooks inside the container no-op and don't overwrite the main task's
     // stored session_id.
-    if !btw {
+    // opencode sessions never set AGENT_TASK_ID — hooks are Claude Code-only.
+    if !btw && !opencode {
         podman_args.extend(["-e".into(), format!("AGENT_TASK_ID={}", task_id)]);
     }
 
@@ -1693,7 +1740,13 @@ fn cmd_sandbox_attach(
         shell_cmd,
     ]);
 
-    if btw {
+    if opencode {
+        eprintln!(
+            "Attaching to sandbox {} ({}) [opencode]…",
+            task.title, container_id
+        );
+        eprintln!("(Exit opencode or press Ctrl+C to detach — the container keeps running)");
+    } else if btw {
         eprintln!(
             "Attaching to sandbox {} ({}) [btw — throwaway session]…",
             task.title, container_id
@@ -2191,7 +2244,7 @@ fn detect_toolchains(
         (
             "Cargo.toml",
             "Rust",
-            "cargo build",
+            "cargo build  # rustup + cargo pre-installed by .nibble/setup.sh; binary at ~/.cargo/bin/cargo",
             "cargo run / cargo test",
         ),
         (
@@ -2322,6 +2375,7 @@ fn build_sandbox_claude_md(repo_name: &str, toolchains: &[(&str, &str, &str)]) -
         "- Prefer making small, focused changes and running tests after each one".to_string(),
     );
     lines.push("- The container persists between sessions — installed packages and build artifacts are retained".to_string());
+    lines.push("- Both `claude` and `opencode` are available in this container if you need to spin up a nested agent session".to_string());
     lines.push("- When you finish a task, summarise what you did clearly so the notification sent to the user is informative".to_string());
 
     format!(

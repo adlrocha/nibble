@@ -106,8 +106,11 @@ USER node
 # Install Claude Code via the official installer (installs to ~/.local/bin/claude)
 RUN curl -fsSL https://claude.ai/install.sh | bash
 
-# Add ~/.local/bin to PATH so `claude` is found at runtime
-ENV PATH=/home/node/.local/bin:/usr/local/bin:$PATH
+# Install opencode via the official installer
+RUN curl -fsSL https://opencode.ai/install | bash
+
+# Add ~/.local/bin (claude) and ~/.opencode/bin (opencode) to PATH
+ENV PATH=/home/node/.local/bin:/home/node/.opencode/bin:/usr/local/bin:$PATH
 
 CMD ["bash"]
 "#
@@ -383,6 +386,17 @@ impl Sandbox for PodmanSandbox {
         if nibble_bin.exists() {
             args.push("-v".to_string());
             args.push(format!("{}:/usr/local/bin/nibble:ro", nibble_bin.display()));
+        }
+
+        // Mount opencode config so `attach --opencode` opens with the host's
+        // auth tokens and provider settings already in place.
+        let opencode_config_dir = home_dir.join(".config").join("opencode");
+        if opencode_config_dir.exists() {
+            args.push("-v".to_string());
+            args.push(format!(
+                "{}:/home/node/.config/opencode:rw",
+                opencode_config_dir.display()
+            ));
         }
 
         // Mount nibble config (Telegram token etc.) so hooks can send notifications.

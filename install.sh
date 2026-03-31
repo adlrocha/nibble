@@ -26,15 +26,23 @@ die()  { echo -e "  ${RED}✗${NC} $1" >&2; exit 1; }
 # ── Parse flags ───────────────────────────────────────────────────────────────
 RUN_TELEGRAM=false
 RUN_LISTEN=false
+REBUILD_IMAGE=false
 for arg in "$@"; do
     case "$arg" in
         --telegram) RUN_TELEGRAM=true ;;
         --listen)   RUN_LISTEN=true ;;
+        --rebuild)  REBUILD_IMAGE=true ;;
         *) die "Unknown argument: $arg" ;;
     esac
 done
 
 echo -e "${BOLD}=== Nibble — Install / Upgrade ===${NC}"
+echo ""
+echo "  Flags: --telegram  set up Telegram notifications"
+echo "         --listen    set up Telegram reply listener daemon"
+echo "         --rebuild   force rebuild the sandbox container image"
+echo ""
+[ "$REBUILD_IMAGE" = true ] && echo -e "  ${YELLOW}--rebuild${NC}: sandbox image will be rebuilt from scratch"
 
 # ── 1. Prerequisites ──────────────────────────────────────────────────────────
 step "Checking prerequisites"
@@ -141,11 +149,9 @@ fi
 # ── 4. Install wrappers ───────────────────────────────────────────────────────
 step "Installing wrappers to $WRAPPERS_DIR"
 
-cp "$REPO_DIR/wrappers/claude-wrapper"   "$WRAPPERS_DIR/claude-wrapper"
-cp "$REPO_DIR/wrappers/opencode-wrapper" "$WRAPPERS_DIR/opencode-wrapper"
-chmod +x "$WRAPPERS_DIR/claude-wrapper" "$WRAPPERS_DIR/opencode-wrapper"
+cp "$REPO_DIR/wrappers/claude-wrapper" "$WRAPPERS_DIR/claude-wrapper"
+chmod +x "$WRAPPERS_DIR/claude-wrapper"
 ok "claude-wrapper"
-ok "opencode-wrapper"
 
 # Check shell aliases
 SHELL_RC=""
@@ -154,8 +160,7 @@ SHELL_RC=""
 
 if [ -n "$SHELL_RC" ]; then
     MISSING_ALIASES=()
-    grep -q "agent-tasks/wrappers/claude-wrapper"   "$SHELL_RC" 2>/dev/null || MISSING_ALIASES+=("claude")
-    grep -q "agent-tasks/wrappers/opencode-wrapper" "$SHELL_RC" 2>/dev/null || MISSING_ALIASES+=("opencode")
+    grep -q "agent-tasks/wrappers/claude-wrapper" "$SHELL_RC" 2>/dev/null || MISSING_ALIASES+=("claude")
 
     if [ ${#MISSING_ALIASES[@]} -eq 0 ]; then
         ok "Shell aliases already in $SHELL_RC"
@@ -169,17 +174,19 @@ if [ -n "$SHELL_RC" ]; then
 else
     warn "Could not detect shell RC. Add aliases manually:"
     warn "  alias claude='$WRAPPERS_DIR/claude-wrapper'"
-    warn "  alias opencode='$WRAPPERS_DIR/opencode-wrapper'"
 fi
 
 # ── 5. Sandbox image ─────────────────────────────────────────────────────────
-step "Building sandbox image (node:20-slim + claude-code)"
+step "Building sandbox image (node:20-slim + claude-code + opencode)"
 
-if nibble sandbox build 2>/dev/null; then
+SANDBOX_BUILD_ARGS=""
+[ "$REBUILD_IMAGE" = true ] && SANDBOX_BUILD_ARGS="--rebuild"
+
+if "$BIN_DIR/nibble" sandbox build $SANDBOX_BUILD_ARGS; then
     ok "Sandbox image ready: nibble-sandbox:latest"
 else
-    warn "Sandbox image build failed or nibble not yet in PATH."
-    warn "Run after install:  nibble sandbox build"
+    warn "Sandbox image build failed."
+    warn "Retry with: ./install.sh --rebuild"
 fi
 
 # ── 5a. Install systemd auto-resume service ───────────────────────────────────
@@ -267,6 +274,8 @@ echo -e "${BOLD}Sandbox usage:${NC}"
 echo "  Start agent:  nibble sandbox spawn /path/to/repo"
 echo "  List agents:  nibble sandbox list"
 echo "  Attach:       nibble sandbox attach <task-id>"
+echo "  Attach (oc):  nibble sandbox attach <task-id> --opencode"
 echo "  Kill agent:   nibble sandbox kill <task-id>"
 echo "  Watch:        nibble watch"
+echo "  Rebuild img:  ./install.sh --rebuild"
 echo ""

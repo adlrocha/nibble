@@ -161,6 +161,9 @@ pub enum SandboxAction {
         /// Use GLM as the LLM backend (reads GLM_BASE_URL and GLM_API_KEY from host env)
         #[arg(long)]
         glm: bool,
+        /// Use opencode instead of Claude Code as the coding agent
+        #[arg(long)]
+        opencode: bool,
         /// Create a git worktree for this branch and spawn+attach a sandbox for it.
         /// The worktree is created at <repo_parent>/<repo_name>--<branch-slug>.
         /// The branch is auto-created from the repo's current HEAD if it doesn't exist.
@@ -200,12 +203,11 @@ pub enum SandboxAction {
         all: bool,
     },
 
-    /// Build or rebuild the sandbox base image
+    /// Build or rebuild the sandbox base image (called by install.sh — use ./install.sh --rebuild)
+    #[command(hide = true)]
     Build {
-        /// Image name/tag to build
         #[arg(long, default_value = "nibble-sandbox:latest")]
         image: String,
-        /// Force a clean rebuild from scratch
         #[arg(long)]
         rebuild: bool,
     },

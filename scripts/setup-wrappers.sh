@@ -92,17 +92,6 @@ else
     echo "    Install Claude Code and re-run this script to enable tracking."
 fi
 
-# OpenCode
-if check_agent "opencode"; then
-    OPENCODE_ORIGINAL=$(which opencode)
-    if [ -n "$OPENCODE_ORIGINAL" ]; then
-        ln -sf "$OPENCODE_ORIGINAL" "$WRAPPER_DIR/opencode.original" 2>/dev/null || true
-        add_alias "opencode"
-    fi
-else
-    echo "  ⚠ 'opencode' not found in PATH. Skipping wrapper setup."
-    echo "    Install OpenCode and re-run this script to enable tracking."
-fi
 
 echo ""
 echo "============================================"
@@ -118,9 +107,6 @@ echo ""
 echo "Wrapped agents:"
 if check_agent "claude"; then
     echo "  • claude (Claude Code)"
-fi
-if check_agent "opencode"; then
-    echo "  • opencode (OpenCode)"
 fi
 echo ""
 echo "Test it:"

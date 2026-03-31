@@ -507,6 +507,7 @@ fn handle_spawn_command(
             true,  // no_attach — background thread, do not exec into tty
             false, // kimi — Telegram spawn doesn't support Kimi backend
             false, // glm  — Telegram spawn doesn't support GLM backend
+            false, // opencode — Telegram-spawned sandboxes use Claude Code
         ) {
             Ok(task_id) => {
                 let msg = format!(
@@ -887,6 +888,7 @@ fn find_or_spawn_for_cron(
         true,  // no_attach
         false, // kimi
         false, // glm
+        false, // opencode — cron-spawned sandboxes use Claude Code
     )?;
 
     db.get_task_by_id(&new_task_id)?
