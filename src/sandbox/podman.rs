@@ -388,14 +388,24 @@ impl Sandbox for PodmanSandbox {
             args.push(format!("{}:/usr/local/bin/nibble:ro", nibble_bin.display()));
         }
 
-        // Mount opencode config so `attach --opencode` opens with the host's
-        // auth tokens and provider settings already in place.
+        // Mount opencode config + data so `attach --opencode` opens with the
+        // host's auth tokens and provider settings already in place.
+        // ~/.config/opencode — config, provider settings, auth tokens
+        // ~/.local/share/opencode — opencode.db (SQLite with auth + sessions)
         let opencode_config_dir = home_dir.join(".config").join("opencode");
         if opencode_config_dir.exists() {
             args.push("-v".to_string());
             args.push(format!(
                 "{}:/home/node/.config/opencode:rw",
                 opencode_config_dir.display()
+            ));
+        }
+        let opencode_data_dir = home_dir.join(".local").join("share").join("opencode");
+        if opencode_data_dir.exists() {
+            args.push("-v".to_string());
+            args.push(format!(
+                "{}:/home/node/.local/share/opencode:rw",
+                opencode_data_dir.display()
             ));
         }
 

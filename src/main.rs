@@ -1036,6 +1036,22 @@ pub(crate) fn cmd_sandbox_spawn(
     println!("  Repo:      {}", abs_repo_path);
     println!();
 
+    // Warn if loginctl linger is not enabled — without it, rootless Podman
+    // containers with --restart=always are NOT automatically restarted after
+    // a system reboot (the user's systemd session is simply not started).
+    let linger_ok = std::process::Command::new("loginctl")
+        .args(["show-user", "--property=Linger"])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("Linger=yes"))
+        .unwrap_or(false);
+    if !linger_ok {
+        eprintln!("  ⚠️  loginctl linger is not enabled for your user.");
+        eprintln!("     Without it, Podman containers won't auto-restart after a reboot.");
+        eprintln!("     Enable it with:  loginctl enable-linger");
+        eprintln!();
+    }
+
     if no_attach {
         println!("Attach to the Claude session:");
         println!(
@@ -2132,31 +2148,40 @@ pub(crate) fn prune_stale_tasks(db: &Database) -> Result<usize> {
                         "[prune] Sandbox {} stopped → attempting restart",
                         container_name
                     );
-                    match sandbox.start(container_name) {
-                        Ok(())
-                            if sandbox.health_check(container_name) == SandboxHealth::Healthy =>
-                        {
-                            eprintln!("[prune] Sandbox {} restarted successfully", container_name);
-                            if let Ok(Some(mut task)) = db.get_task_by_id(task_id) {
-                                if task.status != TaskStatus::Running {
-                                    task.set_running();
-                                    let _ = db.update_task(&task);
-                                }
+                    let restarted = match sandbox.start(container_name) {
+                        Ok(()) => {
+                            // Give the container a moment to fully start before
+                            // health-checking — avoids a false "failed" due to a
+                            // race between `podman start` and the container being
+                            // ready to accept `exec` commands.
+                            std::thread::sleep(std::time::Duration::from_secs(2));
+                            sandbox.health_check(container_name) == SandboxHealth::Healthy
+                        }
+                        Err(_) => false,
+                    };
+                    if restarted {
+                        eprintln!("[prune] Sandbox {} restarted successfully", container_name);
+                        if let Ok(Some(mut task)) = db.get_task_by_id(task_id) {
+                            if task.status != TaskStatus::Running {
+                                task.set_running();
+                                let _ = db.update_task(&task);
                             }
                         }
-                        _ => {
-                            // Start failed or not healthy after start — clean up.
-                            let _ = db.delete_container_state(task_id);
-                            if let Ok(Some(mut task)) = db.get_task_by_id(task_id) {
+                    } else {
+                        // Could not restart right now (e.g. podman socket not yet
+                        // ready after boot). Keep the container_state record so the
+                        // next prune cycle can try again. Only update task status.
+                        if let Ok(Some(mut task)) = db.get_task_by_id(task_id) {
+                            if task.status == TaskStatus::Running {
                                 task.set_exited(None);
                                 let _ = db.update_task(&task);
                                 pruned += 1;
                             }
-                            eprintln!(
-                                "[prune] Sandbox {} failed to restart → cleaned up",
-                                container_name
-                            );
                         }
+                        eprintln!(
+                            "[prune] Sandbox {} could not be restarted — will retry next cycle",
+                            container_name
+                        );
                     }
                 }
                 SandboxHealth::Dead => {
@@ -2188,7 +2213,9 @@ pub(crate) fn prune_stale_tasks(db: &Database) -> Result<usize> {
                     }
                 }
                 SandboxHealth::Degraded => {
-                    // Container alive but exec fails — update DB only, no notification.
+                    // Container alive but exec fails — update task status only.
+                    // Keep the container_state record so `nibble list` still shows
+                    // it and the user can investigate or kill it explicitly.
                     if let Ok(Some(mut task)) = db.get_task_by_id(task_id) {
                         if task.status == TaskStatus::Running {
                             task.set_exited(None);
@@ -2201,8 +2228,6 @@ pub(crate) fn prune_stale_tasks(db: &Database) -> Result<usize> {
                             pruned += 1;
                         }
                     }
-                    // Also clean up container_state so it doesn't keep appearing as degraded.
-                    let _ = db.delete_container_state(task_id);
                 }
             }
         }
