@@ -508,6 +508,7 @@ fn handle_spawn_command(
             false, // kimi — Telegram spawn doesn't support Kimi backend
             false, // glm  — Telegram spawn doesn't support GLM backend
             false, // opencode — Telegram-spawned sandboxes use Claude Code
+            false, // factory — disabled for Telegram spawns (one-off interactions; trigger manually if needed)
         ) {
             Ok(task_id) => {
                 let msg = format!(
@@ -878,6 +879,7 @@ fn find_or_spawn_for_cron(
         &format!("⚙️ Spawning sandbox for '{repo_label}' (cron trigger)…"),
     );
 
+    let cfg = crate::config::load().unwrap_or_default();
     let new_task_id = crate::cmd_sandbox_spawn(
         db,
         repo_path.to_string(),
@@ -889,6 +891,7 @@ fn find_or_spawn_for_cron(
         false, // kimi
         false, // glm
         false, // opencode — cron-spawned sandboxes use Claude Code
+        cfg.factory.enabled,
     )?;
 
     db.get_task_by_id(&new_task_id)?

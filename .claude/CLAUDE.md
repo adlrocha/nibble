@@ -1,3 +1,4 @@
+@../AGENTS.md
 <!-- nibble:begin -->
 # Agent Inbox Sandbox
 
@@ -20,11 +21,4 @@ The following dependency manifests were detected. Install dependencies before ru
 - **Run/test:** `cargo run / cargo test`
 
 Always install dependencies before attempting to build, run, or test the project. If a command fails due to missing tools, install them with `sudo apt-get install <package>` or the appropriate package manager.
-
-## Important notes
-
-- Prefer making small, focused changes and running tests after each one
-- The container persists between sessions — installed packages and build artifacts are retained
-- Both `claude` and `opencode` are available in this container if you need to spin up a nested agent session
-- When you finish a task, summarise what you did clearly so the notification sent to the user is informative
 <!-- nibble:end -->

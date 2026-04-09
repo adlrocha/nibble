@@ -333,6 +333,7 @@ fn main() -> Result<()> {
                 fresh,
                 session_id,
                 branch,
+                factory,
             } => {
                 let effective_repo_path = if let Some(ref branch_name) = branch {
                     let worktree = create_worktree(std::path::Path::new(&repo_path), branch_name)?;
@@ -340,6 +341,8 @@ fn main() -> Result<()> {
                 } else {
                     repo_path
                 };
+                let cfg = config::load().unwrap_or_default();
+                let factory_enabled = factory.unwrap_or(cfg.factory.enabled);
                 cmd_sandbox_spawn(
                     &db,
                     effective_repo_path,
@@ -351,6 +354,7 @@ fn main() -> Result<()> {
                     false, // kimi
                     false, // glm
                     false, // opencode — spawn is always Claude-centric
+                    factory_enabled,
                 )?;
             }
             SandboxAction::List => {
@@ -390,6 +394,7 @@ fn main() -> Result<()> {
 
                         if looks_like_path {
                             eprintln!("No sandbox found for '{}', spawning one...", effective_path);
+                            let cfg = config::load().unwrap_or_default();
                             let task_id = cmd_sandbox_spawn(
                                 &db,
                                 effective_path,
@@ -401,6 +406,7 @@ fn main() -> Result<()> {
                                 kimi,
                                 glm,
                                 opencode,
+                                cfg.factory.enabled,
                             )?;
                             cmd_sandbox_attach(&db, task_id, fresh, btw, kimi, glm, opencode)?;
                         } else {
@@ -816,6 +822,7 @@ pub(crate) fn cmd_sandbox_spawn(
     kimi: bool,
     glm: bool,
     opencode: bool,
+    factory_enabled: bool,
 ) -> Result<String> {
     let repo = PathBuf::from(&repo_path);
     if !repo.exists() {
@@ -949,23 +956,25 @@ pub(crate) fn cmd_sandbox_spawn(
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
         .unwrap_or_else(|| repo_path.clone());
 
-    // Detect project toolchains and write a CLAUDE.md into the container so
-    // Claude knows it is in a sandbox and how to install/run the project.
+    // Detect project toolchains and write AGENTS.md + CLAUDE.md into the
+    // container so the agent knows it is in a sandbox and how to set up the
+    // project.  AGENTS.md is the primary instruction file (read by both
+    // OpenCode and Claude Code); CLAUDE.md contains only the @AGENTS.md import.
     let toolchains = detect_toolchains(&repo);
-    let claude_md = build_sandbox_claude_md(&repo_name, &toolchains);
-    match inject_sandbox_claude_md(&info.id, &claude_md) {
+    let agents_md = build_sandbox_agents_md(&repo_name, &toolchains, factory_enabled);
+    match inject_sandbox_claude_md(&info.id, &agents_md) {
         Ok(()) => {
             if toolchains.is_empty() {
-                println!("  Context:   CLAUDE.md written (no toolchain detected)");
+                println!("  Context:   AGENTS.md + CLAUDE.md written (no toolchain detected)");
             } else {
                 let names: Vec<&str> = toolchains.iter().map(|(e, _, _)| *e).collect();
                 println!(
-                    "  Context:   CLAUDE.md written (detected: {})",
+                    "  Context:   AGENTS.md + CLAUDE.md written (detected: {})",
                     names.join(", ")
                 );
             }
         }
-        Err(e) => eprintln!("  Warning:   Could not write CLAUDE.md: {e:#}"),
+        Err(e) => eprintln!("  Warning:   Could not write AGENTS.md/CLAUDE.md: {e:#}"),
     }
 
     let title = task_desc.unwrap_or_else(|| format!("[{}:sandbox]", repo_name));
@@ -2338,135 +2347,251 @@ fn detect_toolchains(
     results
 }
 
-const CLAUDE_MD_BEGIN: &str = "<!-- nibble:begin -->";
-const CLAUDE_MD_END: &str = "<!-- nibble:end -->";
-
-/// Build the sandbox CLAUDE.md section that tells Claude it is running inside
-/// an isolated container and how to set up the project toolchain.
+/// Build the AGENTS.md content written to `/workspace/AGENTS.md` inside the
+/// container.  This is the **primary** agent instruction file — OpenCode reads
+/// it natively and Claude Code reads it via the `@AGENTS.md` import in CLAUDE.md.
 ///
-/// The returned string is wrapped in delimiters so `inject_sandbox_claude_md`
-/// can replace it in-place without touching any user-written content.
-fn build_sandbox_claude_md(repo_name: &str, toolchains: &[(&str, &str, &str)]) -> String {
-    let mut lines = vec![
-        "# Agent Inbox Sandbox".to_string(),
+/// The content covers sandbox environment, toolchain setup, and (when factory is
+/// enabled) the full AI Factory pipeline instructions.
+fn build_sandbox_agents_md(
+    repo_name: &str,
+    toolchains: &[(&str, &str, &str)],
+    factory_enabled: bool,
+) -> String {
+    let mut lines: Vec<String> = vec![
+        "# nibble Sandbox Agent Instructions".to_string(),
         String::new(),
         format!(
-            "You are running inside an isolated Podman sandbox container for the **{}** project.",
+            "You are running inside an isolated Podman sandbox managed by **nibble** for the **{}** project. \
+             This file contains all instructions for how to operate inside this environment. \
+             Read it fully before starting any task.",
             repo_name
         ),
         String::new(),
         "## Environment".to_string(),
         String::new(),
-        "- Working directory: `/workspace` (the project repo, mounted read-write)".to_string(),
-        "- You have full `sudo` access — install any system package with `apt-get install`".to_string(),
-        "- Ports are forwarded to the host: services on `localhost:3000`, `:8080`, etc. are reachable from outside".to_string(),
-        "- Internet access is available".to_string(),
-        "- Git is configured with the host user's identity and SSH keys".to_string(),
+        "- **Working directory**: `/workspace` (the project repo, mounted read-write)".to_string(),
+        "- **Full sudo access**: install any system package with `apt-get install`".to_string(),
+        "- **Ports forwarded** to the host: services on `localhost:3000`, `:8080`, etc. are reachable from outside".to_string(),
+        "- **Internet access** is available".to_string(),
+        "- **Git** is configured with the host user's identity and SSH keys".to_string(),
+        "- Both `claude` and `opencode` are available if you need a nested agent session".to_string(),
         String::new(),
     ];
 
+    lines.push("## Toolchain Setup".to_string());
+    lines.push(String::new());
+    lines.push(
+        "Project dependencies are installed automatically at sandbox spawn via `.nibble/setup.sh` \
+         if that script exists. By the time you receive a task, dependencies should already be \
+         built and ready."
+            .to_string(),
+    );
+    lines.push(String::new());
+    lines.push(
+        "- If `.nibble/setup.sh` **exists**: it was already run at spawn — do not re-run it unless \
+         something is broken. If you need a new system dependency or build step, update the \
+         script and run it manually once, then commit the change."
+            .to_string(),
+    );
+    lines.push(
+        "- If `.nibble/setup.sh` **does not exist**: dependencies won't be pre-installed. Check \
+         for manifest files below and install them yourself. Create (or ask to create) \
+         `.nibble/setup.sh` so future spawns are automatic."
+            .to_string(),
+    );
+    lines.push(String::new());
+
     if toolchains.is_empty() {
-        lines.push("## Toolchain".to_string());
-        lines.push(String::new());
         lines.push("No recognised dependency manifest was found in the repo root.".to_string());
         lines.push("Inspect the project structure and install any required tools before running or testing.".to_string());
     } else {
-        lines.push("## Toolchain".to_string());
+        lines.push("The following dependency manifests were detected:".to_string());
         lines.push(String::new());
-        lines.push(
-            "The following dependency manifests were detected. \
-             Install dependencies before running or testing the project:"
-                .to_string(),
-        );
-        lines.push(String::new());
+        lines.push("| Manifest | Install command | Run/test |".to_string());
+        lines.push("|----------|----------------|----------|".to_string());
         for (ecosystem, install_cmd, run_hint) in toolchains {
-            lines.push(format!("### {}", ecosystem));
-            lines.push(format!("- **Install:** `{}`", install_cmd));
-            lines.push(format!("- **Run/test:** `{}`", run_hint));
-            lines.push(String::new());
+            lines.push(format!(
+                "| {} | `{}` | `{}` |",
+                ecosystem, install_cmd, run_hint
+            ));
         }
+        lines.push(String::new());
         lines.push(
-            "Always install dependencies before attempting to build, run, or test the project. \
-             If a command fails due to missing tools, install them with `sudo apt-get install <package>` \
-             or the appropriate package manager."
+            "If a command fails due to missing system tools, install them with \
+             `sudo apt-get install <package>`."
                 .to_string(),
         );
     }
 
     lines.push(String::new());
-    lines.push("## Important notes".to_string());
+    lines.push("## General Working Principles".to_string());
     lines.push(String::new());
-    lines.push(
-        "- Prefer making small, focused changes and running tests after each one".to_string(),
-    );
+    lines.push("- Make small, focused changes and run tests after each one".to_string());
     lines.push("- The container persists between sessions — installed packages and build artifacts are retained".to_string());
-    lines.push("- Both `claude` and `opencode` are available in this container if you need to spin up a nested agent session".to_string());
     lines.push("- When you finish a task, summarise what you did clearly so the notification sent to the user is informative".to_string());
+    lines.push("- Ask before making changes outside the project's stated scope".to_string());
 
-    format!(
-        "{}\n{}\n{}",
-        CLAUDE_MD_BEGIN,
-        lines.join("\n"),
-        CLAUDE_MD_END
-    )
+    if factory_enabled {
+        lines.push(String::new());
+        lines.push("## Skills & Lessons".to_string());
+        lines.push(String::new());
+        lines.push(
+            "Factory pipeline skills (`factory-spec`, `factory-implement`, etc.) and the lessons-learned \
+             log are stored on the **host** at `~/.claude/skills/` and bind-mounted into every sandbox \
+             at `/home/node/.claude/skills/`. This means:"
+                .to_string(),
+        );
+        lines.push(String::new());
+        lines.push(
+            "- Skills and lessons updates made inside a sandbox are immediately visible on the host and \
+             in all other sandboxes — they share the same directory."
+                .to_string(),
+        );
+        lines.push(
+            "- To persist a lessons-learned update, edit the skill file directly (e.g. \
+             `~/.claude/skills/factory-lessons/SKILL.md`). No restart or re-injection needed."
+                .to_string(),
+        );
+        lines.push(
+            "- The host `install.sh` re-installs skills from the nibble repo to `~/.claude/skills/` \
+             whenever you update them in source. Run it after editing skills in the repo."
+                .to_string(),
+        );
+    }
+
+    if factory_enabled {
+        lines.push(String::new());
+        lines.push("<!-- nibble:global:begin -->".to_string());
+        lines.push("## AI Factory Pipeline".to_string());
+        lines.push(String::new());
+        lines.push("When factory is enabled, every **non-trivial** coding task follows this pipeline. This is mandatory.".to_string());
+        lines.push(String::new());
+        lines.push("```".to_string());
+        lines.push(
+            " SPEC  ──▶  IMPLEMENT  ──▶   TDD    ──▶  ADVERSARIAL ──▶  RISK SCORE  ──▶  QA GATE"
+                .to_string(),
+        );
+        lines.push(
+            "(Blueprint)  (Synthesis)    (DV)        (Red Team)       (Analysis)       (Tape-out)"
+                .to_string(),
+        );
+        lines.push("```".to_string());
+        lines.push(String::new());
+        lines.push("### When to run the pipeline".to_string());
+        lines.push(String::new());
+        lines.push("**Run the full pipeline for:**".to_string());
+        lines.push("- New features or significant new functionality".to_string());
+        lines.push("- Changes to public interfaces or APIs".to_string());
+        lines.push("- Security-sensitive code (auth, secrets, payments)".to_string());
+        lines.push("- Complex business logic".to_string());
+        lines.push("- Database schema changes".to_string());
+        lines.push(String::new());
+        lines.push("**Skip the pipeline (confirm with human first) for:**".to_string());
+        lines.push("- Typo fixes or comment updates".to_string());
+        lines.push("- Trivial config tweaks (single-value changes)".to_string());
+        lines.push("- Pure formatting / linting fixes".to_string());
+        lines.push("- Documentation-only changes".to_string());
+        lines.push(String::new());
+        lines.push("### How to run each stage".to_string());
+        lines.push(String::new());
+        lines.push("Load the skill for each stage before executing it. Skills are available via the skill tool:".to_string());
+        lines.push(String::new());
+        lines.push("- **Pipeline overview**: load skill `factory-pipeline`".to_string());
+        lines.push("- **Stage 0 — Spec**: load skill `factory-spec`".to_string());
+        lines.push("- **Stage 1 — Implement**: load skill `factory-implement`".to_string());
+        lines.push("- **Stage 2 — TDD**: load skill `factory-tdd`".to_string());
+        lines.push("- **Stage 3 — Adversarial**: load skill `factory-adversarial`".to_string());
+        lines.push("- **Stage 4 — Risk Score**: load skill `factory-risk-score`".to_string());
+        lines.push("- **Stage 5 — QA Gate**: load skill `factory-qa-gate`".to_string());
+        lines.push(
+            "- **Lessons learned** (read at every stage start): load skill `factory-lessons`"
+                .to_string(),
+        );
+        lines.push(String::new());
+        lines.push("### Artifact locations".to_string());
+        lines.push(String::new());
+        lines.push("```".to_string());
+        lines.push(".nibble/".to_string());
+        lines.push("  factory/".to_string());
+        lines.push("    blueprints/          # Feature specs (one file per feature)".to_string());
+        lines.push("    reports/".to_string());
+        lines.push("      adversarial/       # Red team findings per feature".to_string());
+        lines.push("      risk/              # Risk score tables per feature".to_string());
+        lines.push("      qa/                # QA gate decisions per feature".to_string());
+        lines.push("```".to_string());
+        lines.push(String::new());
+        lines.push("### QA Gate behaviour".to_string());
+        lines.push(String::new());
+        lines.push(
+            "The QA Gate is an interactive pause. Do not auto-approve. Present each Critical and \
+             High risk item one at a time. Wait for the human to say `approve`, `reject`, or \
+             `request changes` before proceeding to the next item."
+                .to_string(),
+        );
+        lines.push(String::new());
+        lines.push("### Lessons learned".to_string());
+        lines.push(String::new());
+        lines.push(
+            "The lessons-learned log accumulates pipeline wisdom over time. **Read it at the start \
+             of every stage** (load `factory-lessons`). Append new entries whenever something slips \
+             through a stage that an earlier stage should have caught."
+                .to_string(),
+        );
+        lines.push("<!-- nibble:global:end -->".to_string());
+    }
+
+    lines.join("\n")
 }
 
-/// Write the sandbox section of `.claude/CLAUDE.md` inside the container.
+/// Write `AGENTS.md` and `.claude/CLAUDE.md` inside the container.
 ///
-/// - If the file does not exist, it is created with just the generated block.
-/// - If the file exists and already contains the nibble delimiters, only
-///   the block between them is replaced — any user-written content outside the
-///   markers is preserved verbatim.
-/// - If the file exists but has no delimiters (user wrote it by hand), the
-///   generated block is appended so Claude sees both.
-fn inject_sandbox_claude_md(container_id: &str, content: &str) -> Result<()> {
-    // Write the new content to a temp file first, then use a small python
-    // script inside the container to do the marker-aware merge.  Python is
-    // available in the node:20-slim image (via apt), but we can't rely on it.
-    // Instead we do everything with bash + awk, which is always present.
-    //
-    // The awk script removes everything between the markers (inclusive) and
-    // inserts the new block in their place.  If no markers exist it appends.
-    let escaped = content.replace('\'', "'\\''"); // escape single quotes for bash
+/// **AGENTS.md** (`/workspace/AGENTS.md`) is the primary instruction file:
+/// - OpenCode reads it natively
+/// - Claude Code reads it via the `@AGENTS.md` import in CLAUDE.md
+///
+/// **CLAUDE.md** (`/workspace/.claude/CLAUDE.md`):
+/// - Contains only `@AGENTS.md` as the first line
+/// - If the file already exists with `@AGENTS.md` at line 1, it is left untouched
+/// - If `@AGENTS.md` is missing from line 1, it is prepended — user content below is preserved
+fn inject_sandbox_claude_md(container_id: &str, agents_content: &str) -> Result<()> {
+    let escaped_agents = agents_content.replace('\'', "'\\''");
 
     let script = format!(
         r#"set -e
 mkdir -p /workspace/.claude
+
+# ── Write AGENTS.md (primary instruction file for OpenCode + Claude Code) ──────
+printf '%s\n' '{agents}' > /workspace/AGENTS.md
+
+# ── Update .claude/CLAUDE.md (Claude Code entrypoint) ─────────────────────────
 TARGET=/workspace/.claude/CLAUDE.md
-NEW_BLOCK='{escaped}'
-BEGIN='{begin}'
-END='{end}'
+IMPORT_LINE='@AGENTS.md'
 
 if [ ! -f "$TARGET" ]; then
-    printf '%s\n' "$NEW_BLOCK" > "$TARGET"
+    printf '%s\n' "$IMPORT_LINE" > "$TARGET"
 else
-    # Check if markers already exist in the file.
-    if grep -qF "$BEGIN" "$TARGET" 2>/dev/null; then
-        # Replace the block between markers (inclusive) with the new content.
-        awk -v new="$NEW_BLOCK" -v begin="$BEGIN" -v end="$END" '
-            BEGIN {{ skip=0 }}
-            index($0, begin) {{ skip=1; print new; next }}
-            skip && index($0, end) {{ skip=0; next }}
-            !skip {{ print }}
-        ' "$TARGET" > "$TARGET.tmp" && mv "$TARGET.tmp" "$TARGET"
-    else
-        # No markers — append the new block separated by a blank line.
-        printf '\n%s\n' "$NEW_BLOCK" >> "$TARGET"
+    # Ensure @AGENTS.md is present as the very first line.
+    # Checking only the first line (via head -1) prevents a false match when
+    # "@AGENTS.md" appears in the file body (e.g. inside a comment or example).
+    if ! head -1 "$TARGET" | grep -qF "$IMPORT_LINE" 2>/dev/null; then
+        TMP=$(mktemp)
+        printf '%s\n' "$IMPORT_LINE" > "$TMP"
+        cat "$TARGET" >> "$TMP"
+        mv "$TMP" "$TARGET"
     fi
 fi"#,
-        escaped = escaped,
-        begin = CLAUDE_MD_BEGIN,
-        end = CLAUDE_MD_END,
+        agents = escaped_agents,
     );
 
     let output = std::process::Command::new("podman")
         .args(["exec", container_id, "/bin/bash", "-c", &script])
         .output()
-        .context("Failed to write CLAUDE.md into container")?;
+        .context("Failed to write AGENTS.md / CLAUDE.md into container")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Writing CLAUDE.md failed: {}", stderr.trim());
+        anyhow::bail!("Writing AGENTS.md/CLAUDE.md failed: {}", stderr.trim());
     }
 
     Ok(())
@@ -2721,5 +2846,101 @@ mod notification_tests {
         let text = build_notification_text(&db, None, "need permission", true).unwrap();
         assert!(text.contains('🚨'));
         assert!(text.contains("need permission"));
+    }
+
+    // ── build_sandbox_agents_md tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_agents_md_factory_enabled_contains_pipeline() {
+        let out = build_sandbox_agents_md("myrepo", &[], true);
+        assert!(
+            out.contains("AI Factory Pipeline"),
+            "factory section missing when factory_enabled=true"
+        );
+        assert!(
+            out.contains("factory-spec"),
+            "stage skills should be listed"
+        );
+        assert!(out.contains("QA Gate"), "QA Gate mention should be present");
+    }
+
+    #[test]
+    fn test_agents_md_factory_disabled_no_pipeline() {
+        let out = build_sandbox_agents_md("myrepo", &[], false);
+        assert!(
+            !out.contains("AI Factory Pipeline"),
+            "factory section must be absent when factory_enabled=false"
+        );
+        assert!(
+            !out.contains("factory-spec"),
+            "stage skills must not appear when disabled"
+        );
+    }
+
+    #[test]
+    fn test_agents_md_contains_repo_name() {
+        let out = build_sandbox_agents_md("my-cool-project", &[], false);
+        assert!(
+            out.contains("my-cool-project"),
+            "repo name should appear in AGENTS.md header"
+        );
+    }
+
+    #[test]
+    fn test_agents_md_toolchain_table_present() {
+        let toolchains = [("Rust", "cargo build", "cargo test")];
+        let out = build_sandbox_agents_md("proj", &toolchains, false);
+        assert!(
+            out.contains("cargo build"),
+            "install command should be in toolchain table"
+        );
+        assert!(
+            out.contains("cargo test"),
+            "run hint should be in toolchain table"
+        );
+    }
+
+    #[test]
+    fn test_agents_md_no_toolchain_fallback_message() {
+        let out = build_sandbox_agents_md("proj", &[], false);
+        assert!(
+            out.contains("No recognised dependency manifest"),
+            "should show fallback message when no toolchain detected"
+        );
+    }
+
+    // ── CLAUDE.md content tests ───────────────────────────────────────────────
+    // CLAUDE.md is now just "@AGENTS.md" — all content lives in AGENTS.md.
+    // These tests verify that the agents_md produced for factory-enabled sandboxes
+    // contains the information that used to live in the nibble delimiter block.
+
+    #[test]
+    fn test_agents_md_contains_toolchain_info() {
+        // Toolchain info must be in AGENTS.md (not duplicated in a CLAUDE.md block)
+        let toolchains = [("Node.js", "npm install", "npm test")];
+        let out = build_sandbox_agents_md("proj", &toolchains, false);
+        assert!(
+            out.contains("npm install"),
+            "toolchain install command must be in AGENTS.md"
+        );
+        assert!(
+            out.contains("npm test"),
+            "toolchain run hint must be in AGENTS.md"
+        );
+    }
+
+    #[test]
+    fn test_agents_md_is_single_source_of_truth() {
+        // AGENTS.md must contain the repo name and environment info —
+        // everything Claude Code needs is here, imported via @AGENTS.md in CLAUDE.md
+        let out = build_sandbox_agents_md("my-cool-project", &[], false);
+        assert!(
+            out.contains("my-cool-project"),
+            "repo name must appear in AGENTS.md"
+        );
+        assert!(
+            out.contains("Working directory"),
+            "environment section must be present"
+        );
     }
 }

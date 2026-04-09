@@ -9,6 +9,32 @@ use std::path::PathBuf;
 pub struct Config {
     #[serde(default)]
     pub telegram: TelegramConfig,
+
+    #[serde(default)]
+    pub factory: FactoryConfig,
+}
+
+/// AI Factory pipeline configuration.
+///
+/// When enabled, every sandboxed agent follows the structured development pipeline:
+/// Spec → Implement → TDD → Adversarial → Risk Score → QA Gate.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FactoryConfig {
+    /// Whether the AI Factory pipeline is enabled for new sandboxes.
+    #[serde(default = "default_factory_enabled")]
+    pub enabled: bool,
+}
+
+fn default_factory_enabled() -> bool {
+    true
+}
+
+impl Default for FactoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_factory_enabled(),
+        }
+    }
 }
 
 /// Telegram bot notification settings.
@@ -158,5 +184,41 @@ allowed_username = "adlrocha"
     fn test_parse_empty_toml() {
         let config: Config = toml::from_str("").unwrap();
         assert!(!config.telegram.is_configured());
+    }
+
+    #[test]
+    fn test_factory_default_enabled() {
+        let config = Config::default();
+        assert!(config.factory.enabled);
+    }
+
+    #[test]
+    fn test_parse_toml_with_factory_enabled() {
+        let toml_str = r#"
+[factory]
+enabled = true
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.factory.enabled);
+    }
+
+    #[test]
+    fn test_parse_toml_with_factory_disabled() {
+        let toml_str = r#"
+[factory]
+enabled = false
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(!config.factory.enabled);
+    }
+
+    #[test]
+    fn test_parse_toml_factory_absent_defaults_enabled() {
+        let toml_str = r#"
+[telegram]
+enabled = false
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.factory.enabled);
     }
 }

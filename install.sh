@@ -153,6 +153,32 @@ cp "$REPO_DIR/wrappers/claude-wrapper" "$WRAPPERS_DIR/claude-wrapper"
 chmod +x "$WRAPPERS_DIR/claude-wrapper"
 ok "claude-wrapper"
 
+# ── 4a. Install AI Factory skills ─────────────────────────────────────────────
+# Skills are installed to ~/.claude/skills/<name>/SKILL.md — this path is
+# discovered automatically by both Claude Code and OpenCode (compat mode).
+CLAUDE_SKILLS_DIR="$HOME/.claude/skills"
+mkdir -p "$CLAUDE_SKILLS_DIR"
+
+for skill_dir in "$REPO_DIR/skills"/factory-*/; do
+    skill_name="$(basename "$skill_dir")"
+    dest="$CLAUDE_SKILLS_DIR/$skill_name"
+    mkdir -p "$dest"
+    cp "$skill_dir/SKILL.md" "$dest/SKILL.md"
+    ok "skill: $skill_name → $dest/"
+done
+
+# ── 4b. Install global AGENTS.md for OpenCode ─────────────────────────────────
+# OpenCode loads ~/.config/opencode/AGENTS.md for every project as a global
+# system prompt.  We extract only the section between <!-- nibble:global:begin -->
+# and <!-- nibble:global:end --> from AGENTS.md — that contains the factory
+# pipeline instructions without the sandbox-specific environment/toolchain blocks
+# that only apply inside nibble containers.
+OPENCODE_CONFIG_DIR="$HOME/.config/opencode"
+mkdir -p "$OPENCODE_CONFIG_DIR"
+awk '/<!-- nibble:global:begin -->/{found=1; next} /<!-- nibble:global:end -->/{found=0; next} found' \
+    "$REPO_DIR/AGENTS.md" > "$OPENCODE_CONFIG_DIR/AGENTS.md"
+ok "global AGENTS.md → $OPENCODE_CONFIG_DIR/AGENTS.md (extracted from AGENTS.md)"
+
 # Check shell aliases
 SHELL_RC=""
 [ -f "$HOME/.zshrc" ]  && SHELL_RC="$HOME/.zshrc"
