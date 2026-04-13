@@ -72,71 +72,31 @@ the snippet here or open the file. Never leave them guessing.
 
 ### 3. Present Summary First
 
-Before showing individual items, give the human a brief summary:
+Before showing individual items, give the human a one-block overview:
 
 ```
-═══════════════════════════════════════════════
-  QA GATE: <Feature Name>
-═══════════════════════════════════════════════
-
-  Pipeline status:
-  ✓ Spec        — Blueprint complete
-  ✓ Implement   — Code compiles, lint passes
-  ✓ TDD         — All tests green, coverage OK
-  ✓ Adversarial — 3 findings (1 resolved, 2 accepted risk)
-  ✓ Risk Score  — 12 functions scored
-
-  Review required: 3 sections (1 Critical, 2 High)
-  Estimated review time: ~5 minutes
-
-  Say "proceed" to review items one by one, or
-  "approve all" to accept everything.
-═══════════════════════════════════════════════
+QA GATE: <Feature Name>
+  ✓ Spec / ✓ Implement / ✓ TDD / ✓ Adversarial (<N> findings) / ✓ Risk Score (<N> functions)
+  Review required: <N> sections (<N> Critical, <N> High)
+  Say "proceed" to review one by one, or "approve all" to accept everything.
 ```
 
 ### 4. Present Items One by One
 
+For each item (highest risk first):
+
 ```
-───────────────────────────────────────────────
-  Review Item 1 of 3
-───────────────────────────────────────────────
+Review Item N of M  —  <FunctionName>  (<File>:<Lines>)  Risk: <score>/25 (<Level>)
 
-  Function: processPayment
-  Location: src/pay.ts:42-89
-  Risk: 20/25 (High)
+Why flagged: <bullet per high-scoring dimension>
+Adversarial findings: <FIND-N: one-line description, status> (or "none")
+What to verify: <numbered, concrete, actionable questions>
+<code per Code Presentation Rule>
 
-  Why flagged:
-  • Handles payment processing (Security: 5/5)
-  • Complex error recovery (Error Handling: 4/5)
-  • External service dependency (Dependency: 5/5)
-
-  Adversarial finding FIND-3 (Unresolved — High):
-  • Password not hashed before API call
-  • Evidence: credentials.password passed raw on line 67
-  • Fix: hash with bcrypt before send, or confirm API handles it
-
-  What to verify:
-  1. Is credentials.password ever logged? (lines 50-55)
-  2. Does the catch block on line 78 leak payment details in the error message?
-  3. Is the retry loop (lines 60-75) bounded to prevent infinite retries?
-
-  Code (src/pay.ts:42-58):           ← short section: inlined
-  ─────────────────────────────────────────────
-  42 | export function processPayment(
-  43 |   amount: number,
-  44 |   credentials: PaymentCredentials,
-  45 | ): Promise<PaymentResult> {
-  46 |   const response = await fetch('/api/pay', {
-  47 |     body: JSON.stringify({ amount, ...credentials }),
-  ...
-  58 | }
-  ─────────────────────────────────────────────
-
-  Actions: approve | reject | request changes
-───────────────────────────────────────────────
+Actions: approve | reject | request changes
 ```
 
-Wait for the human's response before proceeding to the next item.
+Wait for the human's response before proceeding.
 
 ### 5. Handle Human Responses
 
@@ -220,19 +180,16 @@ Write the QA decisions to `.nibble/factory/reports/qa/YYYY-MM-DD_<feature>.md`:
 
 | # | Function | Risk | Decision | Notes |
 |---|----------|------|----------|-------|
-| 1 | processPayment | High | Approved | Accepted risk on FIND-3 |
-| 2 | validateInput | High | Changes Requested | Add null check |
-| 3 | formatReceipt | Critical | Approved | — |
+| 1 | <fn> | <level> | <Approved/Changes/Rejected> | <note or —> |
 
 ## Change Requests
 
-### CR-1: validateInput — Add null check
-- **Requested by**: Human
-- **Description**: Add null check for `credentials` parameter
+### CR-1: <FunctionName> — <short description>
+- **Description**: <what to change>
 - **Status**: Implemented / Pending
 
 ## Unresolved Items
-None / List any rejected items
+None / <list rejected items>
 ```
 
 ### 7. Final Pipeline Report

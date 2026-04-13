@@ -119,7 +119,26 @@ If the feature integrates with external systems (DB, API, filesystem):
 - Test with mocks/stubs if the real dependency is slow or flaky
 - Verify the integration contract matches the blueprint's interface definition
 
-### 7. Run and Fix
+### 7. Smoke Test (Optional but Recommended)
+
+Before declaring tests complete, exercise the feature as a user would — not just via unit
+tests but by actually running the program. This catches integration failures that unit
+tests miss (wrong config, missing env var, serialization mismatch, startup crash).
+
+Skip this step only if running the program is not feasible (e.g. embedded system, no
+runtime in CI, feature is a pure library with no entry point). If skipped, note why.
+
+```
+# Examples:
+cargo run -- sandbox spawn my-repo          # CLI feature
+curl localhost:3000/api/health              # HTTP endpoint
+python -c "from mylib import foo; foo()"   # Library entrypoint
+```
+
+Smoke test does not need to be exhaustive — one happy-path invocation that proves the
+feature runs end-to-end is sufficient.
+
+### 8. Run and Fix
 
 Run all tests:
 
@@ -129,7 +148,7 @@ Run all tests:
    - Bug in test (wrong expectation) → Fix the test
    - Bug in spec → Document the discrepancy, fix whichever is wrong
 
-### 8. Check Coverage
+### 9. Check Coverage
 
 Run the coverage tool for your language/framework. Ensure:
 - New code meets the coverage targets
@@ -137,7 +156,7 @@ Run the coverage tool for your language/framework. Ensure:
 - Every invariant is tested
 - No dead code (unreachable paths)
 
-### 9. Check Lessons Learned
+### 10. Check Lessons Learned
 
 Load `factory-lessons` for known testing gaps and verify they're covered.
 

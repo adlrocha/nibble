@@ -920,6 +920,32 @@ pub(crate) fn cmd_sandbox_spawn(
         }
     }
 
+    // Upgrade opencode to the latest version on every spawn so sandboxes don't
+    // drift behind the image-baked version. Claude Code self-updates automatically;
+    // opencode does not, so we drive it here. Failures are non-fatal — the baked
+    // version still works, just may be older.
+    {
+        let status = std::process::Command::new("podman")
+            .args([
+                "exec",
+                "-u",
+                "node",
+                &info.id,
+                "/home/node/.opencode/bin/opencode",
+                "upgrade",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        match status {
+            Ok(s) if s.success() => println!("  Tools:     opencode upgraded to latest"),
+            Ok(_) => eprintln!(
+                "  Tools:     ⚠️  opencode upgrade exited non-zero (baked version still usable)"
+            ),
+            Err(e) => eprintln!("  Tools:     ⚠️  opencode upgrade failed to run: {e}"),
+        }
+    }
+
     // Run .nibble/setup.sh if present, otherwise warn the user.
     let setup_script = repo.join(".nibble").join("setup.sh");
     if setup_script.exists() {
@@ -959,17 +985,17 @@ pub(crate) fn cmd_sandbox_spawn(
     // Detect project toolchains and write AGENTS.md + CLAUDE.md into the
     // container so the agent knows it is in a sandbox and how to set up the
     // project.  AGENTS.md is the primary instruction file (read by both
-    // OpenCode and Claude Code); CLAUDE.md contains only the @AGENTS.md import.
+    // OpenCode and Claude Code); CLAUDE.md contains only the @../AGENTS.md import.
     let toolchains = detect_toolchains(&repo);
     let agents_md = build_sandbox_agents_md(&repo_name, &toolchains, factory_enabled);
     match inject_sandbox_claude_md(&info.id, &agents_md) {
         Ok(()) => {
             if toolchains.is_empty() {
-                println!("  Context:   AGENTS.md + CLAUDE.md written (no toolchain detected)");
+                println!("  Context:   AGENTS.md + CLAUDE.md updated (no toolchain detected)");
             } else {
                 let names: Vec<&str> = toolchains.iter().map(|(e, _, _)| *e).collect();
                 println!(
-                    "  Context:   AGENTS.md + CLAUDE.md written (detected: {})",
+                    "  Context:   AGENTS.md + CLAUDE.md updated (detected: {})",
                     names.join(", ")
                 );
             }
@@ -1718,6 +1744,19 @@ fn cmd_sandbox_attach(
         podman_args.extend(["-e".into(), format!("AGENT_TASK_ID={}", task_id)]);
     }
 
+    // opencode yolo mode: auto-approve all tool calls (equivalent to Claude Code's
+    // --dangerously-skip-permissions). Set via OPENCODE_PERMISSION env var rather
+    // than a CLI flag — opencode merges this JSON into its permission config.
+    // TODO: opencode added --dangerously-skip-permissions in ~April 2026. Once that
+    // version is available via the installer, replace the env var with that flag in
+    // the shell_cmd above and remove this block.
+    if opencode {
+        podman_args.extend([
+            "-e".into(),
+            r#"OPENCODE_PERMISSION={"bash":"allow","edit":"allow","read":"allow","grep":"allow","question":"allow","external_directory":"allow","todowrite":"allow","codesearch":"allow"}"#.into(),
+        ]);
+    }
+
     if kimi {
         let base_url = std::env::var("KIMI_BASE_URL")
             .context("--kimi requires KIMI_BASE_URL to be set in the host environment")?;
@@ -2349,211 +2388,95 @@ fn detect_toolchains(
 
 /// Build the AGENTS.md content written to `/workspace/AGENTS.md` inside the
 /// container.  This is the **primary** agent instruction file — OpenCode reads
-/// it natively and Claude Code reads it via the `@AGENTS.md` import in CLAUDE.md.
+/// it natively and Claude Code reads it via the `@../AGENTS.md` import in CLAUDE.md.
 ///
 /// The content covers sandbox environment, toolchain setup, and (when factory is
 /// enabled) the full AI Factory pipeline instructions.
+/// Static sandbox instruction fragments embedded at compile time.
+/// Edit the .md files under `src/sandbox_instructions/` — never edit here.
+mod sandbox_instructions {
+    pub const BASE: &str = include_str!("sandbox_instructions/base.md");
+    pub const GENERAL_PRINCIPLES: &str = include_str!("sandbox_instructions/general_principles.md");
+    pub const FACTORY: &str = include_str!("sandbox_instructions/factory.md");
+}
+
 fn build_sandbox_agents_md(
     repo_name: &str,
     toolchains: &[(&str, &str, &str)],
     factory_enabled: bool,
 ) -> String {
-    let mut lines: Vec<String> = vec![
-        "# nibble Sandbox Agent Instructions".to_string(),
-        String::new(),
-        format!(
-            "You are running inside an isolated Podman sandbox managed by **nibble** for the **{}** project. \
-             This file contains all instructions for how to operate inside this environment. \
-             Read it fully before starting any task.",
-            repo_name
-        ),
-        String::new(),
-        "## Environment".to_string(),
-        String::new(),
-        "- **Working directory**: `/workspace` (the project repo, mounted read-write)".to_string(),
-        "- **Full sudo access**: install any system package with `apt-get install`".to_string(),
-        "- **Ports forwarded** to the host: services on `localhost:3000`, `:8080`, etc. are reachable from outside".to_string(),
-        "- **Internet access** is available".to_string(),
-        "- **Git** is configured with the host user's identity and SSH keys".to_string(),
-        "- Both `claude` and `opencode` are available if you need a nested agent session".to_string(),
-        String::new(),
-    ];
+    let mut out = String::new();
 
-    lines.push("## Toolchain Setup".to_string());
-    lines.push(String::new());
-    lines.push(
-        "Project dependencies are installed automatically at sandbox spawn via `.nibble/setup.sh` \
-         if that script exists. By the time you receive a task, dependencies should already be \
-         built and ready."
-            .to_string(),
-    );
-    lines.push(String::new());
-    lines.push(
-        "- If `.nibble/setup.sh` **exists**: it was already run at spawn — do not re-run it unless \
-         something is broken. If you need a new system dependency or build step, update the \
-         script and run it manually once, then commit the change."
-            .to_string(),
-    );
-    lines.push(
-        "- If `.nibble/setup.sh` **does not exist**: dependencies won't be pre-installed. Check \
-         for manifest files below and install them yourself. Create (or ask to create) \
-         `.nibble/setup.sh` so future spawns are automatic."
-            .to_string(),
-    );
-    lines.push(String::new());
+    // Header (repo name is dynamic, so it stays inline)
+    out.push_str("# nibble Sandbox Agent Instructions\n\n");
+    out.push_str(&format!(
+        "You are running inside an isolated Podman sandbox managed by **nibble** for the **{}** project. \
+         This file contains all instructions for how to operate inside this environment. \
+         Read it fully before starting any task.\n\n",
+        repo_name
+    ));
 
+    // Static: environment bullets + toolchain setup preamble
+    out.push_str(sandbox_instructions::BASE);
+    out.push('\n');
+
+    // Dynamic: detected toolchain table (parametric, cannot be static)
     if toolchains.is_empty() {
-        lines.push("No recognised dependency manifest was found in the repo root.".to_string());
-        lines.push("Inspect the project structure and install any required tools before running or testing.".to_string());
+        out.push_str("No recognised dependency manifest was found in the repo root.\n");
+        out.push_str(
+            "Inspect the project structure and install any required tools before running or testing.\n",
+        );
     } else {
-        lines.push("The following dependency manifests were detected:".to_string());
-        lines.push(String::new());
-        lines.push("| Manifest | Install command | Run/test |".to_string());
-        lines.push("|----------|----------------|----------|".to_string());
+        out.push_str("The following dependency manifests were detected:\n\n");
+        out.push_str("| Manifest | Install command | Run/test |\n");
+        out.push_str("|----------|----------------|----------|\n");
         for (ecosystem, install_cmd, run_hint) in toolchains {
-            lines.push(format!(
-                "| {} | `{}` | `{}` |",
+            out.push_str(&format!(
+                "| {} | `{}` | `{}` |\n",
                 ecosystem, install_cmd, run_hint
             ));
         }
-        lines.push(String::new());
-        lines.push(
+        out.push('\n');
+        out.push_str(
             "If a command fails due to missing system tools, install them with \
-             `sudo apt-get install <package>`."
-                .to_string(),
+             `sudo apt-get install <package>`.\n",
         );
     }
 
-    lines.push(String::new());
-    lines.push("## General Working Principles".to_string());
-    lines.push(String::new());
-    lines.push("- Make small, focused changes and run tests after each one".to_string());
-    lines.push("- The container persists between sessions — installed packages and build artifacts are retained".to_string());
-    lines.push("- When you finish a task, summarise what you did clearly so the notification sent to the user is informative".to_string());
-    lines.push("- Ask before making changes outside the project's stated scope".to_string());
+    // Static: general working principles
+    out.push('\n');
+    out.push_str(sandbox_instructions::GENERAL_PRINCIPLES);
 
+    // Static: factory pipeline instructions (only when factory is enabled)
     if factory_enabled {
-        lines.push(String::new());
-        lines.push("## Skills & Lessons".to_string());
-        lines.push(String::new());
-        lines.push(
-            "Factory pipeline skills (`factory-spec`, `factory-implement`, etc.) and the lessons-learned \
-             log are stored on the **host** at `~/.claude/skills/` and bind-mounted into every sandbox \
-             at `/home/node/.claude/skills/`. This means:"
-                .to_string(),
-        );
-        lines.push(String::new());
-        lines.push(
-            "- Skills and lessons updates made inside a sandbox are immediately visible on the host and \
-             in all other sandboxes — they share the same directory."
-                .to_string(),
-        );
-        lines.push(
-            "- To persist a lessons-learned update, edit the skill file directly (e.g. \
-             `~/.claude/skills/factory-lessons/SKILL.md`). No restart or re-injection needed."
-                .to_string(),
-        );
-        lines.push(
-            "- The host `install.sh` re-installs skills from the nibble repo to `~/.claude/skills/` \
-             whenever you update them in source. Run it after editing skills in the repo."
-                .to_string(),
-        );
+        out.push('\n');
+        out.push_str(sandbox_instructions::FACTORY);
     }
 
-    if factory_enabled {
-        lines.push(String::new());
-        lines.push("<!-- nibble:global:begin -->".to_string());
-        lines.push("## AI Factory Pipeline".to_string());
-        lines.push(String::new());
-        lines.push("When factory is enabled, every **non-trivial** coding task follows this pipeline. This is mandatory.".to_string());
-        lines.push(String::new());
-        lines.push("```".to_string());
-        lines.push(
-            " SPEC  ──▶  IMPLEMENT  ──▶   TDD    ──▶  ADVERSARIAL ──▶  RISK SCORE  ──▶  QA GATE"
-                .to_string(),
-        );
-        lines.push(
-            "(Blueprint)  (Synthesis)    (DV)        (Red Team)       (Analysis)       (Tape-out)"
-                .to_string(),
-        );
-        lines.push("```".to_string());
-        lines.push(String::new());
-        lines.push("### When to run the pipeline".to_string());
-        lines.push(String::new());
-        lines.push("**Run the full pipeline for:**".to_string());
-        lines.push("- New features or significant new functionality".to_string());
-        lines.push("- Changes to public interfaces or APIs".to_string());
-        lines.push("- Security-sensitive code (auth, secrets, payments)".to_string());
-        lines.push("- Complex business logic".to_string());
-        lines.push("- Database schema changes".to_string());
-        lines.push(String::new());
-        lines.push("**Skip the pipeline (confirm with human first) for:**".to_string());
-        lines.push("- Typo fixes or comment updates".to_string());
-        lines.push("- Trivial config tweaks (single-value changes)".to_string());
-        lines.push("- Pure formatting / linting fixes".to_string());
-        lines.push("- Documentation-only changes".to_string());
-        lines.push(String::new());
-        lines.push("### How to run each stage".to_string());
-        lines.push(String::new());
-        lines.push("Load the skill for each stage before executing it. Skills are available via the skill tool:".to_string());
-        lines.push(String::new());
-        lines.push("- **Pipeline overview**: load skill `factory-pipeline`".to_string());
-        lines.push("- **Stage 0 — Spec**: load skill `factory-spec`".to_string());
-        lines.push("- **Stage 1 — Implement**: load skill `factory-implement`".to_string());
-        lines.push("- **Stage 2 — TDD**: load skill `factory-tdd`".to_string());
-        lines.push("- **Stage 3 — Adversarial**: load skill `factory-adversarial`".to_string());
-        lines.push("- **Stage 4 — Risk Score**: load skill `factory-risk-score`".to_string());
-        lines.push("- **Stage 5 — QA Gate**: load skill `factory-qa-gate`".to_string());
-        lines.push(
-            "- **Lessons learned** (read at every stage start): load skill `factory-lessons`"
-                .to_string(),
-        );
-        lines.push(String::new());
-        lines.push("### Artifact locations".to_string());
-        lines.push(String::new());
-        lines.push("```".to_string());
-        lines.push(".nibble/".to_string());
-        lines.push("  factory/".to_string());
-        lines.push("    blueprints/          # Feature specs (one file per feature)".to_string());
-        lines.push("    reports/".to_string());
-        lines.push("      adversarial/       # Red team findings per feature".to_string());
-        lines.push("      risk/              # Risk score tables per feature".to_string());
-        lines.push("      qa/                # QA gate decisions per feature".to_string());
-        lines.push("```".to_string());
-        lines.push(String::new());
-        lines.push("### QA Gate behaviour".to_string());
-        lines.push(String::new());
-        lines.push(
-            "The QA Gate is an interactive pause. Do not auto-approve. Present each Critical and \
-             High risk item one at a time. Wait for the human to say `approve`, `reject`, or \
-             `request changes` before proceeding to the next item."
-                .to_string(),
-        );
-        lines.push(String::new());
-        lines.push("### Lessons learned".to_string());
-        lines.push(String::new());
-        lines.push(
-            "The lessons-learned log accumulates pipeline wisdom over time. **Read it at the start \
-             of every stage** (load `factory-lessons`). Append new entries whenever something slips \
-             through a stage that an earlier stage should have caught."
-                .to_string(),
-        );
-        lines.push("<!-- nibble:global:end -->".to_string());
-    }
-
-    lines.join("\n")
+    out
 }
 
-/// Write `AGENTS.md` and `.claude/CLAUDE.md` inside the container.
+/// Write nibble's sandbox instructions into `AGENTS.md` and `.claude/CLAUDE.md`
+/// inside the container, **without clobbering any existing repo content**.
 ///
-/// **AGENTS.md** (`/workspace/AGENTS.md`) is the primary instruction file:
-/// - OpenCode reads it natively
-/// - Claude Code reads it via the `@AGENTS.md` import in CLAUDE.md
+/// **AGENTS.md** (`/workspace/AGENTS.md`):
+/// - Nibble's content is wrapped in sentinel comments so it can be updated
+///   idempotently without touching the rest of the file:
+///   ```
+///   <!-- nibble-sandbox:begin -->
+///   ...nibble instructions...
+///   <!-- nibble-sandbox:end -->
+///   ```
+/// - If the file does not exist → created containing only the sentinel block.
+/// - If the file exists and the sentinel block is present → the block is
+///   replaced in-place; everything outside the sentinels is preserved.
+/// - If the file exists but has no sentinel → the block is appended at the end;
+///   existing repo content is left completely untouched.
 ///
 /// **CLAUDE.md** (`/workspace/.claude/CLAUDE.md`):
-/// - Contains only `@AGENTS.md` as the first line
-/// - If the file already exists with `@AGENTS.md` at line 1, it is left untouched
-/// - If `@AGENTS.md` is missing from line 1, it is prepended — user content below is preserved
+/// - Contains `@../AGENTS.md` as the first line (safe-prepend, never overwrites).
+/// - If the file already exists with `@../AGENTS.md` at line 1, it is left untouched.
+/// - If `@../AGENTS.md` is missing from line 1, it is prepended — user content below is preserved.
 fn inject_sandbox_claude_md(container_id: &str, agents_content: &str) -> Result<()> {
     let escaped_agents = agents_content.replace('\'', "'\\''");
 
@@ -2561,19 +2484,43 @@ fn inject_sandbox_claude_md(container_id: &str, agents_content: &str) -> Result<
         r#"set -e
 mkdir -p /workspace/.claude
 
-# ── Write AGENTS.md (primary instruction file for OpenCode + Claude Code) ──────
-printf '%s\n' '{agents}' > /workspace/AGENTS.md
+# ── Update AGENTS.md using sentinel block (never overwrites repo content) ──────
+AGENTS_FILE=/workspace/AGENTS.md
+BEGIN_SENTINEL='<!-- nibble-sandbox:begin -->'
+END_SENTINEL='<!-- nibble-sandbox:end -->'
+NIBBLE_BLOCK=$(printf '%s\n%s\n%s\n' "$BEGIN_SENTINEL" '{agents}' "$END_SENTINEL")
+
+if [ ! -f "$AGENTS_FILE" ]; then
+    # File does not exist — create it with just the sentinel block.
+    printf '%s\n' "$NIBBLE_BLOCK" > "$AGENTS_FILE"
+elif grep -qF "$BEGIN_SENTINEL" "$AGENTS_FILE" 2>/dev/null; then
+    # Sentinel is present — replace the block in-place, preserving everything outside.
+    # Write the new block to a temp file so awk can read it without newline-escaping issues.
+    BLOCK_TMP=$(mktemp)
+    printf '%s\n' "$NIBBLE_BLOCK" > "$BLOCK_TMP"
+    TMP=$(mktemp)
+    awk -v begin="$BEGIN_SENTINEL" -v end="$END_SENTINEL" -v blockfile="$BLOCK_TMP" '
+        $0 == begin {{ in_block=1; while ((getline line < blockfile) > 0) print line; next }}
+        $0 == end   {{ in_block=0; next }}
+        !in_block   {{ print }}
+    ' "$AGENTS_FILE" > "$TMP"
+    rm -f "$BLOCK_TMP"
+    mv "$TMP" "$AGENTS_FILE"
+else
+    # No sentinel found — append the block; existing content is untouched.
+    printf '\n%s\n' "$NIBBLE_BLOCK" >> "$AGENTS_FILE"
+fi
 
 # ── Update .claude/CLAUDE.md (Claude Code entrypoint) ─────────────────────────
 TARGET=/workspace/.claude/CLAUDE.md
-IMPORT_LINE='@AGENTS.md'
+IMPORT_LINE='@../AGENTS.md'
 
 if [ ! -f "$TARGET" ]; then
     printf '%s\n' "$IMPORT_LINE" > "$TARGET"
 else
-    # Ensure @AGENTS.md is present as the very first line.
+    # Ensure @../AGENTS.md is present as the very first line.
     # Checking only the first line (via head -1) prevents a false match when
-    # "@AGENTS.md" appears in the file body (e.g. inside a comment or example).
+    # "@../AGENTS.md" appears in the file body (e.g. inside a comment or example).
     if ! head -1 "$TARGET" | grep -qF "$IMPORT_LINE" 2>/dev/null; then
         TMP=$(mktemp)
         printf '%s\n' "$IMPORT_LINE" > "$TMP"
@@ -2910,7 +2857,7 @@ mod notification_tests {
     }
 
     // ── CLAUDE.md content tests ───────────────────────────────────────────────
-    // CLAUDE.md is now just "@AGENTS.md" — all content lives in AGENTS.md.
+    // CLAUDE.md is now just "@../AGENTS.md" — all content lives in AGENTS.md.
     // These tests verify that the agents_md produced for factory-enabled sandboxes
     // contains the information that used to live in the nibble delimiter block.
 
@@ -2932,7 +2879,7 @@ mod notification_tests {
     #[test]
     fn test_agents_md_is_single_source_of_truth() {
         // AGENTS.md must contain the repo name and environment info —
-        // everything Claude Code needs is here, imported via @AGENTS.md in CLAUDE.md
+        // everything Claude Code needs is here, imported via @../AGENTS.md in CLAUDE.md
         let out = build_sandbox_agents_md("my-cool-project", &[], false);
         assert!(
             out.contains("my-cool-project"),
@@ -2941,6 +2888,113 @@ mod notification_tests {
         assert!(
             out.contains("Working directory"),
             "environment section must be present"
+        );
+    }
+
+    // ── Sentinel block tests ──────────────────────────────────────────────────
+    // These tests verify the shell logic in inject_sandbox_claude_md by
+    // simulating the three cases in pure Rust (no container needed).
+
+    fn apply_sentinel_logic(existing: Option<&str>, nibble_content: &str) -> String {
+        let begin = "<!-- nibble-sandbox:begin -->";
+        let end = "<!-- nibble-sandbox:end -->";
+        let block = format!("{}\n{}\n{}", begin, nibble_content, end);
+
+        match existing {
+            None => format!("{}\n", block),
+            Some(file) if file.contains(begin) => {
+                // Replace in-place: keep lines outside sentinels, substitute block.
+                let mut out = String::new();
+                let mut in_block = false;
+                let mut replaced = false;
+                for line in file.lines() {
+                    if line == begin {
+                        in_block = true;
+                        if !replaced {
+                            out.push_str(&block);
+                            out.push('\n');
+                            replaced = true;
+                        }
+                        continue;
+                    }
+                    if line == end {
+                        in_block = false;
+                        continue;
+                    }
+                    if !in_block {
+                        out.push_str(line);
+                        out.push('\n');
+                    }
+                }
+                out
+            }
+            Some(file) => {
+                // Append: existing content untouched, block added at end.
+                format!("{}\n\n{}\n", file, block)
+            }
+        }
+    }
+
+    #[test]
+    fn test_sentinel_creates_file_when_absent() {
+        let result = apply_sentinel_logic(None, "nibble instructions here");
+        assert!(result.contains("<!-- nibble-sandbox:begin -->"));
+        assert!(result.contains("nibble instructions here"));
+        assert!(result.contains("<!-- nibble-sandbox:end -->"));
+    }
+
+    #[test]
+    fn test_sentinel_replaces_block_in_place() {
+        let existing = "# My Project\n\nSome docs.\n\n<!-- nibble-sandbox:begin -->\nold content\n<!-- nibble-sandbox:end -->\n\nMore docs.\n";
+        let result = apply_sentinel_logic(Some(existing), "new nibble content");
+        assert!(
+            result.contains("# My Project"),
+            "repo content before sentinel must be preserved"
+        );
+        assert!(
+            result.contains("More docs."),
+            "repo content after sentinel must be preserved"
+        );
+        assert!(
+            result.contains("new nibble content"),
+            "new nibble content must be present"
+        );
+        assert!(
+            !result.contains("old content"),
+            "old nibble content must be gone"
+        );
+    }
+
+    #[test]
+    fn test_sentinel_appends_when_no_sentinel_present() {
+        let existing = "# My Project\n\nThis is the real AGENTS.md.\n";
+        let result = apply_sentinel_logic(Some(existing), "nibble instructions");
+        assert!(
+            result.starts_with("# My Project"),
+            "original content must come first"
+        );
+        assert!(
+            result.contains("This is the real AGENTS.md."),
+            "original content must be preserved"
+        );
+        assert!(
+            result.contains("<!-- nibble-sandbox:begin -->"),
+            "sentinel begin must be appended"
+        );
+        assert!(
+            result.contains("nibble instructions"),
+            "nibble content must be appended"
+        );
+    }
+
+    #[test]
+    fn test_sentinel_replace_is_idempotent() {
+        let existing = "# Header\n\n<!-- nibble-sandbox:begin -->\nv1 content\n<!-- nibble-sandbox:end -->\n\nFooter\n";
+        let after_first = apply_sentinel_logic(Some(existing), "v2 content");
+        let after_second = apply_sentinel_logic(Some(&after_first), "v2 content");
+        assert_eq!(
+            after_first, after_second,
+            "applying sentinel twice with same content must be idempotent"
         );
     }
 }

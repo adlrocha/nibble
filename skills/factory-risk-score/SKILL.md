@@ -100,8 +100,7 @@ For each function, score the five dimensions. Record:
 ```markdown
 | Function | File:Lines | C | D | S | E | T | Risk | Level |
 |----------|-----------|---|---|---|---|---|------|-------|
-| processPayment | src/pay.ts:42-89 | 4 | 5 | 5 | 4 | 2 | 20 | High |
-| formatCurrency | src/util.ts:12-18 | 1 | 1 | 1 | 1 | 1 | 5 | Low |
+| <fn> | <file>:<lines> | <1-5> | <1-5> | <1-5> | <1-5> | <1-5> | <sum> | <level> |
 ```
 
 ### 3. Incorporate Adversarial Findings
@@ -166,7 +165,7 @@ Functions with Low risk scores. Listed for completeness but no human review requ
 
 | Function | Risk | Reason |
 |----------|------|--------|
-| formatCurrency | 5 | Pure formatting, no side effects |
+| <fn> | <score> | <one-line reason> |
 ```
 
 ### 6. Check Lessons Learned

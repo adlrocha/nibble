@@ -41,6 +41,29 @@ For trivial changes (typo fixes, config updates), the human can instruct the age
 the factory pipeline. The agent should confirm before skipping. The agent should also be able
 to evaluate when is worth running the pipeline and when to skip it.
 
+### Retrospective Mode
+
+When working on **existing code** (bug fix, refactor, small addition) rather than a new
+feature, adapt the pipeline:
+
+- **Spec**: Document what exists + what's changing and why. Skip sections that don't apply.
+- **TDD**: Confirm existing tests still pass + add tests specifically for the change.
+- **Adversarial / Risk Score**: Scope to the changed functions only, not the whole module.
+
+The gate criteria still apply — don't skip them, just scope them to the delta.
+
+### Scale Guidance
+
+Match report depth to feature size. Overhead should be proportional to risk.
+
+| Feature size | Functions changed | Report style |
+|---|---|---|
+| Small | 1–4 | Collapse adversarial + risk into a single brief section per function |
+| Medium | 5–15 | Full templates, but skip Low-risk sections in the risk report |
+| Large | 16+ | Full templates for all sections |
+
+When in doubt, err toward brevity — a concise finding is more useful than a padded one.
+
 ## Skills
 
 | Skill name | Stage | Purpose |

@@ -106,7 +106,9 @@ USER node
 # Install Claude Code via the official installer (installs to ~/.local/bin/claude)
 RUN curl -fsSL https://claude.ai/install.sh | bash
 
-# Install opencode via the official installer
+# Install opencode via the official installer (latest at image build time).
+# nibble also runs `opencode upgrade` at every sandbox spawn to keep it current
+# between image rebuilds. Claude Code self-updates automatically at runtime.
 RUN curl -fsSL https://opencode.ai/install | bash
 
 # Add ~/.local/bin (claude) and ~/.opencode/bin (opencode) to PATH
