@@ -4,12 +4,12 @@
 # What this script does:
 #   1. Walks you through creating a Telegram bot via @BotFather
 #   2. Prompts for your bot token and chat ID
-#   3. Writes ~/.agent-tasks/config.toml
+#   3. Writes ~/.nibble/config.toml
 #   4. Sends a test message to confirm everything works
 
 set -e
 
-CONFIG_DIR="$HOME/.agent-tasks"
+CONFIG_DIR="$HOME/.nibble"
 CONFIG_FILE="$CONFIG_DIR/config.toml"
 
 BOLD='\033[1m'

@@ -350,7 +350,7 @@ impl Sandbox for PodmanSandbox {
         let repo_claude_settings = repo_abs.join(".claude").join("settings.json");
         if repo_claude_settings.exists() {
             let empty_settings_path = home_dir
-                .join(".agent-tasks")
+                .join(".nibble")
                 .join("cache")
                 .join("empty-claude-settings.json");
             if let Some(parent) = empty_settings_path.parent() {
@@ -412,13 +412,10 @@ impl Sandbox for PodmanSandbox {
         }
 
         // Mount nibble config (Telegram token etc.) so hooks can send notifications.
-        let agent_tasks_dir = home_dir.join(".agent-tasks");
-        if agent_tasks_dir.exists() {
+        let nibble_dir = home_dir.join(".nibble");
+        if nibble_dir.exists() {
             args.push("-v".to_string());
-            args.push(format!(
-                "{}:/home/node/.agent-tasks:rw",
-                agent_tasks_dir.display()
-            ));
+            args.push(format!("{}:/home/node/.nibble:rw", nibble_dir.display()));
         }
 
         // Mount host gitconfig read-only so git identity and settings carry over.

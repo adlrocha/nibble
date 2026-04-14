@@ -30,7 +30,7 @@ echo "Configuration file: $RC_FILE"
 echo ""
 
 # Create wrappers directory
-WRAPPER_DIR="$HOME/.agent-tasks/wrappers"
+WRAPPER_DIR="$HOME/.nibble/wrappers"
 mkdir -p "$WRAPPER_DIR"
 
 # Copy wrapper scripts

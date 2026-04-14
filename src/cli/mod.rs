@@ -140,7 +140,7 @@ pub enum SandboxAction {
         #[arg(long)]
         branch: Option<String>,
         /// Enable the AI Factory development pipeline (spec → implement → TDD → adversarial → risk → QA).
-        /// Default is controlled by factory.enabled in ~/.agent-tasks/config.toml.
+        /// Default is controlled by factory.enabled in ~/.nibble/config.toml.
         #[arg(long)]
         factory: Option<bool>,
     },

@@ -1,4 +1,4 @@
-//! Configuration loading from ~/.agent-tasks/config.toml
+//! Configuration loading from ~/.nibble/config.toml
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -66,10 +66,10 @@ impl TelegramConfig {
     }
 }
 
-/// Returns the path to the config file: ~/.agent-tasks/config.toml
+/// Returns the path to the config file: ~/.nibble/config.toml
 pub fn config_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".agent-tasks").join("config.toml")
+    PathBuf::from(home).join(".nibble").join("config.toml")
 }
 
 /// Load configuration from disk. Returns a default (notifications disabled) config

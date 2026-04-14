@@ -15,7 +15,7 @@ NC='\033[0m'
 
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 BIN_DIR="$HOME/.local/bin"
-WRAPPERS_DIR="$HOME/.agent-tasks/wrappers"
+WRAPPERS_DIR="$HOME/.nibble/wrappers"
 CLAUDE_SETTINGS="$HOME/.claude/settings.json"
 
 step() { echo -e "\n${BOLD}▶ $1${NC}"; }
@@ -186,7 +186,7 @@ SHELL_RC=""
 
 if [ -n "$SHELL_RC" ]; then
     MISSING_ALIASES=()
-    grep -q "agent-tasks/wrappers/claude-wrapper" "$SHELL_RC" 2>/dev/null || MISSING_ALIASES+=("claude")
+    grep -q "nibble/wrappers/claude-wrapper" "$SHELL_RC" 2>/dev/null || MISSING_ALIASES+=("claude")
 
     if [ ${#MISSING_ALIASES[@]} -eq 0 ]; then
         ok "Shell aliases already in $SHELL_RC"
@@ -261,7 +261,7 @@ if [ "$RUN_TELEGRAM" = true ]; then
     step "Setting up Telegram notifications"
     bash "$REPO_DIR/scripts/setup-telegram.sh"
 else
-    CONFIG_FILE="$HOME/.agent-tasks/config.toml"
+    CONFIG_FILE="$HOME/.nibble/config.toml"
     if grep -q "enabled = true" "$CONFIG_FILE" 2>/dev/null; then
         ok "Telegram already configured ($CONFIG_FILE)"
     else
@@ -277,7 +277,7 @@ if [ "$RUN_LISTEN" = true ]; then
     bash "$REPO_DIR/scripts/setup-listen.sh"
 else
     # Offer the hint only when Telegram is already configured but listener isn't running.
-    CONFIG_FILE="$HOME/.agent-tasks/config.toml"
+    CONFIG_FILE="$HOME/.nibble/config.toml"
     if grep -q "enabled = true" "$CONFIG_FILE" 2>/dev/null; then
         if ! systemctl --user is-active --quiet nibble-listener.service 2>/dev/null; then
             echo ""

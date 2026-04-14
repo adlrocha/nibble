@@ -916,12 +916,12 @@ impl Database {
 
 pub fn default_db_path() -> PathBuf {
     let home = std::env::var("HOME").expect("HOME environment variable not set");
-    PathBuf::from(home).join(".agent-tasks").join("tasks.db")
+    PathBuf::from(home).join(".nibble").join("tasks.db")
 }
 
 pub fn ensure_data_dir() -> Result<PathBuf> {
     let home = std::env::var("HOME").context("HOME environment variable not set")?;
-    let data_dir = PathBuf::from(home).join(".agent-tasks");
+    let data_dir = PathBuf::from(home).join(".nibble");
 
     if !data_dir.exists() {
         std::fs::create_dir_all(&data_dir).context("Failed to create data directory")?;

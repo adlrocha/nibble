@@ -38,7 +38,7 @@ if [ ! -x "$NIBBLE_BIN" ]; then
     die "nibble not found at $NIBBLE_BIN. Run ./install.sh first."
 fi
 
-CONFIG_FILE="$HOME/.agent-tasks/config.toml"
+CONFIG_FILE="$HOME/.nibble/config.toml"
 if ! grep -q "enabled = true" "$CONFIG_FILE" 2>/dev/null; then
     die "Telegram is not configured. Run ./install.sh --telegram first."
 fi

@@ -138,7 +138,7 @@ pub fn is_podman_available() -> bool {
 /// Get the base directory for nibble data
 pub fn get_data_dir() -> Result<PathBuf> {
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
-    let data_dir = home.join(".agent-tasks");
+    let data_dir = home.join(".nibble");
     std::fs::create_dir_all(&data_dir)?;
     Ok(data_dir)
 }
