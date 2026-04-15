@@ -414,52 +414,6 @@ impl Database {
         Ok(first)
     }
 
-    pub fn list_tasks(&self, status_filter: Option<TaskStatus>) -> Result<Vec<Task>> {
-        let base_query = "SELECT id, task_id, agent_type, title, status, created_at, updated_at,
-                completed_at, pid, ppid, monitor_pid, attention_reason,
-                exit_code, context, metadata, container_id, sandbox_type, sandbox_config
-         FROM tasks";
-        let query = if let Some(status) = status_filter {
-            format!(
-                "{} WHERE status = '{}' ORDER BY updated_at DESC",
-                base_query,
-                status.as_str()
-            )
-        } else {
-            format!("{} ORDER BY updated_at DESC", base_query)
-        };
-
-        let mut stmt = self.conn.prepare(&query)?;
-        let tasks = stmt
-            .query_map([], |row| self.row_to_task(row))?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        Ok(tasks)
-    }
-
-    pub fn delete_task(&self, task_id: &str) -> Result<bool> {
-        let affected = self
-            .conn
-            .execute("DELETE FROM tasks WHERE task_id = ?1", params![task_id])?;
-
-        Ok(affected > 0)
-    }
-
-    pub fn cleanup_old_completed(&self, older_than_secs: i64) -> Result<usize> {
-        let cutoff = Utc::now().timestamp() - older_than_secs;
-
-        // Sandbox tasks are long-lived and only cleaned up when explicitly killed.
-        // Excluding them here prevents the 1-hour retention from erasing DB records
-        // for containers that are still running (which would break Telegram routing).
-        let affected = self.conn.execute(
-            "DELETE FROM tasks WHERE status IN ('completed', 'exited') \
-             AND completed_at < ?1 AND sandbox_type = 'none'",
-            params![cutoff],
-        )?;
-
-        Ok(affected)
-    }
-
     /// Record that a Telegram message was sent for a task, so replies can be routed back.
     pub fn insert_bot_message(&self, message_id: i64, task_id: &str) -> Result<()> {
         let now = Utc::now().timestamp();
@@ -493,16 +447,6 @@ impl Database {
             |row| row.get(0),
         )?;
         Ok(count)
-    }
-
-    /// Delete bot_messages older than the given retention period (same cadence as tasks cleanup).
-    pub fn cleanup_old_bot_messages(&self, older_than_secs: i64) -> Result<usize> {
-        let cutoff = Utc::now().timestamp() - older_than_secs;
-        let affected = self.conn.execute(
-            "DELETE FROM bot_messages WHERE sent_at < ?1",
-            params![cutoff],
-        )?;
-        Ok(affected)
     }
 
     /// Read a value from the key-value store.
@@ -553,21 +497,6 @@ impl Database {
 
     /// List all tasks with a specific sandbox type
     #[allow(dead_code)]
-    pub fn list_tasks_by_sandbox_type(&self, sandbox_type: SandboxType) -> Result<Vec<Task>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, task_id, agent_type, title, status, created_at, updated_at,
-                    completed_at, pid, ppid, monitor_pid, attention_reason,
-                    exit_code, context, metadata, container_id, sandbox_type, sandbox_config
-             FROM tasks WHERE sandbox_type = ?1 ORDER BY updated_at DESC",
-        )?;
-
-        let tasks = stmt
-            .query_map(params![sandbox_type.as_str()], |row| self.row_to_task(row))?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        Ok(tasks)
-    }
-
     /// Insert or update container state, optionally recording an associated git worktree path.
     pub fn upsert_container_state_with_worktree(
         &self,
@@ -990,111 +919,5 @@ mod tests {
 
         let retrieved = db.get_task_by_id("test-123").unwrap().unwrap();
         assert_eq!(retrieved.status, TaskStatus::Completed);
-    }
-
-    #[test]
-    fn test_list_tasks() {
-        let (db, _temp) = create_test_db();
-
-        let task1 = Task::new(
-            "test-1".to_string(),
-            "claude_code".to_string(),
-            "Task 1".to_string(),
-            None,
-            None,
-        );
-        let mut task2 = Task::new(
-            "test-2".to_string(),
-            "opencode".to_string(),
-            "Task 2".to_string(),
-            None,
-            None,
-        );
-        task2.complete();
-
-        db.insert_task(&task1).unwrap();
-        db.insert_task(&task2).unwrap();
-
-        let all_tasks = db.list_tasks(None).unwrap();
-        assert_eq!(all_tasks.len(), 2);
-
-        let running_tasks = db.list_tasks(Some(TaskStatus::Running)).unwrap();
-        assert_eq!(running_tasks.len(), 1);
-        assert_eq!(running_tasks[0].task_id, "test-1");
-
-        let completed_tasks = db.list_tasks(Some(TaskStatus::Completed)).unwrap();
-        assert_eq!(completed_tasks.len(), 1);
-        assert_eq!(completed_tasks[0].task_id, "test-2");
-    }
-
-    #[test]
-    fn test_delete_task() {
-        let (db, _temp) = create_test_db();
-
-        let task = Task::new(
-            "test-123".to_string(),
-            "claude_code".to_string(),
-            "Test task".to_string(),
-            None,
-            None,
-        );
-
-        db.insert_task(&task).unwrap();
-
-        let deleted = db.delete_task("test-123").unwrap();
-        assert!(deleted);
-
-        let retrieved = db.get_task_by_id("test-123").unwrap();
-        assert!(retrieved.is_none());
-    }
-
-    #[test]
-    fn test_cleanup_old_completed() {
-        let (db, _temp) = create_test_db();
-
-        let mut task = Task::new(
-            "test-123".to_string(),
-            "claude_code".to_string(),
-            "Test task".to_string(),
-            None,
-            None,
-        );
-
-        // Create a completed task
-        task.complete();
-        db.insert_task(&task).unwrap();
-
-        // Should not delete tasks completed less than 1 second ago
-        let deleted = db.cleanup_old_completed(1).unwrap();
-        assert_eq!(deleted, 0);
-
-        // But should delete if we look back far enough (negative time = future)
-        let deleted = db.cleanup_old_completed(-1).unwrap();
-        assert_eq!(deleted, 1);
-    }
-
-    #[test]
-    fn test_cleanup_old_exited() {
-        let (db, _temp) = create_test_db();
-
-        let mut task = Task::new(
-            "test-exited".to_string(),
-            "claude_code".to_string(),
-            "Exited task".to_string(),
-            None,
-            None,
-        );
-
-        // Create an exited task
-        task.set_exited(Some(0));
-        db.insert_task(&task).unwrap();
-
-        // Should not delete tasks exited less than 1 second ago
-        let deleted = db.cleanup_old_completed(1).unwrap();
-        assert_eq!(deleted, 0);
-
-        // Should delete exited tasks when retention threshold is exceeded
-        let deleted = db.cleanup_old_completed(-1).unwrap();
-        assert_eq!(deleted, 1);
     }
 }

@@ -179,6 +179,7 @@ impl Task {
     }
 
     /// Mark task as completed (finished generating, waiting for user)
+    #[cfg(test)]
     pub fn complete(&mut self) {
         self.status = TaskStatus::Completed;
         self.completed_at = Some(Utc::now());

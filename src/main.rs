@@ -1,27 +1,21 @@
 mod agent_input;
 mod cli;
 mod config;
+mod cron;
 mod db;
-mod display;
 mod models;
-mod monitor;
 mod notifications;
 mod sandbox;
 
-mod cron;
-
 use anyhow::{Context, Result};
 use clap::Parser;
-use cli::{Cli, Commands, CronAction, ReportAction, SandboxAction};
+use cli::{Cli, Commands, CronAction, SandboxAction};
 use db::Database;
 use models::{SandboxConfig, SandboxType, Task, TaskContext, TaskStatus};
 use sandbox::podman::PodmanSandbox;
 use sandbox::{Sandbox, SandboxHealth};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::str::FromStr;
-use std::thread;
-use std::time::Duration;
 use uuid::Uuid;
 
 fn main() -> Result<()> {
@@ -34,225 +28,12 @@ fn main() -> Result<()> {
     let db_path = db::default_db_path();
     let db = Database::open(&db_path).context("Failed to open database")?;
 
-    // Run cleanup on every invocation (1 hour retention)
-    let _ = db.cleanup_old_completed(3600);
-    let _ = db.cleanup_old_bot_messages(3600);
-
     match cli.command {
-        None => {
-            // Default: show running tasks (actively generating)
-            let tasks = db.list_tasks(Some(TaskStatus::Running))?;
-            display::display_task_list(&tasks);
-        }
-        Some(Commands::List { all, status }) => {
-            let tasks = if let Some(status_str) = status {
-                let status = TaskStatus::from_str(&status_str).map_err(|e| anyhow::anyhow!(e))?;
-                db.list_tasks(Some(status))?
-            } else if all {
-                db.list_tasks(None)?
-            } else {
-                // Show running tasks by default
-                db.list_tasks(Some(TaskStatus::Running))?
-            };
-
-            display::display_task_list(&tasks);
-        }
-        Some(Commands::Show { task_id }) => {
-            let task = db
-                .get_task_by_id(&task_id)?
-                .ok_or_else(|| anyhow::anyhow!("Task not found: {}", task_id))?;
-
-            display::display_task_detail(&task);
-        }
-        Some(Commands::Clear { task_id }) => {
-            let deleted = db.delete_task(&task_id)?;
-            if deleted {
-                println!("Task {} cleared", task_id);
-            } else {
-                println!("Task not found: {}", task_id);
-            }
-        }
-        Some(Commands::ClearAll) => {
-            let completed = db.list_tasks(Some(TaskStatus::Completed))?;
-            let exited = db.list_tasks(Some(TaskStatus::Exited))?;
-
-            let mut count = 0;
-            for task in completed.iter().chain(exited.iter()) {
-                db.delete_task(&task.task_id)?;
-                count += 1;
-            }
-
-            println!("Cleared {} tasks", count);
-        }
-        Some(Commands::Reset { force }) => {
-            let all_tasks = db.list_tasks(None)?;
-            let task_count = all_tasks.len();
-
-            if task_count == 0 {
-                println!("No tasks to clear.");
-                return Ok(());
-            }
-
-            // Show what will be cleared
-            println!("This will delete ALL {} tasks:", task_count);
-            for task in &all_tasks {
-                println!("  - [{}] {}", task.agent_type, task.title);
-            }
-            println!();
-
-            // Confirm unless --force
-            if !force {
-                use std::io::{self, Write};
-                print!("Are you sure you want to delete ALL tasks? (yes/no): ");
-                io::stdout().flush()?;
-
-                let mut input = String::new();
-                io::stdin().read_line(&mut input)?;
-
-                if input.trim().to_lowercase() != "yes" {
-                    println!("Aborted. No tasks were deleted.");
-                    return Ok(());
-                }
-            }
-
-            // Delete all tasks
-            let mut count = 0;
-            for task in all_tasks {
-                db.delete_task(&task.task_id)?;
-                count += 1;
-            }
-
-            println!("✓ Cleared all {} tasks", count);
-        }
-        Some(Commands::Watch) => {
-            println!("Watching tasks (Ctrl+C to exit)...\n");
-
-            loop {
-                // Clear screen
-                print!("\x1B[2J\x1B[1;1H");
-
-                let tasks = db.list_tasks(None)?;
-                display::display_task_list(&tasks);
-
-                thread::sleep(Duration::from_secs(2));
-            }
-        }
-        Some(Commands::Cleanup { retention_secs }) => {
-            let deleted = db.cleanup_old_completed(retention_secs)?;
-            println!("Cleaned up {} old completed tasks", deleted);
-        }
-        Some(Commands::Prune) => {
-            let pruned = prune_stale_tasks(&db)?;
-            println!("Pruned {} stale task(s)", pruned);
-        }
-        Some(Commands::Report { action }) => match action {
-            ReportAction::Start {
-                task_id,
-                agent_type,
-                cwd,
-                title,
-                pid,
-                ppid,
-                zellij_pane_id,
-                session_id,
-            } => {
-                let mut task = Task::new(task_id, agent_type, title, pid, ppid);
-
-                let mut extra = HashMap::new();
-                if let Some(pane_id) = zellij_pane_id {
-                    extra.insert(
-                        "zellij_pane_id".to_string(),
-                        serde_json::Value::Number(pane_id.into()),
-                    );
-                }
-
-                task.context = Some(TaskContext {
-                    url: None,
-                    project_path: Some(cwd),
-                    session_id,
-                    extra,
-                });
-
-                db.insert_task(&task)?;
-                println!("Task started: {}", task.task_id);
-            }
-            ReportAction::Complete { task_id, exit_code } => {
-                let mut task = db
-                    .get_task_by_id(&task_id)?
-                    .ok_or_else(|| anyhow::anyhow!("Task not found: {}", task_id))?;
-
-                // If exit_code is provided and non-zero, mark as exited (failed)
-                // Otherwise mark as completed (finished generating)
-                if let Some(code) = exit_code {
-                    if code != 0 {
-                        task.set_exited(Some(code));
-                    } else {
-                        task.complete();
-                    }
-                } else {
-                    task.complete();
-                }
-                db.update_task(&task)?;
-                println!("Task completed: {}", task_id);
-            }
-            ReportAction::Running { task_id } => {
-                let mut task = db
-                    .get_task_by_id(&task_id)?
-                    .ok_or_else(|| anyhow::anyhow!("Task not found: {}", task_id))?;
-
-                task.set_running();
-                db.update_task(&task)?;
-                println!("Task running: {}", task_id);
-            }
-            ReportAction::Exited { task_id, exit_code } => {
-                let mut task = db
-                    .get_task_by_id(&task_id)?
-                    .ok_or_else(|| anyhow::anyhow!("Task not found: {}", task_id))?;
-
-                task.set_exited(exit_code);
-                db.update_task(&task)?;
-                println!("Task exited: {}", task_id);
-                // No Telegram notification here: the sandbox container is still
-                // running. Session exits are normal (detach, turn complete, etc.).
-                // Container crashes are detected separately by prune_stale_tasks.
-            }
-            ReportAction::LastMessage { task_id, message } => {
-                let mut task = db
-                    .get_task_by_id(&task_id)?
-                    .ok_or_else(|| anyhow::anyhow!("Task not found: {}", task_id))?;
-
-                // Store on attention_reason so it's available when the exit notification fires.
-                task.attention_reason = Some(message);
-                db.update_task(&task)?;
-            }
-            ReportAction::SessionId {
-                task_id,
-                session_id,
-            } => {
-                let mut task = db
-                    .get_task_by_id(&task_id)?
-                    .ok_or_else(|| anyhow::anyhow!("Task not found: {}", task_id))?;
-
-                let ctx = task.context.get_or_insert_with(|| TaskContext {
-                    url: None,
-                    project_path: None,
-                    session_id: None,
-                    extra: HashMap::new(),
-                });
-                ctx.session_id = Some(session_id);
-                db.update_task(&task)?;
-            }
-        },
-        Some(Commands::Monitor { task_id, pid }) => {
-            // Create a monitor and start monitoring
-            let monitor = monitor::TaskMonitor::new(db);
-            monitor.monitor_task(task_id, pid)?;
-        }
-        Some(Commands::Notify {
+        Commands::Notify {
             message,
             task_id,
             attention,
-        }) => {
+        } => {
             let cfg = config::load().unwrap_or_default();
 
             if !cfg.telegram.is_configured() {
@@ -282,7 +63,7 @@ fn main() -> Result<()> {
                 let _ = db.insert_bot_message(msg_id, tid);
             }
         }
-        Some(Commands::Cron { action }) => match action {
+        Commands::Cron { action } => match action {
             CronAction::Add {
                 repo,
                 schedule,
@@ -310,7 +91,7 @@ fn main() -> Result<()> {
                     &db, cron_id, schedule, prompt, label, enable, disable, expires,
                 )?;
             }
-            CronAction::Del { id } => {
+            CronAction::Kill { id } => {
                 let cron_id = resolve_cron_id(&db, &id)?;
                 let deleted = db.delete_cron_job(cron_id)?;
                 if deleted {
@@ -325,7 +106,7 @@ fn main() -> Result<()> {
             }
         },
         // ── Sandbox subcommands ────────────────────────────────────────────
-        Some(Commands::Sandbox { action }) => match action {
+        Commands::Sandbox { action } => match action {
             SandboxAction::Spawn {
                 repo_path,
                 task,
@@ -543,7 +324,7 @@ fn main() -> Result<()> {
                 cmd_sandbox_gc(&db, task_id, all)?;
             }
         },
-        Some(Commands::Inject { task_id, message }) => {
+        Commands::Inject { task_id, message } => {
             let task = db
                 .get_task_by_id(&task_id)?
                 .ok_or_else(|| anyhow::anyhow!("Task not found: {}", task_id))?;
@@ -551,7 +332,7 @@ fn main() -> Result<()> {
             println!("Message injected into task {}", task_id);
         }
 
-        Some(Commands::Listen) => {
+        Commands::Listen => {
             let cfg = config::load().unwrap_or_default();
 
             if !cfg.telegram.is_configured() {
@@ -2152,34 +1933,13 @@ fn cmd_sandbox_resume(db: &Database, all: bool) -> Result<()> {
 
 // ── Stale task pruning ────────────────────────────────────────────────────────
 
-/// Mark Running tasks as Exited when their process (PID) is no longer alive,
-/// and clean up sandbox DB state for containers that have disappeared.
+/// Health-check sandbox containers and clean up DB state for any that have disappeared.
 ///
-/// Returns the number of tasks pruned.
+/// Returns the number of containers pruned.
 pub(crate) fn prune_stale_tasks(db: &Database) -> Result<usize> {
     let mut pruned = 0;
 
-    // 1. Non-sandbox tasks: check PID liveness.
-    let running = db.list_tasks(Some(TaskStatus::Running))?;
-    for mut task in running {
-        if task.sandbox_type != SandboxType::Podman {
-            if let Some(pid) = task.pid {
-                let alive = std::path::Path::new(&format!("/proc/{}", pid)).exists();
-                if !alive {
-                    task.set_exited(None);
-                    db.update_task(&task)?;
-                    eprintln!(
-                        "[prune] Task {} (pid {}) is dead → exited",
-                        &task.task_id[..8.min(task.task_id.len())],
-                        pid
-                    );
-                    pruned += 1;
-                }
-            }
-        }
-    }
-
-    // 2. Sandbox tasks: health-check each container.
+    // Sandbox tasks: health-check each container.
     //    - Dead      → container crashed; notify via Telegram, clean up state.
     //    - Degraded  → container running but exec fails; update DB only.
     //    - Healthy   → all good, leave it alone.
@@ -2629,8 +2389,6 @@ fn agent_display(agent_type: &str) -> (&'static str, String) {
     match agent_type {
         "claude_code" => ("🤖", "Claude Code".to_string()),
         "opencode" => ("⚡", "OpenCode".to_string()),
-        "claude_web" => ("🌐", "Claude Web".to_string()),
-        "gemini_web" => ("✨", "Gemini".to_string()),
         other => ("🔧", other.to_string()),
     }
 }
@@ -2730,11 +2488,6 @@ mod notification_tests {
             ("🤖", "Claude Code".to_string())
         );
         assert_eq!(agent_display("opencode"), ("⚡", "OpenCode".to_string()));
-        assert_eq!(
-            agent_display("claude_web"),
-            ("🌐", "Claude Web".to_string())
-        );
-        assert_eq!(agent_display("gemini_web"), ("✨", "Gemini".to_string()));
     }
 
     #[test]
