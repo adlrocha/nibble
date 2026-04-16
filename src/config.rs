@@ -12,6 +12,9 @@ pub struct Config {
 
     #[serde(default)]
     pub factory: FactoryConfig,
+
+    #[serde(default)]
+    pub hermes: HermesConfig,
 }
 
 /// AI Factory pipeline configuration.
@@ -34,6 +37,90 @@ impl Default for FactoryConfig {
         Self {
             enabled: default_factory_enabled(),
         }
+    }
+}
+
+/// Hermes Agent sandbox configuration.
+///
+/// Controls how the Hermes Agent is installed and run inside a nibble sandbox,
+/// including which repos are mounted and whether the gateway daemon is started.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HermesConfig {
+    /// Repo paths to mount into the Hermes sandbox (mounted at /repos/<basename>).
+    #[serde(default)]
+    pub repos: Vec<String>,
+
+    /// Whether to start `hermes gateway` as the main process (PID 1).
+    /// When true, the container stays alive as long as the gateway runs.
+    /// When false, uses `sleep infinity` like standard sandboxes.
+    #[serde(default = "default_hermes_gateway")]
+    pub gateway: bool,
+
+    /// Container image name for the Hermes sandbox.
+    #[serde(default = "default_hermes_image")]
+    pub image: String,
+}
+
+fn default_hermes_gateway() -> bool {
+    true
+}
+
+fn default_hermes_image() -> String {
+    "nibble-hermes:latest".to_string()
+}
+
+impl Default for HermesConfig {
+    fn default() -> Self {
+        Self {
+            repos: Vec::new(),
+            gateway: default_hermes_gateway(),
+            image: default_hermes_image(),
+        }
+    }
+}
+
+impl HermesConfig {
+    /// Resolve repo paths to absolute paths, filtering out non-existent ones.
+    /// Returns (mount_point_name, absolute_path) pairs with de-duplicated basenames.
+    pub fn resolve_repo_mounts(&self) -> Vec<(String, std::path::PathBuf)> {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let mut mounts = Vec::new();
+        let mut seen_names = std::collections::HashMap::new();
+
+        for repo in &self.repos {
+            let expanded = if repo.starts_with('~') {
+                repo.replacen('~', &home, 1)
+            } else {
+                repo.clone()
+            };
+            let path = std::path::PathBuf::from(&expanded);
+            let abs = match path.canonicalize() {
+                Ok(p) => p,
+                Err(_) => {
+                    eprintln!(
+                        "  Warning: Hermes repo path '{}' does not exist, skipping",
+                        repo
+                    );
+                    continue;
+                }
+            };
+            let basename = abs
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "repo".to_string());
+
+            // INV-3: Handle duplicate basenames by appending a suffix
+            let count = seen_names.entry(basename.clone()).or_insert(0u32);
+            let mount_name = if *count == 0 {
+                basename.clone()
+            } else {
+                format!("{}-{}", basename, count)
+            };
+            *count += 1;
+
+            mounts.push((mount_name, abs));
+        }
+        mounts
     }
 }
 
@@ -220,5 +307,105 @@ enabled = false
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert!(config.factory.enabled);
+    }
+
+    // ── Hermes config tests (from hermes-agent-sandbox blueprint) ──────────────
+
+    /// AC-5 / defaults: HermesConfig defaults have empty repos, gateway=true, correct image
+    #[test]
+    fn test_hermes_config_defaults() {
+        let cfg = HermesConfig::default();
+        assert!(cfg.repos.is_empty());
+        assert!(cfg.gateway);
+        assert_eq!(cfg.image, "nibble-hermes:latest");
+    }
+
+    /// AC-5: Config without [hermes] section gets defaults
+    #[test]
+    fn test_hermes_config_absent_defaults() {
+        let config: Config = toml::from_str("").unwrap();
+        assert!(config.hermes.repos.is_empty());
+        assert!(config.hermes.gateway);
+        assert_eq!(config.hermes.image, "nibble-hermes:latest");
+    }
+
+    /// AC-5: Parse [hermes] section with repos
+    #[test]
+    fn test_hermes_config_parse_repos() {
+        let toml_str = r#"
+[hermes]
+repos = ["/home/user/project-a", "~/project-b"]
+gateway = false
+image = "my-hermes:v2"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.hermes.repos.len(), 2);
+        assert!(!config.hermes.gateway);
+        assert_eq!(config.hermes.image, "my-hermes:v2");
+    }
+
+    /// INV-3: resolve_repo_mounts skips non-existent paths
+    #[test]
+    fn test_hermes_inv3_resolve_skips_missing() {
+        let cfg = HermesConfig {
+            repos: vec!["/nonexistent/path/abc123".to_string()],
+            ..Default::default()
+        };
+        let mounts = cfg.resolve_repo_mounts();
+        assert!(mounts.is_empty(), "non-existent paths should be skipped");
+    }
+
+    /// INV-3: resolve_repo_mounts resolves existing paths
+    #[test]
+    fn test_hermes_inv3_resolve_existing_path() {
+        // /tmp always exists on Linux
+        let cfg = HermesConfig {
+            repos: vec!["/tmp".to_string()],
+            ..Default::default()
+        };
+        let mounts = cfg.resolve_repo_mounts();
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].0, "tmp");
+    }
+
+    /// INV-3: resolve_repo_mounts deduplicates basenames with suffixes
+    #[test]
+    fn test_hermes_inv3_resolve_dedup_basenames() {
+        // Create two temp dirs with the same basename
+        let dir1 = tempfile::tempdir().unwrap();
+        let dir2 = tempfile::tempdir().unwrap();
+        // Both tempdir basenames are unique, so let's use /tmp twice to test dedup
+        let cfg = HermesConfig {
+            repos: vec!["/tmp".to_string(), "/tmp".to_string()],
+            ..Default::default()
+        };
+        let mounts = cfg.resolve_repo_mounts();
+        assert_eq!(mounts.len(), 2);
+        assert_eq!(mounts[0].0, "tmp");
+        assert_eq!(mounts[1].0, "tmp-1");
+        drop(dir1);
+        drop(dir2);
+    }
+
+    /// Boundary: resolve_repo_mounts with empty repos list
+    #[test]
+    fn test_hermes_resolve_empty_repos() {
+        let cfg = HermesConfig::default();
+        let mounts = cfg.resolve_repo_mounts();
+        assert!(mounts.is_empty());
+    }
+
+    /// Boundary: resolve_repo_mounts expands tilde
+    #[test]
+    fn test_hermes_resolve_tilde_expansion() {
+        // This tests that ~ is replaced with $HOME
+        let cfg = HermesConfig {
+            repos: vec!["~/nonexistent_dir_xyz".to_string()],
+            ..Default::default()
+        };
+        let mounts = cfg.resolve_repo_mounts();
+        // Should be skipped because the dir doesn't exist, but tilde should be expanded
+        // (the path won't canonicalize). This just verifies no panic.
+        assert!(mounts.is_empty());
     }
 }

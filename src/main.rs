@@ -126,7 +126,7 @@ fn main() -> Result<()> {
                     AgentType::OpenCode => {
                         ctx.opencode_session_id = Some(session_id);
                     }
-                    AgentType::ClaudeCode | AgentType::Unknown(_) => {
+                    AgentType::ClaudeCode | AgentType::Hermes | AgentType::Unknown(_) => {
                         // Use ses_ prefix as tiebreaker (opencode IDs, UUID = Claude)
                         if session_id.starts_with("ses_") {
                             ctx.opencode_session_id = Some(session_id);
@@ -190,6 +190,7 @@ fn main() -> Result<()> {
                 session_id,
                 branch,
                 factory,
+                hermes,
             } => {
                 let effective_repo_path = if let Some(ref branch_name) = branch {
                     let worktree = create_worktree(std::path::Path::new(&repo_path), branch_name)?;
@@ -209,8 +210,9 @@ fn main() -> Result<()> {
                     false, // no_attach
                     false, // kimi
                     false, // glm
-                    false, // opencode — spawn is always Claude-centric
+                    false, // opencode
                     factory_enabled,
+                    hermes,
                 )?;
             }
             SandboxAction::List => {
@@ -223,6 +225,7 @@ fn main() -> Result<()> {
                 kimi,
                 glm,
                 opencode,
+                hermes,
                 branch,
             } => {
                 // If --branch is given, resolve the worktree path (creating it if needed)
@@ -237,7 +240,7 @@ fn main() -> Result<()> {
 
                 match resolve_sandbox_id(&db, &effective_path) {
                     Ok(task_id) => {
-                        cmd_sandbox_attach(&db, task_id, fresh, btw, kimi, glm, opencode)?;
+                        cmd_sandbox_attach(&db, task_id, fresh, btw, kimi, glm, opencode, hermes)?;
                     }
                     Err(e) => {
                         // If the input looks like a repo path and no sandbox exists,
@@ -263,8 +266,11 @@ fn main() -> Result<()> {
                                 glm,
                                 opencode,
                                 cfg.factory.enabled,
+                                hermes,
                             )?;
-                            cmd_sandbox_attach(&db, task_id, fresh, btw, kimi, glm, opencode)?;
+                            cmd_sandbox_attach(
+                                &db, task_id, fresh, btw, kimi, glm, opencode, hermes,
+                            )?;
                         } else {
                             return Err(e);
                         }
@@ -403,6 +409,13 @@ fn main() -> Result<()> {
             let task = db
                 .get_task_by_id(&task_id)?
                 .ok_or_else(|| anyhow::anyhow!("Task not found: {}", task_id))?;
+
+            // Auto-detect hermes from stored agent type (unused for now — inject support
+            // for Hermes is deferred to future work, but detection is ready)
+            let _hermes = task.agent_type == AgentType::Hermes;
+            if _hermes {
+                anyhow::bail!("Inject is not yet supported for Hermes sandboxes. Use `nibble sandbox attach` instead.");
+            }
             agent_input::inject(&task, &message)?;
             println!("Message injected into task {}", task_id);
         }
@@ -679,6 +692,7 @@ pub(crate) fn cmd_sandbox_spawn(
     glm: bool,
     opencode: bool,
     factory_enabled: bool,
+    hermes: bool,
 ) -> Result<String> {
     let repo = PathBuf::from(&repo_path);
     if !repo.exists() {
@@ -722,6 +736,7 @@ pub(crate) fn cmd_sandbox_spawn(
                             kimi,
                             glm,
                             opencode,
+                            hermes,
                         )?;
                     }
                     return Ok(existing_task_id);
@@ -730,7 +745,53 @@ pub(crate) fn cmd_sandbox_spawn(
         }
     }
 
-    sandbox.ensure_image_with_opts(&image, false)?;
+    // INV-5: Only one Hermes sandbox at a time. Check for existing running Hermes sandboxes.
+    if hermes {
+        let container_states = db.list_container_states()?;
+        for (tid, _name, _path, _wt, _ts) in &container_states {
+            if let Some(task) = db.get_task_by_id(tid)? {
+                if task.agent_type == AgentType::Hermes {
+                    if let Some(ref cid) = task.container_id {
+                        if let Ok(crate::sandbox::ContainerStatus::Running) = sandbox.status(cid) {
+                            eprintln!(
+                                "⚠️  A Hermes sandbox already exists (task {}).",
+                                &tid[..tid.len().min(8)]
+                            );
+                            eprintln!("   Only one Hermes sandbox is supported at a time.");
+                            eprintln!("   Attaching to the existing sandbox instead.");
+                            eprintln!();
+                            if no_attach {
+                                eprintln!("Attach with:");
+                                eprintln!("  nibble sandbox attach {}", tid);
+                            } else {
+                                cmd_sandbox_attach(
+                                    db,
+                                    tid.clone(),
+                                    fresh,
+                                    false,
+                                    kimi,
+                                    glm,
+                                    opencode,
+                                    hermes,
+                                )?;
+                            }
+                            return Ok(tid.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Determine the effective image: hermes sandboxes use their own image.
+    let effective_image = if hermes {
+        let cfg = config::load().unwrap_or_default();
+        cfg.hermes.image.clone()
+    } else {
+        image
+    };
+
+    sandbox.ensure_image_with_opts(&effective_image, false)?;
 
     let task_id = uuid::Uuid::new_v4().to_string();
 
@@ -746,19 +807,85 @@ pub(crate) fn cmd_sandbox_spawn(
         }
     }
 
+    let mut extra_volumes = Vec::new();
+
+    // Hermes-specific mounts: ~/.hermes/ config dir and configured repos
+    let hermes_cfg = if hermes {
+        Some(config::load().unwrap_or_default().hermes)
+    } else {
+        None
+    };
+
+    if hermes {
+        let hcfg = hermes_cfg.as_ref().unwrap();
+        let home_dir = dirs::home_dir().context("Failed to get home directory")?;
+        let hermes_dir = home_dir.join(".hermes");
+        // INV-2: Always mount ~/.hermes/ so sessions/memories persist
+        if !hermes_dir.exists() {
+            eprintln!("  Warning: ~/.hermes/ does not exist. Creating minimal structure.");
+            eprintln!("           Run `hermes setup` to configure your LLM provider.");
+            std::fs::create_dir_all(hermes_dir.join("sessions"))?;
+            std::fs::create_dir_all(hermes_dir.join("memories"))?;
+            std::fs::create_dir_all(hermes_dir.join("skills"))?;
+            std::fs::create_dir_all(hermes_dir.join("cron"))?;
+            std::fs::create_dir_all(hermes_dir.join("logs"))?;
+        }
+        extra_volumes.push(format!("{}:/home/node/.hermes:rw", hermes_dir.display()));
+
+        // INV-3: Mount configured repos under /repos/<basename>
+        let repo_mounts = hcfg.resolve_repo_mounts();
+        for (mount_name, abs_path) in &repo_mounts {
+            extra_volumes.push(format!("{}:/repos/{}:rw", abs_path.display(), mount_name));
+        }
+        if !repo_mounts.is_empty() {
+            let names: Vec<&str> = repo_mounts.iter().map(|(n, _)| n.as_str()).collect();
+            println!(
+                "  Repos:     mounted {} repos: {}",
+                repo_mounts.len(),
+                names.join(", ")
+            );
+        }
+    }
+
+    // Hermes gateway as PID 1 if configured
+    let entrypoint = if hermes {
+        let hcfg = hermes_cfg.as_ref().unwrap();
+        if hcfg.gateway {
+            // INV-1: Gateway is PID 1 so container stops if it crashes
+            vec![
+                "/bin/bash".to_string(),
+                "-lc".to_string(),
+                "hermes gateway".to_string(),
+            ]
+        } else {
+            vec![]
+        }
+    } else {
+        vec![]
+    };
+
     let config = SandboxConfig {
-        image,
+        image: effective_image,
         env_vars,
+        extra_volumes,
+        entrypoint,
         ..SandboxConfig::default()
     };
 
     println!("Spawning sandbox for '{}'…", repo_path);
     let info = sandbox.spawn(&task_id, &repo, &config)?;
 
-    // Restore .claude.json from backup if missing.
-    // This propagates the host Claude login into the container so the user
-    // doesn't have to re-authenticate inside the sandbox.
-    let restore_result = std::process::Command::new("podman")
+    let repo_name = repo
+        .canonicalize()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+        .unwrap_or_else(|| repo_path.clone());
+
+    // Claude/OpenCode-specific post-spawn setup (skip for Hermes)
+    if !hermes {
+        // This propagates the host Claude login into the container so the user
+        // doesn't have to re-authenticate inside the sandbox.
+        let restore_result = std::process::Command::new("podman")
         .args([
             "exec", &info.id,
             "/bin/bash", "-c",
@@ -770,98 +897,98 @@ pub(crate) fn cmd_sandbox_spawn(
                fi"#,
         ])
         .output();
-    if let Ok(out) = restore_result {
-        if String::from_utf8_lossy(&out.stdout).contains("restored") {
-            println!("  Auth:      restored .claude.json from backup");
-        }
-    }
-
-    // Upgrade opencode to the latest version on every spawn so sandboxes don't
-    // drift behind the image-baked version. Claude Code self-updates automatically;
-    // opencode does not, so we drive it here. Failures are non-fatal — the baked
-    // version still works, just may be older.
-    {
-        let status = std::process::Command::new("podman")
-            .args([
-                "exec",
-                "-u",
-                "node",
-                &info.id,
-                "/home/node/.opencode/bin/opencode",
-                "upgrade",
-            ])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        match status {
-            Ok(s) if s.success() => println!("  Tools:     opencode upgraded to latest"),
-            Ok(_) => eprintln!(
-                "  Tools:     ⚠️  opencode upgrade exited non-zero (baked version still usable)"
-            ),
-            Err(e) => eprintln!("  Tools:     ⚠️  opencode upgrade failed to run: {e}"),
-        }
-    }
-
-    // Run .nibble/setup.sh if present, otherwise warn the user.
-    let setup_script = repo.join(".nibble").join("setup.sh");
-    if setup_script.exists() {
-        println!("  Setup:     running .nibble/setup.sh …");
-        let status = std::process::Command::new("podman")
-            .args([
-                "exec",
-                "--user",
-                "node",
-                &info.id,
-                "/bin/bash",
-                "/workspace/.nibble/setup.sh",
-            ])
-            .status()
-            .context("Failed to run .nibble/setup.sh")?;
-        if status.success() {
-            println!("  Setup:     .nibble/setup.sh completed successfully");
-        } else {
-            eprintln!("  Setup:     ⚠️  .nibble/setup.sh exited with non-zero status — dependencies may be missing");
-        }
-    } else {
-        eprintln!(
-            "  Setup:     ⚠️  No .nibble/setup.sh found — dependencies won't be pre-installed."
-        );
-        eprintln!(
-            "             Create .nibble/setup.sh in the repo to auto-install deps on spawn."
-        );
-        eprintln!("             (Ask Claude to write it for you once inside the sandbox.)");
-    }
-
-    let repo_name = repo
-        .canonicalize()
-        .ok()
-        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-        .unwrap_or_else(|| repo_path.clone());
-
-    // Detect project toolchains and write AGENTS.md + CLAUDE.md into the
-    // container so the agent knows it is in a sandbox and how to set up the
-    // project.  AGENTS.md is the primary instruction file (read by both
-    // OpenCode and Claude Code); CLAUDE.md contains only the @../AGENTS.md import.
-    let toolchains = detect_toolchains(&repo);
-    let agents_md = build_sandbox_agents_md(&repo_name, &toolchains, factory_enabled);
-    match inject_sandbox_claude_md(&info.id, &agents_md) {
-        Ok(()) => {
-            if toolchains.is_empty() {
-                println!("  Context:   AGENTS.md + CLAUDE.md updated (no toolchain detected)");
-            } else {
-                let names: Vec<&str> = toolchains.iter().map(|(e, _, _)| *e).collect();
-                println!(
-                    "  Context:   AGENTS.md + CLAUDE.md updated (detected: {})",
-                    names.join(", ")
-                );
+        if let Ok(out) = restore_result {
+            if String::from_utf8_lossy(&out.stdout).contains("restored") {
+                println!("  Auth:      restored .claude.json from backup");
             }
         }
-        Err(e) => eprintln!("  Warning:   Could not write AGENTS.md/CLAUDE.md: {e:#}"),
-    }
+
+        // Upgrade opencode to the latest version on every spawn so sandboxes don't
+        // drift behind the image-baked version. Claude Code self-updates automatically;
+        // opencode does not, so we drive it here. Failures are non-fatal — the baked
+        // version still works, just may be older.
+        {
+            let status = std::process::Command::new("podman")
+                .args([
+                    "exec",
+                    "-u",
+                    "node",
+                    &info.id,
+                    "/home/node/.opencode/bin/opencode",
+                    "upgrade",
+                ])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            match status {
+                Ok(s) if s.success() => println!("  Tools:     opencode upgraded to latest"),
+                Ok(_) => eprintln!(
+                "  Tools:     ⚠️  opencode upgrade exited non-zero (baked version still usable)"
+            ),
+                Err(e) => eprintln!("  Tools:     ⚠️  opencode upgrade failed to run: {e}"),
+            }
+        }
+
+        // Run .nibble/setup.sh if present, otherwise warn the user.
+        let setup_script = repo.join(".nibble").join("setup.sh");
+        if setup_script.exists() {
+            println!("  Setup:     running .nibble/setup.sh …");
+            let status = std::process::Command::new("podman")
+                .args([
+                    "exec",
+                    "--user",
+                    "node",
+                    &info.id,
+                    "/bin/bash",
+                    "/workspace/.nibble/setup.sh",
+                ])
+                .status()
+                .context("Failed to run .nibble/setup.sh")?;
+            if status.success() {
+                println!("  Setup:     .nibble/setup.sh completed successfully");
+            } else {
+                eprintln!("  Setup:     ⚠️  .nibble/setup.sh exited with non-zero status — dependencies may be missing");
+            }
+        } else {
+            eprintln!(
+                "  Setup:     ⚠️  No .nibble/setup.sh found — dependencies won't be pre-installed."
+            );
+            eprintln!(
+                "             Create .nibble/setup.sh in the repo to auto-install deps on spawn."
+            );
+            eprintln!("             (Ask Claude to write it for you once inside the sandbox.)");
+        }
+
+        // Detect project toolchains and write AGENTS.md + CLAUDE.md into the
+        // container so the agent knows it is in a sandbox and how to set up the
+        // project.  AGENTS.md is the primary instruction file (read by both
+        // OpenCode and Claude Code); CLAUDE.md contains only the @../AGENTS.md import.
+        let toolchains = detect_toolchains(&repo);
+        let agents_md = build_sandbox_agents_md(&repo_name, &toolchains, factory_enabled);
+        match inject_sandbox_claude_md(&info.id, &agents_md) {
+            Ok(()) => {
+                if toolchains.is_empty() {
+                    println!("  Context:   AGENTS.md + CLAUDE.md updated (no toolchain detected)");
+                } else {
+                    let names: Vec<&str> = toolchains.iter().map(|(e, _, _)| *e).collect();
+                    println!(
+                        "  Context:   AGENTS.md + CLAUDE.md updated (detected: {})",
+                        names.join(", ")
+                    );
+                }
+            }
+            Err(e) => eprintln!("  Warning:   Could not write AGENTS.md/CLAUDE.md: {e:#}"),
+        }
+    } // end if !hermes
 
     let title = task_desc.unwrap_or_else(|| format!("[{}:sandbox]", repo_name));
 
-    let mut task = Task::new(task_id.clone(), AgentType::ClaudeCode, title, None, None);
+    let agent_type = if hermes {
+        AgentType::Hermes
+    } else {
+        AgentType::ClaudeCode
+    };
+    let mut task = Task::new(task_id.clone(), agent_type, title, None, None);
     task.sandbox_type = SandboxType::Podman;
     let abs_repo_path = repo
         .canonicalize()
@@ -940,22 +1067,33 @@ pub(crate) fn cmd_sandbox_spawn(
     }
 
     if no_attach {
-        println!("Attach to the Claude session:");
+        let agent_name = if hermes { "Hermes" } else { "Claude" };
+        println!("Attach to the {} session:", agent_name);
+        let hermes_flag = if hermes { " --hermes" } else { "" };
         println!(
-            "  nibble sandbox attach {}          (by repo path)",
-            abs_repo_path
+            "  nibble sandbox attach {}{}          (by repo path)",
+            abs_repo_path, hermes_flag
         );
-        println!("  nibble sandbox attach {}   (by task ID)", short_id);
         println!(
-            "  nibble sandbox attach {} --fresh  (start a new conversation)",
-            short_id
+            "  nibble sandbox attach {}{}   (by task ID)",
+            short_id, hermes_flag
+        );
+        println!(
+            "  nibble sandbox attach {}{} --fresh  (start a new conversation)",
+            short_id, hermes_flag
         );
         println!("  (The container keeps running after you exit — re-attach any time)");
         println!();
         println!("After a system reboot, restart stopped containers with:");
         println!("  nibble sandbox resume --all");
     } else {
-        let agent_label = if opencode { "opencode" } else { "Claude" };
+        let agent_label = if hermes {
+            "Hermes"
+        } else if opencode {
+            "opencode"
+        } else {
+            "Claude"
+        };
         println!(
             "Attaching to {} session (exit to detach — container keeps running)…",
             agent_label
@@ -965,7 +1103,16 @@ pub(crate) fn cmd_sandbox_spawn(
             short_id, abs_repo_path
         );
         println!();
-        cmd_sandbox_attach(db, task_id.clone(), fresh, false, kimi, glm, opencode)?;
+        cmd_sandbox_attach(
+            db,
+            task_id.clone(),
+            fresh,
+            false,
+            kimi,
+            glm,
+            opencode,
+            hermes,
+        )?;
     }
 
     Ok(task_id)
@@ -1477,10 +1624,14 @@ fn cmd_sandbox_attach(
     kimi: bool,
     glm: bool,
     opencode: bool,
+    hermes: bool,
 ) -> Result<()> {
     let task = db
         .get_task_by_id(&task_id)?
         .ok_or_else(|| anyhow::anyhow!("Task not found: {}", task_id))?;
+
+    // Auto-detect hermes from stored agent type so users don't need --hermes on every attach
+    let hermes = hermes || task.agent_type == AgentType::Hermes;
 
     if task.sandbox_type != SandboxType::Podman {
         anyhow::bail!("Task {} is not a sandbox task", task_id);
@@ -1498,6 +1649,17 @@ fn cmd_sandbox_attach(
     }
 
     // Validate flag combinations before doing anything.
+    if hermes {
+        if opencode {
+            anyhow::bail!("--hermes and --opencode are mutually exclusive");
+        }
+        if btw {
+            anyhow::bail!("--btw is not supported with --hermes");
+        }
+        if kimi || glm {
+            anyhow::bail!("--kimi/--glm are not supported with --hermes");
+        }
+    }
     if opencode {
         if btw {
             anyhow::bail!(
@@ -1543,7 +1705,15 @@ fn cmd_sandbox_attach(
         })
     });
 
-    let shell_cmd = if opencode {
+    let shell_cmd = if hermes {
+        // Hermes mode: start an interactive hermes CLI session.
+        // --continue resumes the most recent session if available.
+        if fresh {
+            "hermes".to_string()
+        } else {
+            "hermes --continue".to_string()
+        }
+    } else if opencode {
         // opencode mode: resume via --session <id> if we have one stored, otherwise
         // start fresh. After opencode exits, capture the most recent session ID and
         // store it in the DB so the next attach can resume it.
@@ -1617,7 +1787,11 @@ fn cmd_sandbox_attach(
         "-e".into(),
         "TERM=xterm-256color".into(),
         "-e".into(),
-        "PATH=/home/node/.local/bin:/usr/local/bin:/usr/bin:/bin".into(),
+        if hermes {
+            "PATH=/home/node/.local/bin:/home/node/.hermes-agent/venv/bin:/home/node/.cargo/bin:/usr/local/bin:/usr/bin:/bin".into()
+        } else {
+            "PATH=/home/node/.local/bin:/usr/local/bin:/usr/bin:/bin".into()
+        },
         "-e".into(),
         "CLAUDE_CONFIG_DIR=/home/node/.claude".into(),
     ];
@@ -1679,16 +1853,34 @@ fn cmd_sandbox_attach(
         ]);
     }
 
-    podman_args.extend([
-        "-w".into(),
-        "/workspace".into(),
-        container_id.clone(),
-        "/bin/bash".into(),
-        "-c".into(),
-        shell_cmd,
-    ]);
+    if hermes {
+        // Hermes: use login shell to pick up PATH from .bashrc
+        podman_args.extend([
+            "-w".into(),
+            "/workspace".into(),
+            container_id.clone(),
+            "/bin/bash".into(),
+            "-lc".into(),
+            shell_cmd,
+        ]);
+    } else {
+        podman_args.extend([
+            "-w".into(),
+            "/workspace".into(),
+            container_id.clone(),
+            "/bin/bash".into(),
+            "-c".into(),
+            shell_cmd,
+        ]);
+    }
 
-    if opencode {
+    if hermes {
+        eprintln!(
+            "Attaching to sandbox {} ({}) [hermes]…",
+            task.title, container_id
+        );
+        eprintln!("(Exit hermes or press Ctrl+C to detach — the container keeps running)");
+    } else if opencode {
         eprintln!(
             "Attaching to sandbox {} ({}) [opencode]…",
             task.title, container_id
@@ -2492,6 +2684,7 @@ fn agent_display(agent_type: &AgentType) -> (&'static str, String) {
     match agent_type {
         AgentType::ClaudeCode => ("🤖", "Claude Code".to_string()),
         AgentType::OpenCode => ("⚡", "OpenCode".to_string()),
+        AgentType::Hermes => ("🧠", "Hermes".to_string()),
         AgentType::Unknown(s) => ("🔧", s.clone()),
     }
 }
@@ -3171,7 +3364,7 @@ mod notification_tests {
             AgentType::OpenCode => {
                 ctx.opencode_session_id = Some(sid.clone());
             }
-            AgentType::ClaudeCode | AgentType::Unknown(_) => {
+            AgentType::ClaudeCode | AgentType::Hermes | AgentType::Unknown(_) => {
                 if sid.starts_with("ses_") {
                     ctx.opencode_session_id = Some(sid.clone());
                 } else {

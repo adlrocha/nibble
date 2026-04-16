@@ -16,6 +16,8 @@ pub enum AgentType {
     ClaudeCode,
     /// OpenCode — open-source coding agent.
     OpenCode,
+    /// Hermes Agent (NousResearch) — open-source coding agent with gateway support.
+    Hermes,
     /// Any agent type not yet known to this binary.  Stores the raw string so
     /// `as_str()` / serialization round-trips perfectly.
     Unknown(String),
@@ -27,6 +29,7 @@ impl AgentType {
         match self {
             AgentType::ClaudeCode => "claude_code",
             AgentType::OpenCode => "opencode",
+            AgentType::Hermes => "hermes",
             AgentType::Unknown(s) => s.as_str(),
         }
     }
@@ -39,6 +42,7 @@ impl FromStr for AgentType {
         Ok(match s {
             "claude_code" => AgentType::ClaudeCode,
             "opencode" => AgentType::OpenCode,
+            "hermes" => AgentType::Hermes,
             other => AgentType::Unknown(other.to_string()),
         })
     }
@@ -114,6 +118,9 @@ pub struct SandboxConfig {
     pub memory_limit: Option<String>,
     /// Additional volume mounts (host_path:container_path)
     pub extra_volumes: Vec<String>,
+    /// Custom PID 1 command (default: ["sleep", "infinity"])
+    #[serde(default)]
+    pub entrypoint: Vec<String>,
 }
 
 impl Default for SandboxConfig {
@@ -126,6 +133,7 @@ impl Default for SandboxConfig {
             cpu_limit: None,
             memory_limit: None,
             extra_volumes: vec![],
+            entrypoint: vec![],
         }
     }
 }
@@ -498,5 +506,43 @@ mod tests {
                 s
             );
         }
+    }
+
+    // ── Hermes AgentType tests (from hermes-agent-sandbox blueprint) ───────────
+
+    /// AC-1 (hermes): "hermes" string parses to AgentType::Hermes
+    #[test]
+    fn test_hermes_ac1_agent_type_from_str() {
+        assert_eq!(AgentType::from_str("hermes").unwrap(), AgentType::Hermes);
+    }
+
+    /// AC-1 (hermes): as_str returns "hermes"
+    #[test]
+    fn test_hermes_ac1_agent_type_as_str() {
+        assert_eq!(AgentType::Hermes.as_str(), "hermes");
+    }
+
+    /// INV-1 (hermes): from_str(as_str()) round-trips for Hermes
+    #[test]
+    fn test_hermes_inv1_agent_type_round_trip() {
+        let h = AgentType::Hermes;
+        assert_eq!(AgentType::from_str(h.as_str()).unwrap(), h);
+    }
+
+    /// INV-1 (hermes): SandboxConfig with custom entrypoint preserves it
+    #[test]
+    fn test_hermes_inv1_sandbox_config_entrypoint() {
+        let cfg = SandboxConfig {
+            entrypoint: vec!["hermes".into(), "gateway".into()],
+            ..Default::default()
+        };
+        assert_eq!(cfg.entrypoint, vec!["hermes", "gateway"]);
+    }
+
+    /// Boundary: SandboxConfig default has empty entrypoint
+    #[test]
+    fn test_sandbox_config_default_entrypoint_empty() {
+        let cfg = SandboxConfig::default();
+        assert!(cfg.entrypoint.is_empty());
     }
 }
