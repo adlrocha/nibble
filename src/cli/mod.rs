@@ -49,6 +49,50 @@ pub enum Commands {
         #[command(subcommand)]
         action: CronAction,
     },
+
+    /// Report task status (internal command used by wrappers and hooks)
+    Report {
+        #[command(subcommand)]
+        action: ReportAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ReportAction {
+    /// Register a new task in the database (called by wrappers at agent startup)
+    Start {
+        /// Task ID (UUID)
+        task_id: String,
+        /// Agent type (claude_code, opencode, etc.)
+        agent_type: String,
+        /// Working directory
+        cwd: String,
+        /// Task title/description
+        title: String,
+        /// Process ID
+        #[arg(long)]
+        pid: Option<i32>,
+        /// Parent process ID
+        #[arg(long)]
+        ppid: Option<i32>,
+        /// Zellij pane ID
+        #[arg(long)]
+        zellij_pane_id: Option<u32>,
+        /// Session ID (if already known at startup)
+        #[arg(long)]
+        session_id: Option<String>,
+    },
+
+    /// Store the agent session ID so the next attach can resume it
+    ///
+    /// Called by the Claude Stop hook and the opencode post-exit epilogue.
+    #[command(name = "session-id")]
+    SessionId {
+        /// Task ID
+        task_id: String,
+        /// Agent session ID (Claude UUID or opencode ses_... ID)
+        session_id: String,
+    },
 }
 
 #[derive(Subcommand)]

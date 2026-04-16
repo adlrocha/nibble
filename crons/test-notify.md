@@ -3,7 +3,7 @@
 schedule = "*/2 * * * *"
 enabled = true
 skip_if_running = true
-expires_at = "2026-03-11T11:27:30Z"
+expires_at = "+5m"
 
 ## Prompt
 

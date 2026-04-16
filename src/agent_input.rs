@@ -6,9 +6,10 @@
 //! (TIOCSTI was removed) and terminal emulators consume the bytes before
 //! they reach the target process.
 //!
-//! **Strategy**: run `claude --continue` non-interactively via `podman exec -i`
-//! with the message on stdin.  `--continue` resumes the most recent conversation
-//! in /workspace without needing a session UUID.
+//! **Strategy**: run `claude --continue` via `podman exec -i` with the message on
+//! stdin.  `--continue` resumes the most recent conversation in /workspace without
+//! needing a session UUID.  Claude enters its interactive loop, receives the message
+//! on stdin, processes the turn, fires Stop hooks, then exits when stdin closes (EOF).
 
 use anyhow::{bail, Context, Result};
 
@@ -83,6 +84,8 @@ pub fn check_container_health(container_id: &str) -> Result<()> {
 /// and return the child handle.  The caller decides when to wait.
 ///
 /// Run `claude --continue` inside the container with the message on stdin.
+/// Claude enters its interactive loop, receives the message on stdin, processes
+/// the turn, fires Stop hooks, and exits when stdin closes (EOF).
 /// Returns the child process handle.
 fn spawn_inject(
     container_id: &str,
@@ -139,9 +142,10 @@ mod tests {
     use std::collections::HashMap;
 
     fn make_non_sandbox_task() -> Task {
+        use crate::models::AgentType;
         let mut t = Task::new(
             "test-id".to_string(),
-            "claude_code".to_string(),
+            AgentType::ClaudeCode,
             "[repo:main]".to_string(),
             Some(1234),
             None,
@@ -150,6 +154,8 @@ mod tests {
             url: None,
             project_path: None,
             session_id: None,
+            claude_session_id: None,
+            opencode_session_id: None,
             extra: HashMap::new(),
         });
         t

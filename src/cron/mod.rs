@@ -108,11 +108,13 @@ pub fn parse_cron_markdown(
 
         if trimmed.starts_with("expires_at") && trimmed.contains('=') {
             if let Some(value) = parse_string_value(trimmed) {
-                expires_at = Some(
+                expires_at = Some(if value.starts_with('+') {
+                    parse_relative_expiry(&value)?
+                } else {
                     chrono::DateTime::parse_from_rfc3339(&value)
                         .with_context(|| format!("Invalid expires_at datetime: {value}"))?
-                        .with_timezone(&Utc),
-                );
+                        .with_timezone(&Utc)
+                });
             }
             continue;
         }
@@ -152,6 +154,21 @@ pub fn parse_cron_markdown(
         expires_at,
         repo_path,
     ))
+}
+
+fn parse_relative_expiry(s: &str) -> Result<DateTime<Utc>> {
+    let s = s.trim_start_matches('+');
+    let (n_str, unit) = s.split_at(s.len().saturating_sub(1));
+    let n: i64 = n_str
+        .parse()
+        .with_context(|| format!("Invalid relative expiry number in '{s}'"))?;
+    let duration = match unit {
+        "m" => chrono::Duration::minutes(n),
+        "h" => chrono::Duration::hours(n),
+        "d" => chrono::Duration::days(n),
+        _ => anyhow::bail!("Unknown duration unit '{}' — use m, h, or d", unit),
+    };
+    Ok(Utc::now() + duration)
 }
 
 fn parse_string_value(line: &str) -> Option<String> {

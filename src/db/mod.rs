@@ -5,7 +5,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use crate::models::{CronJob, SandboxConfig, SandboxType, Task, TaskContext, TaskStatus};
+use crate::models::{
+    AgentType, CronJob, SandboxConfig, SandboxType, Task, TaskContext, TaskStatus,
+};
 
 const SCHEMA_VERSION: i32 = 8;
 
@@ -308,7 +310,7 @@ impl Database {
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 task.task_id,
-                task.agent_type,
+                task.agent_type.as_str(),
                 task.title,
                 task.status.as_str(),
                 task.created_at.timestamp(),
@@ -357,7 +359,7 @@ impl Database {
                 container_id = ?13, sandbox_type = ?14, sandbox_config = ?15
             WHERE task_id = ?16",
             params![
-                task.agent_type,
+                task.agent_type.as_str(),
                 task.title,
                 task.status.as_str(),
                 task.updated_at.timestamp(),
@@ -823,7 +825,10 @@ impl Database {
         Ok(Task {
             id: Some(row.get(0)?),
             task_id: row.get(1)?,
-            agent_type: row.get(2)?,
+            agent_type: {
+                let s: String = row.get(2)?;
+                AgentType::from_str(&s).unwrap() // infallible
+            },
             title: row.get(3)?,
             status,
             created_at: Utc.timestamp_opt(created_ts, 0).unwrap(),
@@ -882,7 +887,7 @@ mod tests {
 
         let task = Task::new(
             "test-123".to_string(),
-            "claude_code".to_string(),
+            AgentType::ClaudeCode,
             "Test task".to_string(),
             Some(1234),
             Some(1233),
@@ -896,7 +901,7 @@ mod tests {
 
         let retrieved = retrieved.unwrap();
         assert_eq!(retrieved.task_id, "test-123");
-        assert_eq!(retrieved.agent_type, "claude_code");
+        assert_eq!(retrieved.agent_type, AgentType::ClaudeCode);
         assert_eq!(retrieved.status, TaskStatus::Running);
     }
 
@@ -906,7 +911,7 @@ mod tests {
 
         let mut task = Task::new(
             "test-123".to_string(),
-            "claude_code".to_string(),
+            AgentType::ClaudeCode,
             "Test task".to_string(),
             Some(1234),
             None,
@@ -919,5 +924,40 @@ mod tests {
 
         let retrieved = db.get_task_by_id("test-123").unwrap().unwrap();
         assert_eq!(retrieved.status, TaskStatus::Completed);
+    }
+
+    /// AC-5: DB round-trip for AgentType::OpenCode
+    #[test]
+    fn test_ac5_agent_type_opencode_db_round_trip() {
+        let (db, _temp) = create_test_db();
+        let task = Task::new(
+            "oc-123".to_string(),
+            AgentType::OpenCode,
+            "opencode task".to_string(),
+            None,
+            None,
+        );
+        db.insert_task(&task).unwrap();
+        let retrieved = db.get_task_by_id("oc-123").unwrap().unwrap();
+        assert_eq!(retrieved.agent_type, AgentType::OpenCode);
+    }
+
+    /// AC-6: DB round-trip for AgentType::Unknown — lossless
+    #[test]
+    fn test_ac6_agent_type_unknown_db_round_trip() {
+        let (db, _temp) = create_test_db();
+        let task = Task::new(
+            "bot-123".to_string(),
+            AgentType::Unknown("my_bot".to_string()),
+            "unknown agent task".to_string(),
+            None,
+            None,
+        );
+        db.insert_task(&task).unwrap();
+        let retrieved = db.get_task_by_id("bot-123").unwrap().unwrap();
+        assert_eq!(
+            retrieved.agent_type,
+            AgentType::Unknown("my_bot".to_string())
+        );
     }
 }

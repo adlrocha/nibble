@@ -47,6 +47,25 @@ echo ""
 # ── 1. Prerequisites ──────────────────────────────────────────────────────────
 step "Checking prerequisites"
 
+# Source rustup env if cargo is not yet on PATH (common in non-login shells
+# inside sandboxes where ~/.cargo/bin isn't added automatically).
+if ! command -v cargo >/dev/null 2>&1; then
+    for _rustup_env in \
+        "$HOME/.cargo/env" \
+        "$HOME/.nibble/cache/rustup/env" \
+        "$HOME/.rustup/env"
+    do
+        # shellcheck source=/dev/null
+        [ -f "$_rustup_env" ] && source "$_rustup_env" && break
+    done
+    # Also try well-known toolchain bin paths
+    for _cargo_dir in \
+        "$HOME/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin" \
+        "$HOME/.nibble/cache/rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin"
+    do
+        [ -x "$_cargo_dir/cargo" ] && export PATH="$_cargo_dir:$PATH" && break
+    done
+fi
 command -v cargo >/dev/null 2>&1 || die "cargo not found. Install Rust from https://rustup.rs"
 ok "cargo ($(cargo --version))"
 
