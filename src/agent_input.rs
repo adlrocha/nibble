@@ -48,7 +48,18 @@ pub fn inject_returning_child(task: &Task, message: &str) -> Result<std::process
         .as_deref()
         .with_context(|| format!("Task {} is sandboxed but has no container_id", task.task_id))?;
 
-    let session_id = task.context.as_ref().and_then(|c| c.session_id.as_deref());
+    // Only use claude_session_id (written by the Stop hook after a real Claude turn)
+    // for --resume.  The generic session_id field holds a deterministic UUID that is
+    // derived from the repo path and may not correspond to any actual session file
+    // inside the container, so we must NOT pass it to --resume (that causes a hard
+    // failure).  When no confirmed session ID exists we fall back to --continue,
+    // which resumes the most recent conversation in /workspace — identical to the
+    // pre-refactor behaviour.
+    let session_id = task
+        .context
+        .as_ref()
+        .and_then(|c| c.claude_session_id.as_deref())
+        .filter(|id| !id.starts_with("ses_")); // guard: ses_ IDs are opencode, not claude
     spawn_inject(container_id, session_id, &task.task_id, message)
 }
 
@@ -89,7 +100,7 @@ pub fn check_container_health(container_id: &str) -> Result<()> {
 /// Returns the child process handle.
 fn spawn_inject(
     container_id: &str,
-    _session_id: Option<&str>,
+    session_id: Option<&str>,
     task_id: &str,
     message: &str,
 ) -> Result<std::process::Child> {
@@ -98,6 +109,20 @@ fn spawn_inject(
     // AGENT_TASK_ID must be set so the Stop/SessionEnd hooks inside the
     // container know which task to report against.
     let agent_task_id_env = format!("AGENT_TASK_ID={}", task_id);
+
+    // Use --resume <session_id> when we have one so we target the exact
+    // conversation for this task.  Fall back to --continue (most recent
+    // conversation in /workspace) only when no session_id is recorded yet.
+    let resume_args: Vec<&str> = match session_id {
+        Some(sid) => {
+            eprintln!("[inject] task={task_id} using --resume {sid}");
+            vec!["--resume", sid]
+        }
+        None => {
+            eprintln!("[inject] task={task_id} no session_id, using --continue");
+            vec!["--continue"]
+        }
+    };
 
     let mut child = std::process::Command::new("podman")
         .args([
@@ -115,9 +140,9 @@ fn spawn_inject(
             "/workspace",
             container_id,
             claude,
-            "--continue",
-            "--dangerously-skip-permissions",
         ])
+        .args(&resume_args)
+        .arg("--dangerously-skip-permissions")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

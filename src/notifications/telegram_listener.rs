@@ -5,14 +5,26 @@
 //!
 //! - Verifies the sender is the authorised user (chat_id whitelist).
 //! - Routes **callback queries** (inline button taps):
-//!   - `reply:{task_id}` → records a pending-reply state and prompts the user
-//!     to type their message.
+//!   - `reply:{task_id}` → stores pending_reply in kv_store and sends an
+//!     acknowledgment message (stored in bot_messages) so the user's next
+//!     message routes to the correct task via either mechanism.
 //! - Routes **text messages**:
-//!   - If the message is a reply to a known bot message → injects into the
-//!     associated task via `claude --resume`.
-//!   - If there is a pending-reply state for this chat → injects into the
-//!     pending task and clears the state.
+//!   - If a pending_reply is set (user tapped a reply button) → injects into
+//!     the associated task via `claude --resume`.
+//!   - If the message is a reply to a known bot message (ack or notification)
+//!     → injects into the associated task.
 //!   - Otherwise → ignored (with a polite notice).
+//!
+//! ## Routing mechanism
+//!
+//! Every bot message that can receive a reply has its `message_id` stored in
+//! the `bot_messages` table linked to a `task_id`.  When the user's reply
+//! arrives, `reply_to_message.message_id` is looked up in that table to find
+//! the target task.  This is stateless and survives daemon restarts.
+//!
+//! Additionally, tapping an inline "↩ Reply" button stores a `pending_reply`
+//! key in kv_store so the user's *next* free-text message routes to that task
+//! without needing an explicit reply gesture.
 //!
 //! The current `poll_offset` is persisted to the SQLite kv_store after every
 //! batch so that a daemon restart does not re-process old updates.
@@ -36,6 +48,7 @@ use crate::agent_input;
 use crate::config::TelegramConfig;
 use crate::cron;
 use crate::db::Database;
+use crate::models::TaskStatus;
 use crate::notifications::telegram;
 use crate::sandbox::podman::PodmanSandbox;
 use crate::sandbox::{Sandbox, SandboxHealth};
@@ -55,7 +68,24 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(120);
 /// Run the long-polling daemon indefinitely.  Call from `main` for the
 /// `Commands::Listen` variant.
 pub fn run(db: &Database, config: &TelegramConfig) -> Result<()> {
+    // Prevent running inside a sandbox container — the host binary is bind-mounted
+    // into containers and an agent or hook could accidentally start a second listener,
+    // causing HTTP 409 conflicts with the host's listener.
+    if std::path::Path::new("/home/node/.nibble").exists() && std::env::var("AGENT_TASK_ID").is_ok()
+    {
+        anyhow::bail!(
+            "Refusing to run 'listen' inside a sandbox container (AGENT_TASK_ID is set). \
+             The Telegram listener must run on the host only."
+        );
+    }
+
     eprintln!("[listen] Starting Telegram long-polling daemon…");
+
+    // Register bot command menu so /commands appear in Telegram's picker.
+    match telegram::register_commands(config) {
+        Ok(()) => eprintln!("[listen] Command menu registered with Telegram"),
+        Err(e) => eprintln!("[listen] Warning: failed to register commands: {e}"),
+    }
 
     // Clear any stale running flags left by a previous crash.
     if let Err(e) = db.reset_all_cron_running_flags() {
@@ -67,11 +97,30 @@ pub fn run(db: &Database, config: &TelegramConfig) -> Result<()> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
 
+    let db_path = crate::db::default_db_path();
     let mut poll_count: u32 = 0;
+    let mut retry_delay_secs: u64 = 5;
+    let mut consecutive_errors: u32 = 0;
 
     loop {
         match get_updates(config, offset) {
             Ok(updates) => {
+                retry_delay_secs = 5;
+                consecutive_errors = 0;
+                let fresh_db = match Database::open(&db_path) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        eprintln!("[listen] Failed to open DB: {e:#}. Retrying…");
+                        thread::sleep(Duration::from_secs(5));
+                        continue;
+                    }
+                };
+
+                eprintln!(
+                    "[listen] Poll ok: {} update(s), offset={offset}",
+                    updates.len()
+                );
+
                 for update in &updates {
                     let update_id = update
                         .get("update_id")
@@ -79,32 +128,34 @@ pub fn run(db: &Database, config: &TelegramConfig) -> Result<()> {
                         .unwrap_or(0);
                     offset = offset.max(update_id + 1);
 
-                    eprintln!("[listen] Processing update_id={update_id}");
-                    if let Err(e) = handle_update(update, config, db) {
+                    if let Err(e) = handle_update(update, config, &fresh_db) {
                         eprintln!("[listen] Error handling update {update_id}: {e:#}");
                     }
                 }
 
-                // Persist offset after every batch (even if empty) to survive restarts.
-                let _ = db.kv_set(POLL_OFFSET_KEY, &offset.to_string());
+                let _ = fresh_db.kv_set(POLL_OFFSET_KEY, &offset.to_string());
+
+                poll_count += 1;
+                if poll_count % PRUNE_EVERY_N_POLLS == 0 {
+                    eprintln!("[listen] Running periodic prune…");
+                    if let Err(e) = crate::prune_stale_tasks(&fresh_db) {
+                        eprintln!("[listen] prune error: {e:#}");
+                    }
+                    eprintln!("[listen] Prune done");
+                }
+                if poll_count % CRON_CHECK_EVERY_N_POLLS == 0 {
+                    if let Err(e) = check_and_run_cron_jobs(&fresh_db, config) {
+                        eprintln!("[listen] cron error: {e:#}");
+                    }
+                }
             }
             Err(e) => {
-                eprintln!("[listen] getUpdates error: {e}. Retrying in 5s…");
-                thread::sleep(Duration::from_secs(5));
-            }
-        }
-
-        // Periodically prune stale tasks and check cron jobs — runs regardless
-        // of whether getUpdates succeeded, so network errors don't freeze crons.
-        poll_count += 1;
-        if poll_count % PRUNE_EVERY_N_POLLS == 0 {
-            if let Err(e) = crate::prune_stale_tasks(db) {
-                eprintln!("[listen] prune error: {e:#}");
-            }
-        }
-        if poll_count % CRON_CHECK_EVERY_N_POLLS == 0 {
-            if let Err(e) = check_and_run_cron_jobs(db, config) {
-                eprintln!("[listen] cron error: {e:#}");
+                consecutive_errors += 1;
+                if consecutive_errors == 1 {
+                    eprintln!("[listen] getUpdates error: {e:#}. Retrying with backoff (suppressing further repeats)…");
+                }
+                thread::sleep(Duration::from_secs(retry_delay_secs));
+                retry_delay_secs = (retry_delay_secs * 2).min(300);
             }
         }
     }
@@ -113,6 +164,15 @@ pub fn run(db: &Database, config: &TelegramConfig) -> Result<()> {
 // ── Update dispatch ───────────────────────────────────────────────────────────
 
 fn handle_update(update: &serde_json::Value, config: &TelegramConfig, db: &Database) -> Result<()> {
+    let update_type = if update.get("callback_query").is_some() {
+        "callback_query"
+    } else if update.get("message").is_some() {
+        "message"
+    } else {
+        "unknown"
+    };
+    eprintln!("[listen] handle_update type={update_type}");
+
     if let Some(cq) = update.get("callback_query") {
         return handle_callback_query(cq, config, db);
     }
@@ -155,22 +215,50 @@ fn handle_callback_query(
 
     eprintln!("[listen] Callback from user {from_id}: data={data:?}");
 
-    let chat_id = cq
-        .pointer("/message/chat/id")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(from_id);
-
     if let Some(task_id) = data.strip_prefix("reply:") {
-        // Persist pending-reply state in the DB so it survives daemon restarts.
+        let chat_id = cq
+            .pointer("/message/chat/id")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(from_id);
+
+        // Validate task exists before setting up routing — fail early with a
+        // clear error rather than letting the user type a message that will
+        // then be rejected.
+        match db.get_task_by_id(task_id) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                eprintln!("[listen] Callback reply: task {task_id} not found in DB");
+                let _ = telegram::answer_callback_query_with_text(
+                    config,
+                    &cq_id,
+                    &format!("⚠️ Task {} not found", &task_id[..task_id.len().min(8)]),
+                );
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("[listen] DB error looking up task {task_id}: {e:#}");
+            }
+        }
+
         let key = format!("{}{}", PENDING_REPLY_PREFIX, chat_id);
-        let _ = db.kv_set(&key, task_id);
-        let _ = telegram::send_reply(
-            config,
-            "✏️ Type your reply and send it:",
-            cq.pointer("/message/message_id")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0),
-        );
+        if let Err(e) = db.kv_set(&key, task_id) {
+            eprintln!("[listen] Failed to store pending reply: {e:#}");
+        }
+
+        let sandbox_msg_id = cq
+            .pointer("/message/message_id")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        match telegram::send_reply(config, "✏️ Type your reply and send it:", sandbox_msg_id) {
+            Ok(prompt_msg_id) => {
+                if let Err(e) = db.insert_bot_message(prompt_msg_id, task_id) {
+                    eprintln!("[listen] Failed to store prompt message_id: {e:#}");
+                }
+            }
+            Err(e) => eprintln!("[listen] Failed to send reply prompt: {e:#}"),
+        }
+
+        eprintln!("[listen] Pending reply set: chat={chat_id} task={task_id}");
     }
 
     Ok(())
@@ -215,17 +303,18 @@ fn handle_message(msg: &serde_json::Value, config: &TelegramConfig, db: &Databas
     );
 
     // Priority 0: Help command
-    if text.trim() == "/help" {
+    if text.trim() == "/help" || text.trim().starts_with("/help@") {
         return handle_help_command(config, chat_id);
     }
 
-    // Priority 0a: /sandboxes command — list running sandboxes with reply buttons.
-    if text.trim() == "/sandboxes" {
+    if text.trim() == "/sandboxes" || text.trim().starts_with("/sandboxes@") {
         return handle_sandboxes_command(config, db, chat_id);
     }
 
-    // Priority 0b: /cron list [task_id_or_path]
-    if text.trim() == "/cron" || text.trim().starts_with("/cron ") {
+    if text.trim() == "/cron"
+        || text.trim().starts_with("/cron ")
+        || text.trim().starts_with("/cron@")
+    {
         let args = text.trim().strip_prefix("/cron").unwrap_or("").trim();
         return handle_cron_command(config, db, chat_id, args);
     }
@@ -256,56 +345,96 @@ fn handle_message(msg: &serde_json::Value, config: &TelegramConfig, db: &Databas
         return handle_spawn_command(config, db, chat_id, repo_path, task_desc);
     }
 
-    // Priority 1: pending-reply state persisted in DB (survives daemon restarts).
+    // Priority 1: pending-reply set by tapping an inline ↩ Reply button.
+    // Consume it so the next message goes back to normal routing.
     let pending_key = format!("{}{}", PENDING_REPLY_PREFIX, chat_id);
-    if let Ok(Some(task_id)) = db.kv_get(&pending_key) {
-        if !task_id.is_empty() {
-            eprintln!("[listen] Routing to pending task {task_id}");
+    match db.kv_get(&pending_key) {
+        Ok(Some(task_id)) if !task_id.is_empty() => {
+            eprintln!("[listen] Routing via pending reply to task {task_id}");
             let _ = db.kv_delete(&pending_key);
             return route_text_to_task(&task_id, &text, config, db, chat_id);
         }
-        let _ = db.kv_delete(&pending_key);
-    }
-
-    // Priority 2: direct reply to a known bot message.
-    if let Some(reply_to) = msg.get("reply_to_message") {
-        if let Some(orig_id) = reply_to.get("message_id").and_then(|v| v.as_i64()) {
-            eprintln!("[listen] Direct reply to message_id={orig_id}");
-            if let Some(task_id) = db.get_task_id_by_message_id(orig_id)? {
-                return route_text_to_task(&task_id, &text, config, db, chat_id);
-            }
+        Ok(Some(empty)) => {
+            eprintln!("[listen] Pending reply key existed but was empty: {empty:?}");
+            let _ = db.kv_delete(&pending_key);
+        }
+        Ok(None) => {
+            eprintln!("[listen] No pending reply for chat={chat_id}");
+        }
+        Err(e) => {
+            eprintln!("[listen] DB error reading pending reply: {e:#}");
         }
     }
 
-    eprintln!("[listen] No routing found, sending hint");
-    // Unknown message — send a hint.
+    // Priority 2: explicit Telegram reply to a known bot message.
+    if let Some(reply_to) = msg.get("reply_to_message") {
+        if let Some(orig_id) = reply_to.get("message_id").and_then(|v| v.as_i64()) {
+            eprintln!("[listen] Reply to message_id={orig_id}");
+            if let Some(task_id) = db.get_task_id_by_message_id(orig_id)? {
+                return route_text_to_task(&task_id, &text, config, db, chat_id);
+            }
+            eprintln!("[listen] message_id={orig_id} not found in bot_messages");
+        }
+    }
+
+    eprintln!("[listen] No routing found — not a pending reply or reply to a known message");
     send_notice(
         config,
         chat_id,
-        "ℹ️ Reply to a task notification to send a message to that agent.",
+        "ℹ️ Tap ↩ Reply on a sandbox notification or use /sandboxes to start a conversation.",
     )?;
 
     Ok(())
 }
 
 fn handle_sandboxes_command(config: &TelegramConfig, db: &Database, _chat_id: i64) -> Result<()> {
-    use crate::sandbox::ContainerStatus;
-
     let sandbox = PodmanSandbox::new();
     let states = db.list_container_states()?;
 
-    // Ask Podman directly — DB task status is unreliable because sandbox tasks
-    // flip between Running/Completed on every turn.
-    let mut running: Vec<(String, String)> = Vec::new(); // (task_id, label)
+    eprintln!(
+        "[sandboxes] checking {} container state entries",
+        states.len()
+    );
+
+    let mut running: Vec<(String, String)> = Vec::new();
+    let mut restarted: Vec<String> = Vec::new();
     for (task_id, container_name, repo_path, _, _created) in &states {
-        if let Ok(ContainerStatus::Running) = sandbox.status(container_name) {
-            // Use the last component of the repo path as the display label.
-            let label = std::path::Path::new(repo_path)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(repo_path.as_str())
-                .to_string();
-            running.push((task_id.clone(), label));
+        let health = sandbox.health_check(container_name);
+        eprintln!("[sandboxes] container={container_name} health={health:?}");
+        match health {
+            crate::sandbox::SandboxHealth::Healthy | crate::sandbox::SandboxHealth::Degraded => {
+                let label = std::path::Path::new(repo_path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(repo_path.as_str())
+                    .to_string();
+                running.push((task_id.clone(), label));
+            }
+            crate::sandbox::SandboxHealth::Stopped => {
+                // Auto-restart stopped containers so the user can interact.
+                eprintln!("[sandboxes] container={container_name} stopped → attempting restart");
+                if sandbox.start(container_name).is_ok() {
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    if sandbox.health_check(container_name) != crate::sandbox::SandboxHealth::Dead {
+                        let label = std::path::Path::new(repo_path)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or(repo_path.as_str())
+                            .to_string();
+                        running.push((task_id.clone(), label.clone()));
+                        restarted.push(label);
+                        if let Ok(Some(mut task)) = db.get_task_by_id(task_id) {
+                            if task.status != TaskStatus::Running {
+                                task.set_running();
+                                let _ = db.update_task(&task);
+                            }
+                        }
+                    }
+                }
+            }
+            crate::sandbox::SandboxHealth::Dead => {
+                eprintln!("[sandboxes] container={container_name} dead/gone — skipping");
+            }
         }
     }
 
@@ -320,6 +449,16 @@ fn handle_sandboxes_command(config: &TelegramConfig, db: &Database, _chat_id: i6
         .collect();
 
     telegram::send_sandbox_list(config, &sandboxes)?;
+
+    if !restarted.is_empty() {
+        let msg = format!(
+            "🔄 Restarted stopped sandbox{}: {}",
+            if restarted.len() > 1 { "s" } else { "" },
+            restarted.join(", ")
+        );
+        send_notice(config, config.chat_id.parse().unwrap_or(0), &msg)?;
+    }
+
     Ok(())
 }
 
@@ -537,7 +676,15 @@ fn route_text_to_task(
     let task = match db.get_task_by_id(task_id)? {
         Some(t) => t,
         None => {
-            send_notice(config, chat_id, "⚠️ Task not found.")?;
+            eprintln!("[listen] Task not found: {task_id}");
+            send_notice(
+                config,
+                chat_id,
+                &format!(
+                    "⚠️ Task {} not found. Use /sandboxes to see available sandboxes.",
+                    &task_id[..task_id.len().min(8)]
+                ),
+            )?;
             return Ok(());
         }
     };
@@ -560,7 +707,16 @@ fn route_text_to_task(
     let messages_before = db.bot_message_count_for_task(task_id).unwrap_or(0);
 
     // Acknowledge immediately so the user knows their message was received.
-    send_notice(config, chat_id, "📨 Message sent to agent.")?;
+    // Store the ack message_id in bot_messages so the user can reply to this
+    // ack to send a follow-up message to the same sandbox.
+    match send_notice_returning_id(config, chat_id, "📨 Message sent to agent.") {
+        Ok(ack_msg_id) => {
+            if let Err(e) = db.insert_bot_message(ack_msg_id, &task.task_id) {
+                eprintln!("[listen] Failed to store ack message_id: {e:#}");
+            }
+        }
+        Err(e) => eprintln!("[listen] Failed to send ack: {e:#}"),
+    }
 
     // Spawn the actual inject in a background thread so the listener loop stays
     // live and can process other Telegram updates while Claude is working.
@@ -761,9 +917,11 @@ fn get_updates(config: &TelegramConfig, offset: i64) -> Result<Vec<serde_json::V
 
 /// Send a short notice message to the user (no reply button, no keyboard).
 fn send_notice(config: &TelegramConfig, chat_id: i64, text: &str) -> Result<()> {
-    // Build a minimal payload targeting the specific chat_id (which may differ
-    // from config.chat_id if the bot is in a group, but for personal bots they
-    // are the same).
+    let _ = send_notice_returning_id(config, chat_id, text)?;
+    Ok(())
+}
+
+fn send_notice_returning_id(config: &TelegramConfig, chat_id: i64, text: &str) -> Result<i64> {
     let url = format!(
         "https://api.telegram.org/bot{}/sendMessage",
         config.bot_token
@@ -772,10 +930,21 @@ fn send_notice(config: &TelegramConfig, chat_id: i64, text: &str) -> Result<()> 
         "chat_id": chat_id,
         "text": text,
     });
-    let _ = ureq::post(&url)
+    let response = ureq::post(&url)
         .set("Content-Type", "application/json")
-        .send_json(&payload);
-    Ok(())
+        .send_json(&payload)
+        .context("send_notice HTTP request failed")?;
+
+    let json: serde_json::Value = response
+        .into_json()
+        .context("Failed to parse send_notice response")?;
+
+    let msg_id = json
+        .pointer("/result/message_id")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+
+    Ok(msg_id)
 }
 
 // ── Auth ──────────────────────────────────────────────────────────────────────

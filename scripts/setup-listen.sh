@@ -45,6 +45,9 @@ fi
 
 # ── Create service ────────────────────────────────────────────────────────────
 mkdir -p "$SERVICE_DIR"
+LOG_DIR="$HOME/.nibble/logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/listen.log"
 
 cat > "$SERVICE_FILE" << EOF
 [Unit]
@@ -59,12 +62,15 @@ Restart=on-failure
 RestartSec=10
 # Give the network time to come up after login
 ExecStartPre=/bin/sleep 3
+StandardOutput=append:$LOG_FILE
+StandardError=append:$LOG_FILE
 
 [Install]
 WantedBy=default.target
 EOF
 
 ok "Created $SERVICE_FILE"
+ok "Logs → $LOG_FILE"
 
 # ── Enable and start ──────────────────────────────────────────────────────────
 systemctl --user daemon-reload
@@ -84,6 +90,6 @@ echo ""
 echo -e "${BOLD}${GREEN}Done!${NC}"
 echo ""
 echo "  Status:  systemctl --user status $SERVICE_NAME"
-echo "  Logs:    journalctl --user -u $SERVICE_NAME -f"
+echo "  Logs:    tail -f $LOG_FILE"
 echo "  Stop:    ./scripts/setup-listen.sh --stop"
 echo ""

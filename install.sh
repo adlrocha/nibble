@@ -149,9 +149,6 @@ cp "$REPO_DIR/target/release/nibble" "$BIN_DIR/nibble"
 chmod +x "$BIN_DIR/nibble"
 ok "nibble"
 
-cp "$REPO_DIR/target/release/agent-bridge" "$BIN_DIR/agent-bridge"
-chmod +x "$BIN_DIR/agent-bridge"
-ok "agent-bridge"
 
 # Restart the listener if it was running before.
 if [ "$LISTENER_WAS_ACTIVE" = true ]; then

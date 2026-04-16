@@ -2096,19 +2096,20 @@ pub(crate) fn prune_stale_tasks(db: &Database) -> Result<usize> {
                     }
                 }
                 SandboxHealth::Dead => {
-                    let _ = db.delete_container_state(task_id);
+                    // Don't delete container_state — a "dead" verdict can be
+                    // caused by a transient Podman socket failure (especially
+                    // after a host reboot).  Keeping the row lets the next
+                    // prune cycle or /sandboxes command retry.
                     if let Ok(Some(mut task)) = db.get_task_by_id(task_id) {
                         task.set_exited(None);
                         let _ = db.update_task(&task);
                         eprintln!(
-                            "[prune] Sandbox {} dead → exited task {}",
+                            "[prune] Sandbox {} dead → exited task {} (keeping container_state)",
                             container_name,
                             &task_id[..8.min(task_id.len())]
                         );
                         pruned += 1;
 
-                        // Notify: container crash is the one case the user
-                        // needs to know about regardless of what they were doing.
                         if cfg.telegram.is_configured() {
                             let repo_label = std::path::Path::new(repo_path)
                                 .file_name()

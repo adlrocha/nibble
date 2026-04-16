@@ -299,12 +299,12 @@ Claude needs permission to run: npm install
 ./install.sh --listen
 ```
 
-This installs a systemd user service (`agent-listener.service`) that long-polls Telegram. Every notification has a **↩ Reply** button — tap it, type your message, and it gets injected into the agent inside its container.
+This installs a systemd user service (`nibble-listener.service`) that long-polls Telegram. Every notification has a **↩ Reply** button — tap it, type your message, and it gets injected into the agent inside its container.
 
 ```bash
 # Daemon management
-systemctl --user status agent-listener
-journalctl --user -u agent-listener -f
+systemctl --user status nibble-listener
+journalctl --user -u nibble-listener -f
 ```
 
 You can also inject directly from the terminal (bypasses Telegram):
@@ -320,6 +320,94 @@ nibble inject <task-id> "Yes, proceed with the migration"
 /sandboxes      — list running sandboxes with reply buttons
 /spawn <path>   — spawn a new sandbox
 /cron list      — list scheduled cron jobs
+```
+
+---
+
+## Troubleshooting & Logging
+
+### Checking listener logs
+
+The listener logs all activity to stderr with a `[listen]` prefix. When running as a systemd service, view logs with:
+
+```bash
+# Follow live logs
+journalctl --user -u nibble-listener -f
+
+# Last 5 minutes
+journalctl --user -u nibble-listener --since '5 min ago'
+```
+
+### Log lines and what they mean
+
+| Log line | Meaning |
+|----------|---------|
+| `[listen] Poll ok: N update(s)` | Listener is alive and received N Telegram updates. If you don't see this, the listener is stuck or not running. |
+| `[listen] Command menu registered` | Bot commands (/help, /sandboxes, etc.) registered with Telegram on startup. |
+| `[listen] handle_update type=callback_query` | User tapped an inline button (e.g. ↩ Reply). |
+| `[listen] Callback from user ...: data="reply:..."` | Reply button tapped; routing data extracted. |
+| `[listen] Pending reply set: chat=... task=...` | `pending_reply` stored in DB — user's next message will route to this task. |
+| `[listen] Routing via pending reply to task ...` | User's message matched a pending reply and is being injected. |
+| `[listen] No pending reply for chat=...` | User sent a message but no pending reply was set (no button tap, or already consumed). |
+| `[listen] Task not found: ...` | The task_id from routing doesn't exist in the DB. |
+| `[listen] getUpdates error: ... 409 ...` | **Another listener instance is running.** See below. |
+| `[listen] Running periodic prune…` / `Prune done` | Periodic health check of all containers. If "Prune done" never appears, a `podman inspect`/`exec` is hanging. |
+| `[sandboxes] checking N container state entries` | `/sandboxes` is evaluating N containers from the DB. |
+| `[sandboxes] container=... health=...` | Health check result for each container. |
+
+### Common issues
+
+#### HTTP 409 Conflict
+
+```
+[listen] getUpdates error: ... status code 409
+```
+
+Telegram only allows one `getUpdates` connection per bot token. A 409 means another process is already polling. This typically happens when:
+
+1. You started `nibble listen` manually while the systemd service is also running
+2. An agent inside a sandbox container accidentally started `nibble listen` (the binary is bind-mounted into containers)
+
+**Fix:**
+
+```bash
+# Kill all listener instances
+systemctl --user stop nibble-listener
+pkill -9 -f 'nibble'
+
+# Verify nothing is running
+ps aux | grep 'nibble listen'
+
+# Wait for Telegram's long-poll to expire (30s timeout)
+sleep 35
+
+# Reset Telegram's polling state
+curl -s "https://api.telegram.org/bot<BOT_TOKEN>/getUpdates?offset=-1" | head -c 200
+
+# Start exactly one instance
+systemctl --user start nibble-listener
+```
+
+**Prevention:** nibble refuses to run `listen` inside a sandbox container (detected via `AGENT_TASK_ID` env var).
+
+#### /sandboxes shows nothing
+
+- Check logs for `[sandboxes]` lines — if containers show `health=Dead`, Podman may not be running or the container was removed
+- If containers show `health=Stopped`, they will be auto-restarted; wait 2-3 seconds
+- If no `[sandboxes]` lines appear at all, the listener isn't processing the command (see 409 above)
+
+#### Reply doesn't route
+
+1. Check that `[listen] Pending reply set` appears after tapping the reply button
+2. Check that `[listen] Routing via pending reply` or `[listen] No pending reply` appears after sending your message
+3. If "No pending reply" — the `pending_reply` was consumed by a different message, or the DB write failed
+
+#### Listener gets stuck (no logs, no responses)
+
+A `podman inspect` or `podman exec` command may be hanging (rare, but happens with certain Podman states). The listener is single-threaded — a hanging subprocess blocks the entire loop. Restart the listener:
+
+```bash
+systemctl --user restart nibble-listener
 ```
 
 ---

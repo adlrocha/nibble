@@ -66,9 +66,20 @@ pub fn send_with_reply_button(config: &TelegramConfig, text: &str, task_id: &str
     Ok(final_id)
 }
 
-/// Send a list of running sandboxes, each with a "↩ Reply" inline button.
+/// Send a ForceReply prompt replying to `reply_to_message_id`.
 ///
-/// Each row in the inline keyboard corresponds to one sandbox task.
+/// Returns the message_id of the sent prompt so it can be stored in
+/// bot_messages for explicit reply gesture routing.
+pub fn send_reply(config: &TelegramConfig, text: &str, reply_to_message_id: i64) -> Result<i64> {
+    let payload = serde_json::json!({
+        "chat_id": config.chat_id,
+        "text": text,
+        "reply_to_message_id": reply_to_message_id,
+        "reply_markup": { "force_reply": true, "selective": true },
+    });
+    post_message(config, &payload)
+}
+
 pub fn send_sandbox_list(
     config: &TelegramConfig,
     sandboxes: &[(&str, &str)], // (task_id, repo_label)
@@ -81,7 +92,7 @@ pub fn send_sandbox_list(
         .iter()
         .map(|(task_id, repo)| {
             vec![serde_json::json!({
-                "text": format!("↩ {} ({})", repo, &task_id[..task_id.len().min(8)]),
+                "text": format!("↩ {}", repo),
                 "callback_data": format!("reply:{}", task_id),
             })]
         })
@@ -91,15 +102,14 @@ pub fn send_sandbox_list(
         .iter()
         .map(|(task_id, repo)| {
             format!(
-                "• <code>{}</code>  {}",
-                &task_id[..task_id.len().min(8)],
-                repo
+                "• <b>{repo}</b>  <code>{}</code>",
+                &task_id[..task_id.len().min(8)]
             )
         })
         .collect();
 
     let text = format!(
-        "🤖 <b>Running sandboxes</b>\n\n{}\n\nTap a button to send a message.",
+        "🤖 <b>Running sandboxes</b>\n\n{}\n\nTap ↩ next to a sandbox, then type your message.",
         lines.join("\n")
     );
 
@@ -117,11 +127,24 @@ pub fn send_sandbox_list(
 ///
 /// Must be called after every callback_query update, even when taking no visible action.
 pub fn answer_callback_query(config: &TelegramConfig, callback_query_id: &str) -> Result<()> {
+    answer_callback_query_with_text(config, callback_query_id, "")
+}
+
+/// Acknowledge a callback query and show a toast notification to the user.
+pub fn answer_callback_query_with_text(
+    config: &TelegramConfig,
+    callback_query_id: &str,
+    text: &str,
+) -> Result<()> {
     let url = format!(
         "https://api.telegram.org/bot{}/answerCallbackQuery",
         config.bot_token
     );
-    let payload = serde_json::json!({"callback_query_id": callback_query_id});
+    let mut payload = serde_json::json!({"callback_query_id": callback_query_id});
+    if !text.is_empty() {
+        payload["text"] = serde_json::Value::String(text.to_string());
+        payload["show_alert"] = serde_json::Value::Bool(false);
+    }
     ureq::post(&url)
         .set("Content-Type", "application/json")
         .send_json(&payload)
@@ -129,14 +152,33 @@ pub fn answer_callback_query(config: &TelegramConfig, callback_query_id: &str) -
     Ok(())
 }
 
-/// Send a plain text reply to a specific message (for daemon → user prompts).
-pub fn send_reply(config: &TelegramConfig, text: &str, reply_to_message_id: i64) -> Result<i64> {
+/// Register the bot's command menu with Telegram (call once at daemon startup).
+///
+/// This makes `/help`, `/sandboxes`, `/cron`, and `/spawn` appear in the
+/// Telegram command picker when the user types `/` in the chat.
+pub fn register_commands(config: &TelegramConfig) -> Result<()> {
+    let url = format!(
+        "https://api.telegram.org/bot{}/setMyCommands",
+        config.bot_token
+    );
     let payload = serde_json::json!({
-        "chat_id": config.chat_id,
-        "text": text,
-        "reply_to_message_id": reply_to_message_id,
+        "commands": [
+            { "command": "sandboxes", "description": "List running sandboxes and send a message" },
+            { "command": "spawn",     "description": "Spawn a new sandbox: /spawn /path/to/repo [task]" },
+            { "command": "cron",      "description": "List scheduled cron jobs: /cron list [repo]" },
+            { "command": "help",      "description": "Show available commands" },
+        ]
     });
-    post_message(config, &payload)
+    let response = ureq::post(&url)
+        .set("Content-Type", "application/json")
+        .send_json(&payload)
+        .context("setMyCommands HTTP request failed")?;
+    if response.status() != 200 {
+        let status = response.status();
+        let body = response.into_string().unwrap_or_default();
+        anyhow::bail!("setMyCommands returned {}: {}", status, body);
+    }
+    Ok(())
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────

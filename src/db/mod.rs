@@ -19,9 +19,11 @@ impl Database {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let conn = Connection::open(path).context("Failed to open database")?;
 
-        // Enable WAL mode for better concurrent access
-        conn.execute_batch("PRAGMA journal_mode=WAL;")
-            .context("Failed to set WAL mode")?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA busy_timeout=5000;",
+        )
+        .context("Failed to set DB pragmas")?;
 
         let mut db = Database { conn };
         db.initialize()?;
@@ -474,7 +476,6 @@ impl Database {
     }
 
     pub fn kv_delete(&self, key: &str) -> Result<()> {
-        // Used by the Telegram listener to clear pending-reply state.
         self.conn
             .execute("DELETE FROM kv_store WHERE key = ?1", params![key])?;
         Ok(())
