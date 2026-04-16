@@ -50,7 +50,12 @@ impl PodmanSandbox {
     }
 
     fn build_image(&self, image_name: &str) -> Result<()> {
-        let dockerfile = self.generate_dockerfile();
+        let default_hermes_image = "nibble-hermes:latest";
+        let dockerfile = if image_name == default_hermes_image {
+            self.generate_hermes_dockerfile()
+        } else {
+            self.generate_dockerfile()
+        };
 
         let temp_dir = tempfile::tempdir().context("Failed to create temp directory")?;
         let dockerfile_path = temp_dir.path().join("Dockerfile");
@@ -78,6 +83,11 @@ impl PodmanSandbox {
     }
 
     fn generate_dockerfile(&self) -> String {
+        self.generate_standard_dockerfile()
+    }
+
+    /// Standard Dockerfile for Claude Code + OpenCode sandboxes.
+    fn generate_standard_dockerfile(&self) -> String {
         r#"FROM node:20-slim
 
 # Install system dependencies.
@@ -113,6 +123,56 @@ RUN curl -fsSL https://opencode.ai/install | bash
 
 # Add ~/.local/bin (claude) and ~/.opencode/bin (opencode) to PATH
 ENV PATH=/home/node/.local/bin:/home/node/.opencode/bin:/usr/local/bin:$PATH
+
+CMD ["bash"]
+"#
+        .to_string()
+    }
+
+    /// Dockerfile for Hermes Agent sandboxes.
+    /// INV-6: Separate image from standard nibble-sandbox to avoid bloating it with Python.
+    fn generate_hermes_dockerfile(&self) -> String {
+        r#"FROM node:20-slim
+
+# Install system dependencies.
+# node:20-slim already has a 'node' user (uid 1000) — we reuse it.
+RUN apt-get update && apt-get install -y \
+    git \
+    curl \
+    procps \
+    sudo \
+    jq \
+    python3 \
+    python3-pip \
+    python3-venv \
+    ripgrep \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Give the existing 'node' user passwordless sudo so it can install
+# system packages inside the container.
+RUN usermod -aG sudo node \
+    && echo "node ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/node \
+    && chmod 0440 /etc/sudoers.d/node
+
+# Create workspace and repos directories owned by node
+RUN mkdir -p /workspace /repos && chown node:node /workspace /repos
+WORKDIR /workspace
+
+# Switch to node user
+USER node
+
+# Install uv (fast Python package manager)
+RUN curl -LsSf https://astral.sh/uv/install.sh | bash
+
+# Add uv and local bin to PATH
+ENV PATH=/home/node/.local/bin:/home/node/.cargo/bin:/usr/local/bin:$PATH
+
+# Install Hermes Agent via the official installer
+RUN curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash
+
+# Reload PATH to include hermes
+ENV PATH=/home/node/.local/bin:/home/node/.hermes-agent/venv/bin:/usr/local/bin:$PATH
 
 CMD ["bash"]
 "#
@@ -427,10 +487,14 @@ impl Sandbox for PodmanSandbox {
 
         args.push(config.image.clone());
 
-        // Container PID 1 is just sleep infinity — keeps the container alive.
-        // `attach` opens an interactive claude session via `podman exec -it`.
-        args.push("sleep".to_string());
-        args.push("infinity".to_string());
+        // Container PID 1: use custom entrypoint if provided, otherwise sleep infinity.
+        // INV-1: For Hermes sandboxes, the gateway is PID 1 so the container stops if it crashes.
+        if config.entrypoint.is_empty() {
+            args.push("sleep".to_string());
+            args.push("infinity".to_string());
+        } else {
+            args.extend(config.entrypoint.iter().cloned());
+        }
 
         let output = Command::new("podman")
             .args(&args)
@@ -615,6 +679,43 @@ mod tests {
         assert_eq!(
             sandbox.parse_container_status(stopped_json).unwrap(),
             ContainerStatus::Stopped
+        );
+    }
+
+    /// INV-6: Hermes Dockerfile is separate and contains Python + Hermes install
+    #[test]
+    fn test_hermes_inv6_dockerfile_contains_python() {
+        let sandbox = PodmanSandbox::new();
+        let df = sandbox.generate_hermes_dockerfile();
+        assert!(df.contains("python3"), "Dockerfile must install python3");
+        assert!(
+            df.contains("hermes-agent"),
+            "Dockerfile must install hermes-agent"
+        );
+        assert!(df.contains("uv"), "Dockerfile must install uv");
+        assert!(df.contains("/repos"), "Dockerfile must create /repos dir");
+    }
+
+    /// INV-6: Hermes Dockerfile runs as non-root user (node)
+    #[test]
+    fn test_hermes_inv6_dockerfile_non_root() {
+        let sandbox = PodmanSandbox::new();
+        let df = sandbox.generate_hermes_dockerfile();
+        assert!(
+            df.contains("USER node"),
+            "Hermes container must run as node user"
+        );
+    }
+
+    /// INV-6: Hermes Dockerfile is different from standard dockerfile
+    #[test]
+    fn test_hermes_inv6_dockerfile_separate_from_standard() {
+        let sandbox = PodmanSandbox::new();
+        let hermes_df = sandbox.generate_hermes_dockerfile();
+        let standard_df = sandbox.generate_standard_dockerfile();
+        assert_ne!(
+            hermes_df, standard_df,
+            "Hermes and standard Dockerfiles must differ"
         );
     }
 }
