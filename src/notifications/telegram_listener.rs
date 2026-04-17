@@ -649,6 +649,7 @@ fn handle_spawn_command(
             false, // opencode — Telegram-spawned sandboxes use Claude Code
             false, // factory — disabled for Telegram spawns (one-off interactions; trigger manually if needed)
             false, // hermes — Telegram-spawned sandboxes use Claude Code
+            false, // pi — Telegram-spawned sandboxes use Claude Code
         ) {
             Ok(task_id) => {
                 let msg = format!(
@@ -1063,6 +1064,7 @@ fn find_or_spawn_for_cron(
         false, // opencode — cron-spawned sandboxes use Claude Code
         cfg.factory.enabled,
         false, // hermes
+        false, // pi
     )?;
 
     db.get_task_by_id(&new_task_id)?

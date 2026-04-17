@@ -126,6 +126,10 @@ pub enum SandboxAction {
         /// Spawns a dedicated Hermes container with gateway support.
         #[arg(long)]
         hermes: bool,
+        /// Use Pi (pi.dev) coding agent instead of Claude Code.
+        /// Installs @mariozechner/pi-coding-agent at spawn time.
+        #[arg(long)]
+        pi: bool,
     },
 
     /// List all sandbox containers and their status
@@ -154,6 +158,9 @@ pub enum SandboxAction {
         /// Use Hermes Agent instead of Claude Code / OpenCode
         #[arg(long)]
         hermes: bool,
+        /// Use Pi (pi.dev) coding agent instead of Claude Code
+        #[arg(long)]
+        pi: bool,
         /// Create a git worktree for this branch and spawn+attach a sandbox for it.
         /// The worktree is created at <repo_parent>/<repo_name>--<branch-slug>.
         /// The branch is auto-created from the repo's current HEAD if it doesn't exist.

@@ -126,7 +126,10 @@ fn main() -> Result<()> {
                     AgentType::OpenCode => {
                         ctx.opencode_session_id = Some(session_id);
                     }
-                    AgentType::ClaudeCode | AgentType::Hermes | AgentType::Unknown(_) => {
+                    AgentType::ClaudeCode
+                    | AgentType::Hermes
+                    | AgentType::Pi
+                    | AgentType::Unknown(_) => {
                         // Use ses_ prefix as tiebreaker (opencode IDs, UUID = Claude)
                         if session_id.starts_with("ses_") {
                             ctx.opencode_session_id = Some(session_id);
@@ -191,6 +194,7 @@ fn main() -> Result<()> {
                 branch,
                 factory,
                 hermes,
+                pi,
             } => {
                 let effective_repo_path = if let Some(ref branch_name) = branch {
                     let worktree = create_worktree(std::path::Path::new(&repo_path), branch_name)?;
@@ -213,6 +217,7 @@ fn main() -> Result<()> {
                     false, // opencode
                     factory_enabled,
                     hermes,
+                    pi,
                 )?;
             }
             SandboxAction::List => {
@@ -226,6 +231,7 @@ fn main() -> Result<()> {
                 glm,
                 opencode,
                 hermes,
+                pi,
                 branch,
             } => {
                 // If --branch is given, resolve the worktree path (creating it if needed)
@@ -240,7 +246,9 @@ fn main() -> Result<()> {
 
                 match resolve_sandbox_id(&db, &effective_path) {
                     Ok(task_id) => {
-                        cmd_sandbox_attach(&db, task_id, fresh, btw, kimi, glm, opencode, hermes)?;
+                        cmd_sandbox_attach(
+                            &db, task_id, fresh, btw, kimi, glm, opencode, hermes, pi,
+                        )?;
                     }
                     Err(e) => {
                         // If the input looks like a repo path and no sandbox exists,
@@ -267,9 +275,10 @@ fn main() -> Result<()> {
                                 opencode,
                                 cfg.factory.enabled,
                                 hermes,
+                                pi,
                             )?;
                             cmd_sandbox_attach(
-                                &db, task_id, fresh, btw, kimi, glm, opencode, hermes,
+                                &db, task_id, fresh, btw, kimi, glm, opencode, hermes, pi,
                             )?;
                         } else {
                             return Err(e);
@@ -410,11 +419,13 @@ fn main() -> Result<()> {
                 .get_task_by_id(&task_id)?
                 .ok_or_else(|| anyhow::anyhow!("Task not found: {}", task_id))?;
 
-            // Auto-detect hermes from stored agent type (unused for now — inject support
-            // for Hermes is deferred to future work, but detection is ready)
             let _hermes = task.agent_type == AgentType::Hermes;
             if _hermes {
                 anyhow::bail!("Inject is not yet supported for Hermes sandboxes. Use `nibble sandbox attach` instead.");
+            }
+            let _pi = task.agent_type == AgentType::Pi;
+            if _pi {
+                anyhow::bail!("Inject is not yet supported for Pi sandboxes. Use `nibble sandbox attach` instead.");
             }
             agent_input::inject(&task, &message)?;
             println!("Message injected into task {}", task_id);
@@ -679,6 +690,94 @@ fn backup_session_file(session_id: &str) {
     // File not found — session hasn't started yet, nothing to back up.
 }
 
+// ── Pi helper functions ────────────────────────────────────────────────────────
+
+/// Ensure `~/.pi/agent/skills` is a symlink pointing to `~/.claude/skills/`.
+///
+/// Called at spawn time so the AI Factory pipeline skills are available to pi
+/// without duplicating files.  Non-fatal on failure — logs a warning and continues.
+fn ensure_pi_skills_symlink(home_dir: &std::path::Path) {
+    let pi_skills = home_dir.join(".pi").join("agent").join("skills");
+    let claude_skills = home_dir.join(".claude").join("skills");
+
+    // Already a symlink — no-op
+    if pi_skills.is_symlink() {
+        return;
+    }
+
+    // Exists as a real directory — warn and skip (don't clobber user data)
+    if pi_skills.is_dir() {
+        eprintln!(
+            "  Warning: {} exists as a directory, skipping skills symlink",
+            pi_skills.display()
+        );
+        return;
+    }
+
+    if let Err(e) = std::os::unix::fs::symlink(&claude_skills, &pi_skills) {
+        eprintln!(
+            "  Warning: failed to create skills symlink {} → {}: {}",
+            pi_skills.display(),
+            claude_skills.display(),
+            e
+        );
+    }
+}
+
+/// Delete the most recent pi session file for the current workspace.
+///
+/// Pi stores sessions at `~/.pi/agent/sessions/<workspace-hash>/`.  Since the
+/// hash is computed by pi internally, we use a best-effort approach: find the
+/// newest `.jsonl` file across all session subdirectories sorted by mtime.
+fn delete_latest_pi_session() {
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => return,
+    };
+    let sessions_dir = home.join(".pi").join("agent").join("sessions");
+    if !sessions_dir.exists() {
+        return;
+    }
+
+    let mut newest: Option<(std::path::PathBuf, std::time::SystemTime)> = None;
+    if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
+        for entry in entries.flatten() {
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            if let Ok(files) = std::fs::read_dir(entry.path()) {
+                for file in files.flatten() {
+                    let path = file.path();
+                    if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                        continue;
+                    }
+                    if let Ok(meta) = file.metadata() {
+                        if let Ok(mtime) = meta.modified() {
+                            if newest.as_ref().map_or(true, |(_, t)| mtime > *t) {
+                                newest = Some((path, mtime));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some((path, _)) = newest {
+        match std::fs::remove_file(&path) {
+            Ok(()) => eprintln!(
+                "  Session:   deleted latest pi session ({})",
+                path.display()
+            ),
+            Err(e) => eprintln!(
+                "  Warning:   could not delete pi session {}: {}",
+                path.display(),
+                e
+            ),
+        }
+    }
+}
+
 /// Spawn a sandboxed Claude Code agent.  Returns the new task_id on success.
 pub(crate) fn cmd_sandbox_spawn(
     db: &Database,
@@ -693,6 +792,7 @@ pub(crate) fn cmd_sandbox_spawn(
     opencode: bool,
     factory_enabled: bool,
     hermes: bool,
+    pi: bool,
 ) -> Result<String> {
     let repo = PathBuf::from(&repo_path);
     if !repo.exists() {
@@ -737,6 +837,7 @@ pub(crate) fn cmd_sandbox_spawn(
                             glm,
                             opencode,
                             hermes,
+                            pi,
                         )?;
                     }
                     return Ok(existing_task_id);
@@ -773,6 +874,7 @@ pub(crate) fn cmd_sandbox_spawn(
                                     glm,
                                     opencode,
                                     hermes,
+                                    pi,
                                 )?;
                             }
                             return Ok(tid.clone());
@@ -851,7 +953,6 @@ pub(crate) fn cmd_sandbox_spawn(
     let entrypoint = if hermes {
         let hcfg = hermes_cfg.as_ref().unwrap();
         if hcfg.gateway {
-            // INV-1: Gateway is PID 1 so container stops if it crashes
             vec![
                 "/bin/bash".to_string(),
                 "-lc".to_string(),
@@ -863,6 +964,22 @@ pub(crate) fn cmd_sandbox_spawn(
     } else {
         vec![]
     };
+
+    // Pi-specific mounts: ~/.pi/ config dir
+    if pi {
+        let home_dir = dirs::home_dir().context("Failed to get home directory")?;
+        let pi_dir = home_dir.join(".pi");
+        if !pi_dir.exists() {
+            std::fs::create_dir_all(pi_dir.join("agent").join("skills"))
+                .with_context(|| "Failed to create ~/.pi/agent/skills")?;
+            std::fs::create_dir_all(pi_dir.join("agent").join("sessions"))
+                .with_context(|| "Failed to create ~/.pi/agent/sessions")?;
+            std::fs::create_dir_all(pi_dir.join("agent").join("extensions"))
+                .with_context(|| "Failed to create ~/.pi/agent/extensions")?;
+        }
+        extra_volumes.push(format!("{}:/home/node/.pi:rw", pi_dir.display()));
+        ensure_pi_skills_symlink(&home_dir);
+    }
 
     let config = SandboxConfig {
         image: effective_image,
@@ -882,7 +999,37 @@ pub(crate) fn cmd_sandbox_spawn(
         .unwrap_or_else(|| repo_path.clone());
 
     // Claude/OpenCode-specific post-spawn setup (skip for Hermes)
+    // Pi-specific setup: install pi via npm, run setup.sh, inject AGENTS.md
     if !hermes {
+        // Pi install: npm install @mariozechner/pi-coding-agent (non-fatal)
+        if pi {
+            let pi_cfg = config::load().unwrap_or_default().pi;
+            if pi_cfg.install_on_spawn {
+                let status = std::process::Command::new("podman")
+                    .args([
+                        "exec",
+                        "-u",
+                        "node",
+                        &info.id,
+                        "npm",
+                        "install",
+                        "-g",
+                        "@mariozechner/pi-coding-agent",
+                    ])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+                match status {
+                    Ok(s) if s.success() => {
+                        println!("  Tools:     @mariozechner/pi-coding-agent installed")
+                    }
+                    Ok(_) => eprintln!(
+                        "  Tools:     ⚠️  pi npm install exited non-zero (install manually inside)"
+                    ),
+                    Err(e) => eprintln!("  Tools:     ⚠️  pi npm install failed to run: {e}"),
+                }
+            }
+        }
         // This propagates the host Claude login into the container so the user
         // doesn't have to re-authenticate inside the sandbox.
         let restore_result = std::process::Command::new("podman")
@@ -985,6 +1132,8 @@ pub(crate) fn cmd_sandbox_spawn(
 
     let agent_type = if hermes {
         AgentType::Hermes
+    } else if pi {
+        AgentType::Pi
     } else {
         AgentType::ClaudeCode
     };
@@ -1067,20 +1216,32 @@ pub(crate) fn cmd_sandbox_spawn(
     }
 
     if no_attach {
-        let agent_name = if hermes { "Hermes" } else { "Claude" };
+        let agent_name = if hermes {
+            "Hermes"
+        } else if pi {
+            "Pi"
+        } else {
+            "Claude"
+        };
+        let agent_flag = if hermes {
+            " --hermes"
+        } else if pi {
+            " --pi"
+        } else {
+            ""
+        };
         println!("Attach to the {} session:", agent_name);
-        let hermes_flag = if hermes { " --hermes" } else { "" };
         println!(
             "  nibble sandbox attach {}{}          (by repo path)",
-            abs_repo_path, hermes_flag
+            abs_repo_path, agent_flag
         );
         println!(
             "  nibble sandbox attach {}{}   (by task ID)",
-            short_id, hermes_flag
+            short_id, agent_flag
         );
         println!(
             "  nibble sandbox attach {}{} --fresh  (start a new conversation)",
-            short_id, hermes_flag
+            short_id, agent_flag
         );
         println!("  (The container keeps running after you exit — re-attach any time)");
         println!();
@@ -1089,6 +1250,8 @@ pub(crate) fn cmd_sandbox_spawn(
     } else {
         let agent_label = if hermes {
             "Hermes"
+        } else if pi {
+            "Pi"
         } else if opencode {
             "opencode"
         } else {
@@ -1112,6 +1275,7 @@ pub(crate) fn cmd_sandbox_spawn(
             glm,
             opencode,
             hermes,
+            pi,
         )?;
     }
 
@@ -1625,13 +1789,15 @@ fn cmd_sandbox_attach(
     glm: bool,
     opencode: bool,
     hermes: bool,
+    pi: bool,
 ) -> Result<()> {
     let task = db
         .get_task_by_id(&task_id)?
         .ok_or_else(|| anyhow::anyhow!("Task not found: {}", task_id))?;
 
-    // Auto-detect hermes from stored agent type so users don't need --hermes on every attach
+    // Auto-detect hermes/pi from stored agent type so users don't need the flag on every attach
     let hermes = hermes || task.agent_type == AgentType::Hermes;
+    let pi = pi || task.agent_type == AgentType::Pi;
 
     if task.sandbox_type != SandboxType::Podman {
         anyhow::bail!("Task {} is not a sandbox task", task_id);
@@ -1658,6 +1824,20 @@ fn cmd_sandbox_attach(
         }
         if kimi || glm {
             anyhow::bail!("--kimi/--glm are not supported with --hermes");
+        }
+        if pi {
+            anyhow::bail!("--hermes and --pi are mutually exclusive");
+        }
+    }
+    if pi {
+        if opencode {
+            anyhow::bail!("--pi and --opencode are mutually exclusive");
+        }
+        if kimi {
+            anyhow::bail!("--pi and --kimi are mutually exclusive");
+        }
+        if glm {
+            anyhow::bail!("--pi and --glm are mutually exclusive");
         }
     }
     if opencode {
@@ -1712,6 +1892,17 @@ fn cmd_sandbox_attach(
             "hermes".to_string()
         } else {
             "hermes --continue".to_string()
+        }
+    } else if pi {
+        // Pi mode: start an interactive pi TUI session.
+        // -c resumes the last session for the workspace.
+        if fresh {
+            delete_latest_pi_session();
+            "pi".to_string()
+        } else if btw {
+            "pi".to_string()
+        } else {
+            "pi -c".to_string()
         }
     } else if opencode {
         // opencode mode: resume via --session <id> if we have one stored, otherwise
@@ -1880,6 +2071,12 @@ fn cmd_sandbox_attach(
             task.title, container_id
         );
         eprintln!("(Exit hermes or press Ctrl+C to detach — the container keeps running)");
+    } else if pi {
+        eprintln!(
+            "Attaching to sandbox {} ({}) [pi]…",
+            task.title, container_id
+        );
+        eprintln!("(Exit pi or press Ctrl+C to detach — the container keeps running)");
     } else if opencode {
         eprintln!(
             "Attaching to sandbox {} ({}) [opencode]…",
@@ -2686,6 +2883,7 @@ fn agent_display(agent_type: &AgentType) -> (&'static str, String) {
         AgentType::ClaudeCode => ("🤖", "Claude Code".to_string()),
         AgentType::OpenCode => ("⚡", "OpenCode".to_string()),
         AgentType::Hermes => ("🧠", "Hermes".to_string()),
+        AgentType::Pi => ("🥧", "Pi".to_string()),
         AgentType::Unknown(s) => ("🔧", s.clone()),
     }
 }
@@ -3365,7 +3563,7 @@ mod notification_tests {
             AgentType::OpenCode => {
                 ctx.opencode_session_id = Some(sid.clone());
             }
-            AgentType::ClaudeCode | AgentType::Hermes | AgentType::Unknown(_) => {
+            AgentType::ClaudeCode | AgentType::Hermes | AgentType::Pi | AgentType::Unknown(_) => {
                 if sid.starts_with("ses_") {
                     ctx.opencode_session_id = Some(sid.clone());
                 } else {
