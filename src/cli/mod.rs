@@ -17,6 +17,12 @@ pub enum Commands {
         action: SandboxAction,
     },
 
+    /// Manage the Hermes Agent sandbox (singleton with dynamic repo mounts)
+    Hermes {
+        #[command(subcommand)]
+        action: HermesAction,
+    },
+
     /// Inject a message into a running sandbox agent (bypasses Telegram)
     Inject {
         /// Task ID of the agent to inject into
@@ -122,10 +128,6 @@ pub enum SandboxAction {
         /// Default is controlled by factory.enabled in ~/.nibble/config.toml.
         #[arg(long)]
         factory: Option<bool>,
-        /// Use Hermes Agent instead of Claude Code / OpenCode.
-        /// Spawns a dedicated Hermes container with gateway support.
-        #[arg(long)]
-        hermes: bool,
     },
 
     /// List all sandbox containers and their status
@@ -151,9 +153,6 @@ pub enum SandboxAction {
         /// Use opencode instead of Claude Code as the coding agent
         #[arg(long)]
         opencode: bool,
-        /// Use Hermes Agent instead of Claude Code / OpenCode
-        #[arg(long)]
-        hermes: bool,
         /// Create a git worktree for this branch and spawn+attach a sandbox for it.
         /// The worktree is created at <repo_parent>/<repo_name>--<branch-slug>.
         /// The branch is auto-created from the repo's current HEAD if it doesn't exist.
@@ -214,6 +213,46 @@ pub enum SandboxAction {
         #[arg(long)]
         all: bool,
     },
+}
+
+#[derive(Subcommand)]
+pub enum HermesAction {
+    /// Spawn the Hermes Agent sandbox (gateway as PID 1, no primary repo)
+    Init,
+
+    /// Attach to the Hermes CLI inside the sandbox (auto-spawns if needed)
+    Attach {
+        /// Start a fresh hermes session instead of resuming
+        #[arg(long)]
+        fresh: bool,
+    },
+
+    /// Mount a repo directory into the Hermes sandbox (restarts container)
+    Mount {
+        /// Path to the repo directory to mount
+        repo_path: String,
+        /// Custom mount name inside /repos/ (defaults to directory basename)
+        #[arg(long)]
+        name: Option<String>,
+        /// Skip confirmation prompt
+        #[arg(short, long)]
+        yes: bool,
+    },
+
+    /// Unmount a repo from the Hermes sandbox (restarts container)
+    Unmount {
+        /// Path to the repo directory to unmount
+        repo_path: String,
+        /// Skip confirmation prompt
+        #[arg(short, long)]
+        yes: bool,
+    },
+
+    /// Show Hermes sandbox status and mounted repos
+    List,
+
+    /// Stop and remove the Hermes sandbox (repos are preserved for next init)
+    Kill,
 }
 
 #[derive(Subcommand)]

@@ -4,6 +4,37 @@
 
 A CLI tool that runs Claude Code agents inside isolated Podman sandboxes, monitors their status, sends Telegram notifications when they need your attention, and lets you reply from your phone to unblock them — all without touching your keyboard.
 
+---
+
+## Feature Inventory
+
+This section lists every feature area in the project. Use it to audit what's worth keeping.
+
+| # | Feature | Status | Description |
+|---|---------|--------|-------------|
+| 1 | **Podman Sandboxes** | core | Per-repo rootless containers; repo mounted RW; `sleep infinity` PID 1; `podman exec` for attach |
+| 2 | **Session Continuity** | core | Deterministic session UUID per repo; resume across detach/reboot/Telegram injection; `--fresh` to start over |
+| 3 | **Task DB** | core | SQLite backend tracking all tasks (sandboxed + non-sandboxed), states (running/completed/exited), session IDs |
+| 4 | **Install script** | core | `install.sh` — builds binary, installs Podman if absent, builds sandbox image, wires Claude hooks, optionally sets up Telegram |
+| 5 | **Claude Code hooks** | core | Stop hook → `nibble report session-id` + `nibble notify`; wrappers register tasks at startup |
+| 6 | **Setup scripts** | dx | `.nibble/setup.sh` in any repo — auto-runs at spawn to install toolchain before first attach |
+| 7 | **Git worktrees** | dx | `--branch` flag on spawn/attach/kill — creates/cleans up a worktree automatically per branch |
+| 8 | **`--btw` sessions** | dx | `attach --btw` — throwaway session that doesn't affect main session history (ad-hoc research, parallel work) |
+| 9 | **Session GC** | dx | `nibble sandbox gc` — deletes old `.jsonl` history files from `~/.claude/projects/` to free disk |
+| 10 | **Hermes Agent** | experimental | Singleton sandbox where you mount/unmount repos dynamically; `hermes gateway` as PID 1 |
+| 11 | **Alternative LLM backends** | experimental | `--kimi`, `--glm`, `--opencode` flags on attach — use non-Claude agents inside the same sandbox |
+| 12 | **Telegram notifications** | notifications | Sends last-message/attention alert to phone when agent finishes or needs input |
+| 13 | **Telegram reply listener** | notifications | Long-poll daemon (`nibble listen`) — routes phone replies back to agents via `podman exec -i` |
+| 14 | **Telegram bot commands** | notifications | `/help`, `/sandboxes`, `/spawn`, `/cron list` — control nibble from phone |
+| 15 | **Cron jobs** | scheduling | Schedule prompts to run inside sandboxes on a cron expression; markdown file format; skip-if-running; expiry |
+| 16 | **Status line** | dx | Claude Code terminal status bar showing dir, branch, model, context %, 5h and 7d rate limit bars |
+| 17 | **AI Factory pipeline** | meta | `factory-spec` → `factory-implement` → `factory-tdd` → `factory-adversarial` → `factory-risk-score` → `factory-qa-gate` skills; `--factory` flag on spawn injects pipeline instructions into AGENTS.md; blueprints/reports stored under `.nibble/factory/` |
+| 18 | **Health checks** | ops | `SandboxHealth` enum (Healthy/Degraded/Dead); periodic prune in listen daemon; Telegram alert on unexpected container death |
+| 19 | **Auto-resume on reboot** | ops | systemd user service (`nibble-resume.service`) restarts containers after host reboot |
+| 20 | **Inject** | ops | `nibble inject <id> <msg>` — send a message directly to any sandbox agent, bypassing Telegram |
+
+---
+
 ## Features
 
 - **Podman Sandboxes**: Run agents in rootless containers — repo mounted read-write, ports exposed, full dev flexibility inside
@@ -223,6 +254,83 @@ Run automatically on login via systemd, or manually:
 ```bash
 nibble sandbox resume --all
 ```
+
+---
+
+## Hermes Agent
+
+Hermes Agent is a long-running coding agent with a gateway daemon. Unlike per-repo sandboxes, Hermes runs as a **singleton sandbox** where you dynamically mount/unmount the repos you want it to work on.
+
+### Setup
+
+```bash
+# Build and install nibble (includes hermes image build on first use)
+./install.sh
+
+# Make sure ~/.hermes/ is configured with your LLM provider
+hermes setup
+```
+
+### Start the Hermes sandbox
+
+```bash
+nibble hermes init
+```
+
+This spawns a Podman container with `hermes gateway` as PID 1. The gateway stays running in the background, and you can attach/detach from the CLI at any time.
+
+### Mount repos
+
+```bash
+# Add a repo (container restarts to apply)
+nibble hermes mount /path/to/my-project
+
+# Add with a custom mount name
+nibble hermes mount /path/to/my-project --name work-project
+
+# Repos appear inside the container at /repos/<name>
+```
+
+Mounting requires a container restart. You'll be prompted to confirm — use `--yes` to skip the prompt:
+
+```bash
+nibble hermes mount /path/to/repo --yes
+```
+
+### Attach to the Hermes CLI
+
+```bash
+nibble hermes attach          # resume last session
+nibble hermes attach --fresh  # start a new session
+```
+
+Auto-spawns the sandbox if it's not running.
+
+### Unmount a repo
+
+```bash
+nibble hermes unmount /path/to/my-project
+```
+
+### Check status
+
+```bash
+nibble hermes list
+```
+
+Shows the sandbox status and all mounted repos.
+
+### Stop the sandbox
+
+```bash
+nibble hermes kill
+```
+
+The sandbox stops but **mounted repos are preserved** in the database. Running `nibble hermes init` or `nibble hermes attach` again will re-spawn with all previously mounted repos.
+
+### Security model
+
+Only the repos you explicitly mount are accessible inside the container. No home directory is exposed. The Hermes agent runs as non-root (`node` user) with `--network host` to reach a local LLM.
 
 ---
 
@@ -590,6 +698,12 @@ Network is host-mode, so services started inside the container (e.g. `npm run de
 | `nibble sandbox resume --all` | Resume agents after reboot |
 | `nibble sandbox gc <id>` | Delete old session history, keep latest |
 | `nibble sandbox gc <id> --all` | Wipe all session history |
+| `nibble hermes init` | Start Hermes Agent sandbox (singleton) |
+| `nibble hermes attach` | Attach to Hermes CLI (auto-spawns if needed) |
+| `nibble hermes mount <path>` | Mount a repo into the Hermes sandbox |
+| `nibble hermes unmount <path>` | Unmount a repo from the Hermes sandbox |
+| `nibble hermes list` | Show Hermes sandbox status and mounted repos |
+| `nibble hermes kill` | Stop Hermes sandbox (repos preserved) |
 | `./install.sh --rebuild` | Rebuild sandbox image |
 | `nibble cron add` | Schedule a prompt |
 | `nibble cron list` | List cron jobs |

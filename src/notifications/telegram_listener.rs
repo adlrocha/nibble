@@ -641,14 +641,13 @@ fn handle_spawn_command(
             repo_path,
             task_desc,
             "nibble-sandbox:latest".to_string(),
-            false, // fresh
-            None,  // session_id — None uses deterministic UUID v5 for the repo
-            true,  // no_attach — background thread, do not exec into tty
-            false, // kimi — Telegram spawn doesn't support Kimi backend
-            false, // glm  — Telegram spawn doesn't support GLM backend
-            false, // opencode — Telegram-spawned sandboxes use Claude Code
-            false, // factory — disabled for Telegram spawns (one-off interactions; trigger manually if needed)
-            false, // hermes — Telegram-spawned sandboxes use Claude Code
+            false,
+            None,
+            true,
+            false,
+            false,
+            false,
+            false,
         ) {
             Ok(task_id) => {
                 let msg = format!(
@@ -1057,12 +1056,11 @@ fn find_or_spawn_for_cron(
         "nibble-sandbox:latest".to_string(),
         false,
         None,
-        true,  // no_attach
-        false, // kimi
-        false, // glm
-        false, // opencode — cron-spawned sandboxes use Claude Code
+        true,
+        false,
+        false,
+        false,
         cfg.factory.enabled,
-        false, // hermes
     )?;
 
     db.get_task_by_id(&new_task_id)?

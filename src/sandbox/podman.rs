@@ -64,6 +64,7 @@ impl PodmanSandbox {
         let output = Command::new("podman")
             .args([
                 "build",
+                "--progress=plain",
                 "-t",
                 image_name,
                 "-f",
@@ -74,8 +75,10 @@ impl PodmanSandbox {
             .context("Failed to build sandbox image")?;
 
         if !output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("Failed to build image: {}", stderr);
+            let combined = format!("{}{}", stdout, stderr);
+            bail!("Failed to build image: {}", combined);
         }
 
         println!("Sandbox image '{}' built successfully", image_name);
@@ -168,10 +171,14 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | bash
 # Add uv and local bin to PATH
 ENV PATH=/home/node/.local/bin:/home/node/.cargo/bin:/usr/local/bin:$PATH
 
-# Install Hermes Agent via the official installer
-RUN curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash
+# Install Hermes Agent to /opt/hermes-agent (outside ~/.hermes/) so the host's
+# ~/.hermes/ mount at runtime doesn't shadow the installation directory.
+# The install script uses HERMES_HOME for config/data and INSTALL_DIR for the code.
+# We set INSTALL_DIR to /opt/hermes-agent to keep code separate from config.
+RUN curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh \
+    | bash -s -- --skip-setup --dir /home/node/.hermes-agent
 
-# Reload PATH to include hermes
+# Ensure hermes venv is on PATH
 ENV PATH=/home/node/.local/bin:/home/node/.hermes-agent/venv/bin:/usr/local/bin:$PATH
 
 CMD ["bash"]

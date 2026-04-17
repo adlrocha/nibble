@@ -9,7 +9,7 @@ use crate::models::{
     AgentType, CronJob, SandboxConfig, SandboxType, Task, TaskContext, TaskStatus,
 };
 
-const SCHEMA_VERSION: i32 = 8;
+const SCHEMA_VERSION: i32 = 9;
 
 pub struct Database {
     conn: Connection,
@@ -129,6 +129,14 @@ impl Database {
                 created_at INTEGER NOT NULL
             );
             CREATE INDEX idx_cron_next_run ON cron_jobs(next_run) WHERE enabled=1;
+
+            CREATE TABLE hermes_repos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo_path TEXT UNIQUE NOT NULL,
+                mount_name TEXT UNIQUE NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX idx_hermes_repos_path ON hermes_repos(repo_path);
             ",
         )?;
 
@@ -275,6 +283,19 @@ impl Database {
             // Add worktree_path column to container_state for git worktree support.
             self.conn
                 .execute_batch("ALTER TABLE container_state ADD COLUMN worktree_path TEXT;")?;
+        }
+
+        if from_version < 9 {
+            // Add hermes_repos table for dynamic repo mounts.
+            self.conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS hermes_repos (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    repo_path TEXT UNIQUE NOT NULL,
+                    mount_name TEXT UNIQUE NOT NULL,
+                    created_at INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_hermes_repos_path ON hermes_repos(repo_path);",
+            )?;
         }
 
         self.conn.execute(
@@ -618,6 +639,85 @@ impl Database {
         Ok(result)
     }
 
+    // Hermes repo mount methods
+
+    /// Add a repo to the hermes_repos table. Returns the row id.
+    pub fn insert_hermes_repo(&self, repo_path: &str, mount_name: &str) -> Result<i64> {
+        let now = Utc::now().timestamp();
+        self.conn.execute(
+            "INSERT INTO hermes_repos (repo_path, mount_name, created_at) VALUES (?1, ?2, ?3)",
+            params![repo_path, mount_name, now],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Remove a repo from hermes_repos by canonical path. Returns true if deleted.
+    pub fn delete_hermes_repo(&self, repo_path: &str) -> Result<bool> {
+        let affected = self.conn.execute(
+            "DELETE FROM hermes_repos WHERE repo_path = ?1",
+            params![repo_path],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// Get a hermes repo by canonical path. Returns (id, mount_name) if found.
+    pub fn get_hermes_repo(&self, repo_path: &str) -> Result<Option<(i64, String)>> {
+        let result = self
+            .conn
+            .query_row(
+                "SELECT id, mount_name FROM hermes_repos WHERE repo_path = ?1",
+                params![repo_path],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        Ok(result)
+    }
+
+    /// List all hermes repos. Returns (repo_path, mount_name) pairs.
+    pub fn list_hermes_repos(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT repo_path, mount_name FROM hermes_repos ORDER BY created_at ASC")?;
+        let repos = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(repos)
+    }
+
+    /// Seed hermes_repos from legacy config.toml repos list.
+    /// Returns the number of repos seeded.
+    pub fn seed_hermes_repos_from_config(
+        &self,
+        repos: &[(String, std::path::PathBuf)],
+    ) -> Result<usize> {
+        let existing = self.list_hermes_repos()?;
+        let existing_paths: std::collections::HashSet<&str> =
+            existing.iter().map(|(p, _)| p.as_str()).collect();
+
+        let mut seeded = 0;
+        for (mount_name, abs_path) in repos {
+            let path_str = abs_path.to_string_lossy().to_string();
+            if existing_paths.contains(path_str.as_str()) {
+                continue;
+            }
+            self.insert_hermes_repo(&path_str, mount_name)?;
+            seeded += 1;
+        }
+        Ok(seeded)
+    }
+
+    /// Check if a mount_name is already taken.
+    pub fn hermes_mount_name_exists(&self, mount_name: &str) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM hermes_repos WHERE mount_name = ?1",
+            params![mount_name],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
     // Cron job methods
     pub fn insert_cron_job(&self, job: &CronJob) -> Result<i64> {
         let now = Utc::now().timestamp();
@@ -959,6 +1059,158 @@ mod tests {
         assert_eq!(
             retrieved.agent_type,
             AgentType::Unknown("my_bot".to_string())
+        );
+    }
+
+    // ── hermes_repos table tests ─────────────────────────────────────────────
+
+    /// AC-4: Insert and list hermes repos
+    #[test]
+    fn test_hermes_ac4_insert_and_list_repos() {
+        let (db, _temp) = create_test_db();
+        assert!(db.list_hermes_repos().unwrap().is_empty());
+
+        db.insert_hermes_repo("/home/user/project-a", "project-a")
+            .unwrap();
+        db.insert_hermes_repo("/home/user/project-b", "project-b")
+            .unwrap();
+
+        let repos = db.list_hermes_repos().unwrap();
+        assert_eq!(repos.len(), 2);
+        assert_eq!(
+            repos[0],
+            ("/home/user/project-a".to_string(), "project-a".to_string())
+        );
+        assert_eq!(
+            repos[1],
+            ("/home/user/project-b".to_string(), "project-b".to_string())
+        );
+    }
+
+    /// AC-5: Get hermes repo by path
+    #[test]
+    fn test_hermes_ac5_get_repo_by_path() {
+        let (db, _temp) = create_test_db();
+        db.insert_hermes_repo("/home/user/myrepo", "myrepo")
+            .unwrap();
+
+        let result = db.get_hermes_repo("/home/user/myrepo").unwrap();
+        assert!(result.is_some());
+        let (id, name) = result.unwrap();
+        assert!(id > 0);
+        assert_eq!(name, "myrepo");
+    }
+
+    /// AC-5: Get non-existent repo returns None
+    #[test]
+    fn test_hermes_get_repo_not_found() {
+        let (db, _temp) = create_test_db();
+        assert!(db.get_hermes_repo("/nonexistent").unwrap().is_none());
+    }
+
+    /// AC-5: Delete hermes repo
+    #[test]
+    fn test_hermes_ac5_delete_repo() {
+        let (db, _temp) = create_test_db();
+        db.insert_hermes_repo("/home/user/myrepo", "myrepo")
+            .unwrap();
+        assert!(db.delete_hermes_repo("/home/user/myrepo").unwrap());
+        assert!(db.get_hermes_repo("/home/user/myrepo").unwrap().is_none());
+        assert!(db.list_hermes_repos().unwrap().is_empty());
+    }
+
+    /// AC-5: Delete non-existent repo returns false
+    #[test]
+    fn test_hermes_delete_nonexistent() {
+        let (db, _temp) = create_test_db();
+        assert!(!db.delete_hermes_repo("/nonexistent").unwrap());
+    }
+
+    /// INV-3: Duplicate repo_path is rejected (UNIQUE constraint)
+    #[test]
+    fn test_hermes_inv3_duplicate_path_rejected() {
+        let (db, _temp) = create_test_db();
+        db.insert_hermes_repo("/home/user/myrepo", "myrepo")
+            .unwrap();
+        let result = db.insert_hermes_repo("/home/user/myrepo", "myrepo-2");
+        assert!(result.is_err(), "duplicate repo_path should be rejected");
+    }
+
+    /// INV-3: Duplicate mount_name is rejected (UNIQUE constraint)
+    #[test]
+    fn test_hermes_inv3_duplicate_mount_name_rejected() {
+        let (db, _temp) = create_test_db();
+        db.insert_hermes_repo("/home/user/repo1", "myrepo").unwrap();
+        let result = db.insert_hermes_repo("/home/user/repo2", "myrepo");
+        assert!(result.is_err(), "duplicate mount_name should be rejected");
+    }
+
+    /// AC-10: seed_hermes_repos_from_config seeds new repos
+    #[test]
+    fn test_hermes_ac10_seed_from_config() {
+        let (db, _temp) = create_test_db();
+        let repos = vec![
+            (
+                "project-a".to_string(),
+                std::path::PathBuf::from("/home/user/project-a"),
+            ),
+            (
+                "project-b".to_string(),
+                std::path::PathBuf::from("/home/user/project-b"),
+            ),
+        ];
+        let seeded = db.seed_hermes_repos_from_config(&repos).unwrap();
+        assert_eq!(seeded, 2);
+
+        let listed = db.list_hermes_repos().unwrap();
+        assert_eq!(listed.len(), 2);
+    }
+
+    /// AC-10: seed_hermes_repos_from_config skips existing repos
+    #[test]
+    fn test_hermes_ac10_seed_skips_existing() {
+        let (db, _temp) = create_test_db();
+        db.insert_hermes_repo("/home/user/project-a", "project-a")
+            .unwrap();
+
+        let repos = vec![
+            (
+                "project-a".to_string(),
+                std::path::PathBuf::from("/home/user/project-a"),
+            ),
+            (
+                "project-b".to_string(),
+                std::path::PathBuf::from("/home/user/project-b"),
+            ),
+        ];
+        let seeded = db.seed_hermes_repos_from_config(&repos).unwrap();
+        assert_eq!(seeded, 1, "only the new repo should be seeded");
+
+        let listed = db.list_hermes_repos().unwrap();
+        assert_eq!(listed.len(), 2);
+    }
+
+    /// hermes_mount_name_exists
+    #[test]
+    fn test_hermes_mount_name_exists() {
+        let (db, _temp) = create_test_db();
+        assert!(!db.hermes_mount_name_exists("myrepo").unwrap());
+        db.insert_hermes_repo("/home/user/myrepo", "myrepo")
+            .unwrap();
+        assert!(db.hermes_mount_name_exists("myrepo").unwrap());
+    }
+
+    /// Schema v9 migration: hermes_repos table exists on fresh DB
+    #[test]
+    fn test_hermes_schema_v9_table_exists() {
+        let (db, _temp) = create_test_db();
+        let result = db.conn.execute(
+            "INSERT INTO hermes_repos (repo_path, mount_name, created_at) VALUES (?1, ?2, ?3)",
+            params!["/test", "test", chrono::Utc::now().timestamp()],
+        );
+        assert!(
+            result.is_ok(),
+            "hermes_repos table should exist in fresh schema"
         );
     }
 }

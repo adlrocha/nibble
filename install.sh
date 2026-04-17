@@ -259,6 +259,15 @@ else
     warn "Retry with: ./install.sh --rebuild"
 fi
 
+# ── 5b. Hermes sandbox image ──────────────────────────────────────────────────
+# Hermes uses a separate image (nibble-hermes:latest) with Python + Hermes Agent.
+# Build it lazily on first `nibble hermes init`, or eagerly here if podman is available.
+if "$BIN_DIR/nibble" sandbox build --image nibble-hermes:latest $SANDBOX_BUILD_ARGS 2>/dev/null; then
+    ok "Hermes sandbox image ready: nibble-hermes:latest"
+else
+    ok "Hermes image will be built on first 'nibble hermes init'"
+fi
+
 # ── 5a. Install systemd auto-resume service ───────────────────────────────────
 SYSTEMD_DIR="$HOME/.config/systemd/user"
 mkdir -p "$SYSTEMD_DIR"
@@ -348,4 +357,12 @@ echo "  Attach (oc):  nibble sandbox attach <task-id> --opencode"
 echo "  Kill agent:   nibble sandbox kill <task-id>"
 echo "  Watch:        nibble watch"
 echo "  Rebuild img:  ./install.sh --rebuild"
+echo ""
+echo -e "${BOLD}Hermes usage:${NC}"
+echo "  Start:        nibble hermes init"
+echo "  Attach:       nibble hermes attach"
+echo "  Mount repo:   nibble hermes mount /path/to/repo"
+echo "  Unmount repo: nibble hermes unmount /path/to/repo"
+echo "  List repos:   nibble hermes list"
+echo "  Stop:         nibble hermes kill"
 echo ""
