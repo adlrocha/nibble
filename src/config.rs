@@ -15,6 +15,9 @@ pub struct Config {
 
     #[serde(default)]
     pub hermes: HermesConfig,
+
+    #[serde(default)]
+    pub pi: PiConfig,
 }
 
 /// AI Factory pipeline configuration.
@@ -109,6 +112,28 @@ pub fn resolve_repo_mounts(
         mounts.push((final_name, abs_path.clone()));
     }
     mounts
+}
+
+/// Pi Agent sandbox configuration.
+///
+/// Controls how the Pi coding agent is installed inside a nibble sandbox.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PiConfig {
+    /// If true, npm install @mariozechner/pi-coding-agent on every spawn.
+    #[serde(default = "default_pi_install_on_spawn")]
+    pub install_on_spawn: bool,
+}
+
+fn default_pi_install_on_spawn() -> bool {
+    true
+}
+
+impl Default for PiConfig {
+    fn default() -> Self {
+        Self {
+            install_on_spawn: default_pi_install_on_spawn(),
+        }
+    }
 }
 
 /// Telegram bot notification settings.
@@ -371,5 +396,32 @@ image = "my-hermes:v2"
         let mounts = resolve_repo_mounts(&repos);
         assert_eq!(mounts.len(), 1);
         assert_eq!(mounts[0].0, "my-custom-name");
+    }
+
+    // ── PiConfig tests (from pi-agent-sandbox blueprint) ──────────────────────
+
+    /// AC-3: PiConfig::default() has install_on_spawn = true
+    #[test]
+    fn test_pi_config_default() {
+        let cfg = PiConfig::default();
+        assert!(cfg.install_on_spawn);
+    }
+
+    /// AC-4: Parsing config with [pi] install_on_spawn = false
+    #[test]
+    fn test_pi_config_parse_disabled() {
+        let toml_str = r#"
+[pi]
+install_on_spawn = false
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(!config.pi.install_on_spawn);
+    }
+
+    /// AC-5: Parsing config without [pi] section yields default
+    #[test]
+    fn test_pi_config_absent_defaults() {
+        let config: Config = toml::from_str("").unwrap();
+        assert!(config.pi.install_on_spawn);
     }
 }

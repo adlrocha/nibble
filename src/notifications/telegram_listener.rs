@@ -641,13 +641,15 @@ fn handle_spawn_command(
             repo_path,
             task_desc,
             "nibble-sandbox:latest".to_string(),
-            false,
-            None,
-            true,
-            false,
-            false,
-            false,
-            false,
+            false, // fresh
+            None,  // session_id
+            true,  // no_attach
+            false, // kimi
+            false, // glm
+            false, // opencode
+            false, // factory
+            false, // hermes
+            false, // pi
         ) {
             Ok(task_id) => {
                 let msg = format!(
@@ -1061,6 +1063,8 @@ fn find_or_spawn_for_cron(
         false,
         false,
         cfg.factory.enabled,
+        false, // hermes
+        false, // pi
     )?;
 
     db.get_task_by_id(&new_task_id)?

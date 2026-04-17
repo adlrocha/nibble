@@ -18,6 +18,8 @@ pub enum AgentType {
     OpenCode,
     /// Hermes Agent (NousResearch) — open-source coding agent with gateway support.
     Hermes,
+    /// Pi (pi.dev) — coding agent with multi-provider LLM support.
+    Pi,
     /// Any agent type not yet known to this binary.  Stores the raw string so
     /// `as_str()` / serialization round-trips perfectly.
     Unknown(String),
@@ -30,6 +32,7 @@ impl AgentType {
             AgentType::ClaudeCode => "claude_code",
             AgentType::OpenCode => "opencode",
             AgentType::Hermes => "hermes",
+            AgentType::Pi => "pi",
             AgentType::Unknown(s) => s.as_str(),
         }
     }
@@ -43,6 +46,7 @@ impl FromStr for AgentType {
             "claude_code" => AgentType::ClaudeCode,
             "opencode" => AgentType::OpenCode,
             "hermes" => AgentType::Hermes,
+            "pi" => AgentType::Pi,
             other => AgentType::Unknown(other.to_string()),
         })
     }
@@ -483,6 +487,8 @@ mod tests {
         let variants = [
             AgentType::ClaudeCode,
             AgentType::OpenCode,
+            AgentType::Hermes,
+            AgentType::Pi,
             AgentType::Unknown("future_agent".to_string()),
         ];
         for v in &variants {
@@ -544,5 +550,35 @@ mod tests {
     fn test_sandbox_config_default_entrypoint_empty() {
         let cfg = SandboxConfig::default();
         assert!(cfg.entrypoint.is_empty());
+    }
+
+    // ── Pi AgentType tests (from pi-agent-sandbox blueprint) ───────────────────
+
+    /// AC-1 (pi): "pi" string parses to AgentType::Pi
+    #[test]
+    fn test_pi_ac1_agent_type_from_str() {
+        assert_eq!(AgentType::from_str("pi").unwrap(), AgentType::Pi);
+    }
+
+    /// AC-1 (pi): as_str returns "pi"
+    #[test]
+    fn test_pi_ac1_agent_type_as_str() {
+        assert_eq!(AgentType::Pi.as_str(), "pi");
+    }
+
+    /// INV-5 (pi): from_str(as_str()) round-trips for Pi
+    #[test]
+    fn test_pi_inv5_agent_type_round_trip() {
+        let p = AgentType::Pi;
+        assert_eq!(AgentType::from_str(p.as_str()).unwrap(), p);
+    }
+
+    /// AC-2 (pi): Pi round-trips through JSON serialization/deserialization.
+    #[test]
+    fn test_pi_ac2_json_round_trip() {
+        let json = serde_json::to_string(&AgentType::Pi).unwrap();
+        assert_eq!(json, "\"pi\"");
+        let back: AgentType = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, AgentType::Pi);
     }
 }
