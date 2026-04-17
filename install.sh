@@ -183,7 +183,35 @@ for skill_dir in "$REPO_DIR/skills"/factory-*/; do
     ok "skill: $skill_name → $dest/"
 done
 
-# ── 4b. Install global AGENTS.md for OpenCode ─────────────────────────────────
+# ── 4b. Install Claude Code statusline ────────────────────────────────────────
+# Always copy the script; only add the statusLine key to settings.json if one
+# is not already configured (so custom statuslines aren't clobbered).
+STATUSLINE_SCRIPT="$HOME/.claude/statusline-command.sh"
+cp "$REPO_DIR/scripts/statusline-command.sh" "$STATUSLINE_SCRIPT"
+chmod +x "$STATUSLINE_SCRIPT"
+ok "statusline-command.sh → $STATUSLINE_SCRIPT"
+
+if command -v jq >/dev/null 2>&1; then
+    if [ -f "$CLAUDE_SETTINGS" ] && jq -e '.statusLine' "$CLAUDE_SETTINGS" >/dev/null 2>&1; then
+        ok "statusLine already configured in settings.json — skipping"
+    else
+        # Merge statusLine into settings.json (create file if absent)
+        STATUS_JSON=$(jq -n --arg cmd "bash \$HOME/.claude/statusline-command.sh" \
+            '{statusLine: {type: "command", command: $cmd}}')
+        if [ -f "$CLAUDE_SETTINGS" ]; then
+            jq -s '.[0] * .[1]' "$CLAUDE_SETTINGS" <(echo "$STATUS_JSON") > "$CLAUDE_SETTINGS.tmp" \
+                && mv "$CLAUDE_SETTINGS.tmp" "$CLAUDE_SETTINGS"
+        else
+            echo "$STATUS_JSON" > "$CLAUDE_SETTINGS"
+        fi
+        ok "statusLine configured in settings.json"
+    fi
+else
+    warn "jq not found — could not configure statusLine in settings.json"
+    warn "Add manually: { \"statusLine\": { \"type\": \"command\", \"command\": \"bash \$HOME/.claude/statusline-command.sh\" } }"
+fi
+
+# ── 4c. Install global AGENTS.md for OpenCode ─────────────────────────────────
 # OpenCode loads ~/.config/opencode/AGENTS.md for every project as a global
 # system prompt.  We extract only the section between <!-- nibble:global:begin -->
 # and <!-- nibble:global:end --> from AGENTS.md — that contains the factory

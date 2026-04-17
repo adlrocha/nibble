@@ -89,9 +89,10 @@ What `install.sh` does:
 3. Installs `nibble` and `agent-bridge` to `~/.local/bin/`
 4. Copies wrappers to `~/.agent-tasks/wrappers/`
 5. Installs Claude Code hooks to `~/.claude/settings.json`
-6. Builds the sandbox image (`nibble-sandbox:latest` — node:20-slim + claude-code)
-7. Enables `nibble-resume.service` (systemd user service, resumes agents on reboot)
-8. Optionally sets up Telegram and the reply listener daemon
+6. Installs the Claude Code status line script (see [Status Line](#status-line))
+7. Builds the sandbox image (`nibble-sandbox:latest` — node:20-slim + claude-code)
+8. Enables `nibble-resume.service` (systemd user service, resumes agents on reboot)
+9. Optionally sets up Telegram and the reply listener daemon
 
 ---
 
@@ -253,6 +254,35 @@ nibble reset --force   # wipe everything
 # Runs automatically every ~5 min inside the listen daemon
 nibble prune
 ```
+
+---
+
+## Status Line
+
+nibble installs a Claude Code status line that shows live context and quota information directly in your terminal.
+
+```
+📁 ~/projects/myapp   main  🤖 claude-sonnet-4-5  │ ctx ████████ 92%  │ 5h ██████░░ 74% ↺14:30  │ 7d ████░░░░ 48% ↺Thu 09:00
+```
+
+**Sections:**
+
+| Section | Description |
+|---------|-------------|
+| `📁 dir` | Current working directory (tilde-shortened) |
+| ` branch` | Git branch name (yellow) |
+| `🤖 model` | Active Claude model (magenta) |
+| `ctx ████` | Context window remaining — bar turns orange <50%, red <20% |
+| `5h ████` | 5-hour rate limit remaining, with reset time |
+| `7d ████` | 7-day rate limit remaining, with reset time |
+
+**Install behaviour:**
+
+- The script is always copied to `~/.claude/statusline-command.sh` on each `./install.sh` run (safe to upgrade)
+- The `statusLine` key is added to `~/.claude/settings.json` only if one is **not already present** — existing custom status lines are left untouched
+- To opt out: remove or replace the `statusLine` key in `~/.claude/settings.json` after install; future installs will not overwrite it
+
+**Customise:** edit `~/.claude/statusline-command.sh` directly. The script reads Claude's JSON context on stdin and outputs ANSI-coloured text.
 
 ---
 
