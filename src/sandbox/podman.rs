@@ -344,12 +344,24 @@ impl Sandbox for PodmanSandbox {
             // Map host uid/gid into the container so volume-mounted files
             // owned by the host user (e.g. ~/.claude) are accessible as node.
             "--userns=keep-id".to_string(),
-            // Restart the container automatically after system reboots or crashes.
-            "--restart=always".to_string(),
         ];
 
         if config.privileged {
             args.push("--privileged".to_string());
+        }
+
+        // Restart policy:
+        // - Default entrypoint (sleep infinity): --restart=always is safe because
+        //   sleep only exits if killed (OOM, signal); restarting it is desirable
+        //   after a host reboot.
+        // - Custom entrypoint (e.g. hermes gateway): --restart=always creates a
+        //   crash loop if PID 1 exits repeatedly (e.g. hermes not installed, OOM).
+        //   Use --restart=on-failure:3 to limit restart attempts and avoid
+        //   consuming host resources in a tight loop that triggers the OOM killer.
+        if config.entrypoint.is_empty() {
+            args.push("--restart=always".to_string());
+        } else {
+            args.push("--restart=on-failure:3".to_string());
         }
 
         if let Some(cpu) = &config.cpu_limit {
