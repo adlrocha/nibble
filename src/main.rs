@@ -223,6 +223,10 @@ fn main() -> Result<()> {
             SandboxAction::List => {
                 cmd_sandbox_list(&db)?;
             }
+            SandboxAction::Bash { container_or_path } => {
+                let task_id = resolve_sandbox_id(&db, &container_or_path)?;
+                cmd_sandbox_bash(&db, task_id)?;
+            }
             SandboxAction::Attach {
                 container_or_path,
                 fresh,
@@ -1490,16 +1494,12 @@ pub(crate) fn cmd_sandbox_spawn(
                 let status = std::process::Command::new("podman")
                     .args([
                         "exec",
-                        "-u",
-                        "node",
                         &info.id,
                         "npm",
                         "install",
                         "-g",
                         "@mariozechner/pi-coding-agent",
                     ])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
                     .status();
                 match status {
                     Ok(s) if s.success() => {
@@ -2252,6 +2252,150 @@ fn resolve_cron_id(db: &Database, id_or_label: &str) -> Result<i64> {
     anyhow::bail!("Cron job '{}' not found (tried as label)", id_or_label)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SelectedAgent {
+    Claude,
+    OpenCode,
+    Pi,
+    Hermes,
+}
+
+impl std::fmt::Display for SelectedAgent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SelectedAgent::Claude => write!(f, "Claude Code"),
+            SelectedAgent::OpenCode => write!(f, "opencode"),
+            SelectedAgent::Pi => write!(f, "pi"),
+            SelectedAgent::Hermes => write!(f, "hermes"),
+        }
+    }
+}
+
+/// Determine which agent to attach to, and validate flag combinations.
+///
+/// Rules:
+/// - Plain sandboxes (non-hermes) default to Claude; hermes sandboxes default to hermes.
+/// - Any agent can be explicitly selected with `--opencode`, `--pi`, or `--hermes`.
+/// - `--hermes` is only valid on hermes sandboxes (different image/binary).
+/// - Claude-only options (`--btw`, `--kimi`, `--glm`) are rejected for other agents.
+/// - At most one agent flag can be specified per invocation.
+fn resolve_attach_agent(
+    stored_type: &AgentType,
+    opencode: bool,
+    hermes: bool,
+    pi: bool,
+    btw: bool,
+    kimi: bool,
+    glm: bool,
+) -> Result<SelectedAgent> {
+    let explicit_count = [opencode, hermes, pi].iter().filter(|&&f| f).count();
+    if explicit_count > 1 {
+        let mut flags = Vec::new();
+        if opencode {
+            flags.push("--opencode");
+        }
+        if hermes {
+            flags.push("--hermes");
+        }
+        if pi {
+            flags.push("--pi");
+        }
+        anyhow::bail!("{} are mutually exclusive", flags.join(" and "));
+    }
+
+    let is_hermes_sandbox = matches!(stored_type, AgentType::Hermes);
+
+    let agent = if hermes {
+        if !is_hermes_sandbox {
+            anyhow::bail!(
+                "--hermes can only be used with hermes sandboxes (this is a plain sandbox)"
+            );
+        }
+        SelectedAgent::Hermes
+    } else if pi {
+        if is_hermes_sandbox {
+            anyhow::bail!("--pi is not supported on hermes sandboxes (pi is not installed)");
+        }
+        SelectedAgent::Pi
+    } else if opencode {
+        if is_hermes_sandbox {
+            anyhow::bail!(
+                "--opencode is not supported on hermes sandboxes (opencode is not installed)"
+            );
+        }
+        SelectedAgent::OpenCode
+    } else if is_hermes_sandbox {
+        SelectedAgent::Hermes
+    } else {
+        SelectedAgent::Claude
+    };
+
+    if btw && agent != SelectedAgent::Claude && agent != SelectedAgent::Pi {
+        anyhow::bail!(
+            "--btw is not supported with {} (throwaway sessions require Claude Code or pi)",
+            agent
+        );
+    }
+    if kimi && agent != SelectedAgent::Claude {
+        anyhow::bail!(
+            "--kimi is not supported with {} (Kimi backend routing requires Claude Code)",
+            agent
+        );
+    }
+    if glm && agent != SelectedAgent::Claude {
+        anyhow::bail!(
+            "--glm is not supported with {} (GLM backend routing requires Claude Code)",
+            agent
+        );
+    }
+
+    Ok(agent)
+}
+
+/// Attach to a running sandbox with an interactive bash shell.
+/// Useful for debugging agent installations, inspecting the container, etc.
+fn cmd_sandbox_bash(db: &Database, task_id: String) -> Result<()> {
+    let task = db
+        .get_task_by_id(&task_id)?
+        .ok_or_else(|| anyhow::anyhow!("Task not found: {}", task_id))?;
+
+    if task.sandbox_type != SandboxType::Podman {
+        anyhow::bail!("Task {} is not a sandbox task", task_id);
+    }
+
+    let container_id = task
+        .container_id
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("Task {} has no container_id", task_id))?;
+
+    let sandbox = PodmanSandbox::new();
+    match sandbox.status(&container_id)? {
+        sandbox::ContainerStatus::Running => {}
+        _ => anyhow::bail!("Container {} is not running", container_id),
+    }
+
+    eprintln!(
+        "Attaching to sandbox {} ({}) [bash]…",
+        task.title, container_id
+    );
+    eprintln!("(Type 'exit' or press Ctrl+D to detach — the container keeps running)");
+
+    let err =
+        std::os::unix::process::CommandExt::exec(std::process::Command::new("podman").args([
+            "exec",
+            "-it",
+            "-e",
+            "TERM=xterm-256color",
+            "-e",
+            "PATH=/home/node/.local/bin:/home/node/.opencode/bin:/usr/local/bin:/usr/bin:/bin",
+            "-w",
+            "/workspace",
+            &container_id,
+            "/bin/bash",
+        ]));
+    anyhow::bail!("Failed to exec podman: {}", err)
+}
+
 /// Attach to the Claude session inside a running sandbox.
 ///
 /// Resumes the session UUID stored on the task (derived deterministically from the repo
@@ -2273,10 +2417,6 @@ fn cmd_sandbox_attach(
         .get_task_by_id(&task_id)?
         .ok_or_else(|| anyhow::anyhow!("Task not found: {}", task_id))?;
 
-    // Auto-detect hermes/pi from stored agent type so users don't need the flag on every attach
-    let hermes = hermes || task.agent_type == AgentType::Hermes;
-    let pi = pi || task.agent_type == AgentType::Pi;
-
     if task.sandbox_type != SandboxType::Podman {
         anyhow::bail!("Task {} is not a sandbox task", task_id);
     }
@@ -2292,49 +2432,7 @@ fn cmd_sandbox_attach(
         _ => anyhow::bail!("Container {} is not running", container_id),
     }
 
-    // Validate flag combinations before doing anything.
-    if hermes {
-        if opencode {
-            anyhow::bail!("--hermes and --opencode are mutually exclusive");
-        }
-        if btw {
-            anyhow::bail!("--btw is not supported with --hermes");
-        }
-        if kimi || glm {
-            anyhow::bail!("--kimi/--glm are not supported with --hermes");
-        }
-        if pi {
-            anyhow::bail!("--hermes and --pi are mutually exclusive");
-        }
-    }
-    if pi {
-        if opencode {
-            anyhow::bail!("--pi and --opencode are mutually exclusive");
-        }
-        if kimi {
-            anyhow::bail!("--pi and --kimi are mutually exclusive");
-        }
-        if glm {
-            anyhow::bail!("--pi and --glm are mutually exclusive");
-        }
-    }
-    if opencode {
-        if btw {
-            anyhow::bail!(
-                "--btw is not supported with --opencode (throwaway sessions require Claude Code hooks)"
-            );
-        }
-        if kimi {
-            anyhow::bail!(
-                "--kimi is not supported with --opencode (Kimi backend routing requires Claude Code)"
-            );
-        }
-        if glm {
-            anyhow::bail!(
-                "--glm is not supported with --opencode (GLM backend routing requires Claude Code)"
-            );
-        }
-    }
+    let agent = resolve_attach_agent(&task.agent_type, opencode, hermes, pi, btw, kimi, glm)?;
 
     // Resolve the per-agent session IDs stored for this task.
     // Each agent writes its own field so they never clobber each other.
@@ -2363,87 +2461,66 @@ fn cmd_sandbox_attach(
         })
     });
 
-    let shell_cmd = if hermes {
-        // Hermes mode: start an interactive hermes CLI session.
-        // --continue resumes the most recent session if available.
-        if fresh {
-            "hermes".to_string()
-        } else {
-            "hermes --continue".to_string()
-        }
-    } else if pi {
-        // Pi mode: start an interactive pi TUI session.
-        // -c resumes the last session for the workspace.
-        if fresh {
-            delete_latest_pi_session();
-            "pi".to_string()
-        } else if btw {
-            "pi".to_string()
-        } else {
-            "pi -c".to_string()
-        }
-    } else if opencode {
-        // opencode mode: resume via --session <id> if we have one stored, otherwise
-        // start fresh. After opencode exits, capture the most recent session ID and
-        // store it in the DB so the next attach can resume it.
-        //
-        // The epilogue runs `opencode session list --format json -n 1` to get the
-        // latest session ID (opencode uses ses_... IDs, not predictable UUIDs), then
-        // calls `nibble report session-id` to persist it. AGENT_TASK_ID is injected
-        // into the container environment (same as Claude) so the epilogue can reference
-        // the task. Skipped for --btw (AGENT_TASK_ID not set, epilogue no-ops safely).
-        let oc = "/home/node/.opencode/bin/opencode";
-        let nibble = "/home/node/.local/bin/nibble";
-        let epilogue = format!(
-            r#"SID=$({oc} session list --format json -n 1 2>/dev/null | jq -r '.[0].id // empty' 2>/dev/null); [ -n "$SID" ] && [ -n "$AGENT_TASK_ID" ] && {nibble} report session-id "$AGENT_TASK_ID" "$SID" 2>/dev/null; true"#
-        );
-        if fresh {
-            eprintln!("  Session:   starting fresh opencode session");
-            format!("cd /workspace && {oc}; {epilogue}")
-        } else if let Some(sid) = opencode_session_id {
-            format!("cd /workspace && {oc} --session {sid}; {epilogue}")
-        } else {
-            format!("cd /workspace && {oc}; {epilogue}")
-        }
-    } else {
-        let claude = "/home/node/.local/bin/claude --dangerously-skip-permissions";
-
-        // --fresh: delete the .jsonl for the current session so Claude starts with a
-        // blank slate while still using the same UUID. The UUID stays stable so
-        // Telegram injection keeps working without any DB changes.
-        if fresh && !btw {
-            if let Some(sid) = claude_session_id {
-                backup_session_file(sid);
-                eprintln!(
-                    "  Session:   {} — previous history backed up, starting fresh",
-                    &sid[..8.min(sid.len())]
-                );
+    let shell_cmd = match agent {
+        SelectedAgent::Hermes => {
+            if fresh {
+                "hermes".to_string()
             } else {
-                eprintln!("  Session:   no stored session, starting fresh");
+                "hermes --continue".to_string()
             }
         }
+        SelectedAgent::Pi => {
+            let pi_install =
+                "command -v pi >/dev/null 2>&1 || sudo npm install -g @mariozechner/pi-coding-agent";
+            if fresh {
+                delete_latest_pi_session();
+                format!("{pi_install}; pi")
+            } else if btw {
+                format!("{pi_install}; pi")
+            } else {
+                format!("{pi_install}; pi -c")
+            }
+        }
+        SelectedAgent::OpenCode => {
+            let oc = "/home/node/.opencode/bin/opencode";
+            let nibble = "/home/node/.local/bin/nibble";
+            let epilogue = format!(
+                r#"SID=$({oc} session list --format json -n 1 2>/dev/null | jq -r '.[0].id // empty' 2>/dev/null); [ -n "$SID" ] && [ -n "$AGENT_TASK_ID" ] && {nibble} report session-id "$AGENT_TASK_ID" "$SID" 2>/dev/null; true"#
+            );
+            if fresh {
+                eprintln!("  Session:   starting fresh opencode session");
+                format!("cd /workspace && {oc}; {epilogue}")
+            } else if let Some(sid) = opencode_session_id {
+                format!("cd /workspace && {oc} --session {sid}; {epilogue}")
+            } else {
+                format!("cd /workspace && {oc}; {epilogue}")
+            }
+        }
+        SelectedAgent::Claude => {
+            let claude = "/home/node/.local/bin/claude --dangerously-skip-permissions";
 
-        // Build the shell command that runs inside the container.
-        //
-        // Normal attach:
-        //  1. Try --resume <sid> to load existing history for this repo.
-        //  2. Fall back to --session-id <sid> which pins the UUID without requiring
-        //     an existing file — Claude creates a new session under that exact UUID.
-        //  We never fall back to bare `claude` or `claude --continue` because those
-        //  would resume the most-recent session across ALL repos (cross-repo contamination).
-        //
-        // --btw (throwaway) session:
-        //  Start a completely independent session with a fresh random UUID so it
-        //  never touches the main session's history. The Stop hook is not injected
-        //  (AGENT_TASK_ID is omitted) so the main task's stored claude_session_id is untouched.
-        if btw {
-            let throwaway_id = uuid::Uuid::new_v4();
-            format!("cd /workspace && {claude} --session-id {throwaway_id}")
-        } else if let Some(sid) = claude_session_id {
-            format!("cd /workspace && {claude} --resume {sid} 2>&1 || {claude} --session-id {sid}")
-        } else {
-            // No session ID stored yet — start fresh; the Stop hook will record the UUID.
-            format!("cd /workspace && {claude}")
+            if fresh && !btw {
+                if let Some(sid) = claude_session_id {
+                    backup_session_file(sid);
+                    eprintln!(
+                        "  Session:   {} — previous history backed up, starting fresh",
+                        &sid[..8.min(sid.len())]
+                    );
+                } else {
+                    eprintln!("  Session:   no stored session, starting fresh");
+                }
+            }
+
+            if btw {
+                let throwaway_id = uuid::Uuid::new_v4();
+                format!("cd /workspace && {claude} --session-id {throwaway_id}")
+            } else if let Some(sid) = claude_session_id {
+                format!(
+                    "cd /workspace && {claude} --resume {sid} 2>&1 || {claude} --session-id {sid}"
+                )
+            } else {
+                format!("cd /workspace && {claude}")
+            }
         }
     };
 
@@ -2473,7 +2550,7 @@ fn cmd_sandbox_attach(
     // TODO: opencode added --dangerously-skip-permissions in ~April 2026. Once that
     // version is available via the installer, replace the env var with that flag in
     // the shell_cmd above and remove this block.
-    if opencode {
+    if agent == SelectedAgent::OpenCode {
         podman_args.extend([
             "-e".into(),
             r#"OPENCODE_PERMISSION={"bash":"allow","edit":"allow","read":"allow","grep":"allow","question":"allow","external_directory":"allow","todowrite":"allow","codesearch":"allow"}"#.into(),
@@ -2527,33 +2604,48 @@ fn cmd_sandbox_attach(
         shell_cmd,
     ]);
 
-    if hermes {
-        eprintln!(
-            "Attaching to sandbox {} ({}) [hermes]…",
-            task.title, container_id
-        );
-        eprintln!("(Exit hermes or press Ctrl+C to detach — the container keeps running)");
-    } else if pi {
-        eprintln!(
-            "Attaching to sandbox {} ({}) [pi]…",
-            task.title, container_id
-        );
-        eprintln!("(Exit pi or press Ctrl+C to detach — the container keeps running)");
-    } else if opencode {
-        eprintln!(
-            "Attaching to sandbox {} ({}) [opencode]…",
-            task.title, container_id
-        );
-        eprintln!("(Exit opencode or press Ctrl+C to detach — the container keeps running)");
-    } else if btw {
-        eprintln!(
-            "Attaching to sandbox {} ({}) [btw — throwaway session]…",
-            task.title, container_id
-        );
-        eprintln!("(Independent session — main history untouched. Exit to close.)");
-    } else {
-        eprintln!("Attaching to sandbox {} ({})…", task.title, container_id);
-        eprintln!("(Exit Claude or press Ctrl+C to detach — the container keeps running)");
+    match agent {
+        SelectedAgent::Hermes => {
+            eprintln!(
+                "Attaching to sandbox {} ({}) [hermes]…",
+                task.title, container_id
+            );
+            eprintln!("(Exit hermes or press Ctrl+C to detach — the container keeps running)");
+        }
+        SelectedAgent::Pi => {
+            if btw {
+                eprintln!(
+                    "Attaching to sandbox {} ({}) [pi, btw — throwaway session]…",
+                    task.title, container_id
+                );
+                eprintln!("(Independent session — main history untouched. Exit to close.)");
+            } else {
+                eprintln!(
+                    "Attaching to sandbox {} ({}) [pi]…",
+                    task.title, container_id
+                );
+                eprintln!("(Exit pi or press Ctrl+C to detach — the container keeps running)");
+            }
+        }
+        SelectedAgent::OpenCode => {
+            eprintln!(
+                "Attaching to sandbox {} ({}) [opencode]…",
+                task.title, container_id
+            );
+            eprintln!("(Exit opencode or press Ctrl+C to detach — the container keeps running)");
+        }
+        SelectedAgent::Claude => {
+            if btw {
+                eprintln!(
+                    "Attaching to sandbox {} ({}) [btw — throwaway session]…",
+                    task.title, container_id
+                );
+                eprintln!("(Independent session — main history untouched. Exit to close.)");
+            } else {
+                eprintln!("Attaching to sandbox {} ({})…", task.title, container_id);
+                eprintln!("(Exit Claude or press Ctrl+C to detach — the container keeps running)");
+            }
+        }
     }
 
     let err = std::os::unix::process::CommandExt::exec(
@@ -4042,6 +4134,416 @@ mod notification_tests {
         assert!(
             ctx.claude_session_id.is_none(),
             "AC-8: claude_session_id must be untouched for an OpenCode task"
+        );
+    }
+
+    // ── resolve_attach_agent tests ────────────────────────────────────────────
+    // Verifies the agent selection model:
+    //   Plain sandboxes → claude (default), opencode, pi
+    //   Hermes sandboxes → hermes (default), claude, opencode, pi
+    //   --hermes only valid on hermes sandboxes
+    //   --btw/--kimi/--glm only valid with claude
+
+    fn resolve(
+        stored: &AgentType,
+        opencode: bool,
+        hermes: bool,
+        pi: bool,
+    ) -> Result<SelectedAgent> {
+        resolve_attach_agent(stored, opencode, hermes, pi, false, false, false)
+    }
+
+    fn resolve_opts(
+        stored: &AgentType,
+        opencode: bool,
+        hermes: bool,
+        pi: bool,
+        btw: bool,
+        kimi: bool,
+        glm: bool,
+    ) -> Result<SelectedAgent> {
+        resolve_attach_agent(stored, opencode, hermes, pi, btw, kimi, glm)
+    }
+
+    // ── Default agent (no flags) ──────────────────────────────────────────────
+
+    #[test]
+    fn test_plain_claude_sandbox_default_is_claude() {
+        assert_eq!(
+            resolve(&AgentType::ClaudeCode, false, false, false).unwrap(),
+            SelectedAgent::Claude
+        );
+    }
+
+    #[test]
+    fn test_plain_opencode_sandbox_default_is_claude() {
+        assert_eq!(
+            resolve(&AgentType::OpenCode, false, false, false).unwrap(),
+            SelectedAgent::Claude
+        );
+    }
+
+    #[test]
+    fn test_plain_pi_sandbox_default_is_claude() {
+        assert_eq!(
+            resolve(&AgentType::Pi, false, false, false).unwrap(),
+            SelectedAgent::Claude
+        );
+    }
+
+    #[test]
+    fn test_unknown_sandbox_default_is_claude() {
+        assert_eq!(
+            resolve(
+                &AgentType::Unknown("future_agent".into()),
+                false,
+                false,
+                false
+            )
+            .unwrap(),
+            SelectedAgent::Claude
+        );
+    }
+
+    // ── Explicit agent flags on plain sandboxes ───────────────────────────────
+
+    #[test]
+    fn test_plain_opencode_flag() {
+        assert_eq!(
+            resolve(&AgentType::ClaudeCode, true, false, false).unwrap(),
+            SelectedAgent::OpenCode
+        );
+    }
+
+    #[test]
+    fn test_plain_pi_flag() {
+        assert_eq!(
+            resolve(&AgentType::ClaudeCode, false, false, true).unwrap(),
+            SelectedAgent::Pi
+        );
+    }
+
+    #[test]
+    fn test_plain_hermes_flag_rejected() {
+        let err = resolve(&AgentType::ClaudeCode, false, true, false).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("--hermes can only be used with hermes sandboxes"));
+    }
+
+    #[test]
+    fn test_pi_sandbox_opencode_flag_switches() {
+        assert_eq!(
+            resolve(&AgentType::Pi, true, false, false).unwrap(),
+            SelectedAgent::OpenCode
+        );
+    }
+
+    #[test]
+    fn test_opencode_sandbox_pi_flag_switches() {
+        assert_eq!(
+            resolve(&AgentType::OpenCode, false, false, true).unwrap(),
+            SelectedAgent::Pi
+        );
+    }
+
+    // ── Explicit agent flags on hermes sandboxes ──────────────────────────────
+
+    #[test]
+    fn test_hermes_sandbox_opencode_flag_rejected() {
+        let err = resolve(&AgentType::Hermes, true, false, false).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("--opencode is not supported on hermes sandboxes"));
+    }
+
+    #[test]
+    fn test_hermes_sandbox_pi_flag_rejected() {
+        let err = resolve(&AgentType::Hermes, false, false, true).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("--pi is not supported on hermes sandboxes"));
+    }
+
+    #[test]
+    fn test_hermes_sandbox_hermes_flag() {
+        assert_eq!(
+            resolve(&AgentType::Hermes, false, true, false).unwrap(),
+            SelectedAgent::Hermes
+        );
+    }
+
+    #[test]
+    fn test_hermes_sandbox_default_is_hermes() {
+        assert_eq!(
+            resolve(&AgentType::Hermes, false, false, false).unwrap(),
+            SelectedAgent::Hermes
+        );
+    }
+
+    // ── Mutual exclusivity ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_opencode_and_pi_exclusive() {
+        let err = resolve(&AgentType::ClaudeCode, true, false, true).unwrap_err();
+        assert!(err.to_string().contains("mutually exclusive"));
+        assert!(err.to_string().contains("--opencode"));
+        assert!(err.to_string().contains("--pi"));
+    }
+
+    #[test]
+    fn test_opencode_and_hermes_exclusive() {
+        let err = resolve(&AgentType::Hermes, true, true, false).unwrap_err();
+        assert!(err.to_string().contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn test_pi_and_hermes_exclusive() {
+        let err = resolve(&AgentType::Hermes, false, true, true).unwrap_err();
+        assert!(err.to_string().contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn test_all_three_flags_exclusive() {
+        let err = resolve(&AgentType::Hermes, true, true, true).unwrap_err();
+        assert!(err.to_string().contains("mutually exclusive"));
+    }
+
+    // ── Claude-only options (btw, kimi, glm) ─────────────────────────────────
+
+    #[test]
+    fn test_btw_with_claude_ok() {
+        assert_eq!(
+            resolve_opts(
+                &AgentType::ClaudeCode,
+                false,
+                false,
+                false,
+                true,
+                false,
+                false
+            )
+            .unwrap(),
+            SelectedAgent::Claude
+        );
+    }
+
+    #[test]
+    fn test_btw_with_opencode_rejected() {
+        let err = resolve_opts(
+            &AgentType::ClaudeCode,
+            true,
+            false,
+            false,
+            true,
+            false,
+            false,
+        )
+        .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("--btw is not supported with opencode"));
+    }
+
+    #[test]
+    fn test_btw_with_pi_ok() {
+        assert_eq!(
+            resolve_opts(
+                &AgentType::ClaudeCode,
+                false,
+                false,
+                true,
+                true,
+                false,
+                false
+            )
+            .unwrap(),
+            SelectedAgent::Pi
+        );
+    }
+
+    #[test]
+    fn test_btw_with_pi_on_pi_sandbox_ok() {
+        assert_eq!(
+            resolve_opts(&AgentType::Pi, false, false, true, true, false, false).unwrap(),
+            SelectedAgent::Pi
+        );
+    }
+
+    #[test]
+    fn test_btw_with_hermes_default_rejected() {
+        let err =
+            resolve_opts(&AgentType::Hermes, false, false, false, true, false, false).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("--btw is not supported with hermes"));
+    }
+
+    #[test]
+    fn test_btw_with_hermes_explicit_rejected() {
+        let err =
+            resolve_opts(&AgentType::Hermes, false, true, false, true, false, false).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("--btw is not supported with hermes"));
+    }
+
+    #[test]
+    fn test_kimi_with_claude_ok() {
+        assert_eq!(
+            resolve_opts(
+                &AgentType::ClaudeCode,
+                false,
+                false,
+                false,
+                false,
+                true,
+                false
+            )
+            .unwrap(),
+            SelectedAgent::Claude
+        );
+    }
+
+    #[test]
+    fn test_kimi_with_opencode_rejected() {
+        let err = resolve_opts(
+            &AgentType::ClaudeCode,
+            true,
+            false,
+            false,
+            false,
+            true,
+            false,
+        )
+        .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("--kimi is not supported with opencode"));
+    }
+
+    #[test]
+    fn test_kimi_with_pi_rejected() {
+        let err = resolve_opts(
+            &AgentType::ClaudeCode,
+            false,
+            false,
+            true,
+            false,
+            true,
+            false,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("--kimi is not supported with pi"));
+    }
+
+    #[test]
+    fn test_kimi_with_hermes_rejected() {
+        let err =
+            resolve_opts(&AgentType::Hermes, false, false, false, false, true, false).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("--kimi is not supported with hermes"));
+    }
+
+    #[test]
+    fn test_glm_with_claude_ok() {
+        assert_eq!(
+            resolve_opts(
+                &AgentType::ClaudeCode,
+                false,
+                false,
+                false,
+                false,
+                false,
+                true
+            )
+            .unwrap(),
+            SelectedAgent::Claude
+        );
+    }
+
+    #[test]
+    fn test_glm_with_opencode_rejected() {
+        let err = resolve_opts(
+            &AgentType::ClaudeCode,
+            true,
+            false,
+            false,
+            false,
+            false,
+            true,
+        )
+        .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("--glm is not supported with opencode"));
+    }
+
+    #[test]
+    fn test_glm_with_pi_rejected() {
+        let err = resolve_opts(
+            &AgentType::ClaudeCode,
+            false,
+            false,
+            true,
+            false,
+            false,
+            true,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("--glm is not supported with pi"));
+    }
+
+    #[test]
+    fn test_glm_with_hermes_rejected() {
+        let err =
+            resolve_opts(&AgentType::Hermes, false, false, false, false, false, true).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("--glm is not supported with hermes"));
+    }
+
+    // ── Hermes sandbox restrictions ───────────────────────────────────────────
+
+    #[test]
+    fn test_hermes_sandbox_only_supports_hermes() {
+        // Default
+        assert_eq!(
+            resolve(&AgentType::Hermes, false, false, false).unwrap(),
+            SelectedAgent::Hermes
+        );
+        // Explicit hermes
+        assert_eq!(
+            resolve(&AgentType::Hermes, false, true, false).unwrap(),
+            SelectedAgent::Hermes
+        );
+    }
+
+    // ── Agent switching on plain sandbox ──────────────────────────────────────
+
+    #[test]
+    fn test_pi_sandbox_switch_to_opencode_no_conflict() {
+        // This was the original bug: auto-detected pi conflicted with --opencode
+        assert_eq!(
+            resolve(&AgentType::Pi, true, false, false).unwrap(),
+            SelectedAgent::OpenCode
+        );
+    }
+
+    #[test]
+    fn test_pi_sandbox_switch_to_claude_no_conflict() {
+        assert_eq!(
+            resolve(&AgentType::Pi, false, false, false).unwrap(),
+            SelectedAgent::Claude
+        );
+    }
+
+    #[test]
+    fn test_opencode_sandbox_switch_to_pi_no_conflict() {
+        assert_eq!(
+            resolve(&AgentType::OpenCode, false, false, true).unwrap(),
+            SelectedAgent::Pi
         );
     }
 }

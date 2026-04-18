@@ -141,6 +141,12 @@ pub enum SandboxAction {
     /// List all sandbox containers and their status
     List,
 
+    /// Attach to a running sandbox container with an interactive bash shell
+    Bash {
+        /// Repo path (e.g. "." or "/path/to/repo") OR container name
+        container_or_path: String,
+    },
+
     /// Attach to a running sandbox container
     Attach {
         /// Repo path (e.g. "." or "/path/to/repo") OR container name
