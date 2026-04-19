@@ -213,8 +213,6 @@ fn main() -> Result<()> {
                     session_id,
                     false,
                     false,
-                    false,
-                    false,
                     factory_enabled,
                     hermes,
                     pi,
@@ -231,8 +229,6 @@ fn main() -> Result<()> {
                 container_or_path,
                 fresh,
                 btw,
-                kimi,
-                glm,
                 opencode,
                 hermes,
                 pi,
@@ -250,9 +246,7 @@ fn main() -> Result<()> {
 
                 match resolve_sandbox_id(&db, &effective_path) {
                     Ok(task_id) => {
-                        cmd_sandbox_attach(
-                            &db, task_id, fresh, btw, kimi, glm, opencode, hermes, pi,
-                        )?;
+                        cmd_sandbox_attach(&db, task_id, fresh, btw, opencode, hermes, pi)?;
                     }
                     Err(e) => {
                         let looks_like_path = effective_path.starts_with('.')
@@ -272,16 +266,12 @@ fn main() -> Result<()> {
                                 fresh,
                                 None,
                                 true,
-                                kimi,
-                                glm,
                                 opencode,
                                 cfg.factory.enabled,
                                 hermes,
                                 pi,
                             )?;
-                            cmd_sandbox_attach(
-                                &db, task_id, fresh, btw, kimi, glm, opencode, hermes, pi,
-                            )?;
+                            cmd_sandbox_attach(&db, task_id, fresh, btw, opencode, hermes, pi)?;
                         } else {
                             return Err(e);
                         }
@@ -1289,8 +1279,6 @@ pub(crate) fn cmd_sandbox_spawn(
     fresh: bool,
     session_id: Option<String>,
     no_attach: bool,
-    kimi: bool,
-    glm: bool,
     opencode: bool,
     factory_enabled: bool,
     hermes: bool,
@@ -1335,8 +1323,6 @@ pub(crate) fn cmd_sandbox_spawn(
                             existing_task_id.clone(),
                             fresh,
                             false,
-                            kimi,
-                            glm,
                             opencode,
                             hermes,
                             pi,
@@ -1372,8 +1358,6 @@ pub(crate) fn cmd_sandbox_spawn(
                                     tid.clone(),
                                     fresh,
                                     false,
-                                    kimi,
-                                    glm,
                                     opencode,
                                     hermes,
                                     pi,
@@ -1744,17 +1728,7 @@ pub(crate) fn cmd_sandbox_spawn(
             short_id, abs_repo_path
         );
         println!();
-        cmd_sandbox_attach(
-            db,
-            task_id.clone(),
-            fresh,
-            false,
-            kimi,
-            glm,
-            opencode,
-            hermes,
-            pi,
-        )?;
+        cmd_sandbox_attach(db, task_id.clone(), fresh, false, opencode, hermes, pi)?;
     }
 
     Ok(task_id)
@@ -2277,7 +2251,7 @@ impl std::fmt::Display for SelectedAgent {
 /// - Plain sandboxes (non-hermes) default to Claude; hermes sandboxes default to hermes.
 /// - Any agent can be explicitly selected with `--opencode`, `--pi`, or `--hermes`.
 /// - `--hermes` is only valid on hermes sandboxes (different image/binary).
-/// - Claude-only options (`--btw`, `--kimi`, `--glm`) are rejected for other agents.
+/// - Claude-only option (`--btw`) is rejected for other agents.
 /// - At most one agent flag can be specified per invocation.
 fn resolve_attach_agent(
     stored_type: &AgentType,
@@ -2285,8 +2259,6 @@ fn resolve_attach_agent(
     hermes: bool,
     pi: bool,
     btw: bool,
-    kimi: bool,
-    glm: bool,
 ) -> Result<SelectedAgent> {
     let explicit_count = [opencode, hermes, pi].iter().filter(|&&f| f).count();
     if explicit_count > 1 {
@@ -2333,18 +2305,6 @@ fn resolve_attach_agent(
     if btw && agent != SelectedAgent::Claude && agent != SelectedAgent::Pi {
         anyhow::bail!(
             "--btw is not supported with {} (throwaway sessions require Claude Code or pi)",
-            agent
-        );
-    }
-    if kimi && agent != SelectedAgent::Claude {
-        anyhow::bail!(
-            "--kimi is not supported with {} (Kimi backend routing requires Claude Code)",
-            agent
-        );
-    }
-    if glm && agent != SelectedAgent::Claude {
-        anyhow::bail!(
-            "--glm is not supported with {} (GLM backend routing requires Claude Code)",
             agent
         );
     }
@@ -2407,8 +2367,6 @@ fn cmd_sandbox_attach(
     task_id: String,
     fresh: bool,
     btw: bool,
-    kimi: bool,
-    glm: bool,
     opencode: bool,
     hermes: bool,
     pi: bool,
@@ -2432,7 +2390,7 @@ fn cmd_sandbox_attach(
         _ => anyhow::bail!("Container {} is not running", container_id),
     }
 
-    let agent = resolve_attach_agent(&task.agent_type, opencode, hermes, pi, btw, kimi, glm)?;
+    let agent = resolve_attach_agent(&task.agent_type, opencode, hermes, pi, btw)?;
 
     // Resolve the per-agent session IDs stored for this task.
     // Each agent writes its own field so they never clobber each other.
@@ -2524,9 +2482,7 @@ fn cmd_sandbox_attach(
         }
     };
 
-    // Build podman exec args, injecting Kimi credentials if requested.
-    // KIMI_BASE_URL and KIMI_API_KEY must be set in the host environment
-    // (e.g. via the claude-kimi alias definition in ~/.zshrc).
+    // Build podman exec args.
     let mut podman_args: Vec<String> = vec![
         "exec".into(),
         "-it".into(),
@@ -2554,44 +2510,6 @@ fn cmd_sandbox_attach(
         podman_args.extend([
             "-e".into(),
             r#"OPENCODE_PERMISSION={"bash":"allow","edit":"allow","read":"allow","grep":"allow","question":"allow","external_directory":"allow","todowrite":"allow","codesearch":"allow"}"#.into(),
-        ]);
-    }
-
-    if kimi {
-        let base_url = std::env::var("KIMI_BASE_URL")
-            .context("--kimi requires KIMI_BASE_URL to be set in the host environment")?;
-        let api_key = std::env::var("KIMI_API_KEY")
-            .context("--kimi requires KIMI_API_KEY to be set in the host environment")?;
-        eprintln!("Using Kimi backend ({})", base_url);
-        podman_args.extend([
-            "-e".into(),
-            format!("ANTHROPIC_BASE_URL={}", base_url),
-            "-e".into(),
-            format!("ANTHROPIC_API_KEY={}", api_key),
-            "-e".into(),
-            "ENABLE_TOOL_SEARCH=FALSE".into(),
-        ]);
-    }
-
-    if glm {
-        let base_url = std::env::var("GLM_BASE_URL")
-            .context("--glm requires GLM_BASE_URL to be set in the host environment")?;
-        let api_key = std::env::var("GLM_API_KEY")
-            .context("--glm requires GLM_API_KEY to be set in the host environment")?;
-        eprintln!("Using GLM backend ({})", base_url);
-        podman_args.extend([
-            "-e".into(),
-            format!("ANTHROPIC_BASE_URL={}", base_url),
-            "-e".into(),
-            format!("ANTHROPIC_API_KEY={}", api_key),
-            "-e".into(),
-            "ENABLE_TOOL_SEARCH=FALSE".into(),
-            "-e".into(),
-            "ANTHROPIC_DEFAULT_SONNET_MODEL=glm-5.1".into(),
-            "-e".into(),
-            "ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.1".into(),
-            "-e".into(),
-            "ANTHROPIC_DEFAULT_HAIKU_MODEL=glm-5-turbo".into(),
         ]);
     }
 
@@ -4142,7 +4060,7 @@ mod notification_tests {
     //   Plain sandboxes → claude (default), opencode, pi
     //   Hermes sandboxes → hermes (default), claude, opencode, pi
     //   --hermes only valid on hermes sandboxes
-    //   --btw/--kimi/--glm only valid with claude
+    //   --btw only valid with claude and pi
 
     fn resolve(
         stored: &AgentType,
@@ -4150,7 +4068,7 @@ mod notification_tests {
         hermes: bool,
         pi: bool,
     ) -> Result<SelectedAgent> {
-        resolve_attach_agent(stored, opencode, hermes, pi, false, false, false)
+        resolve_attach_agent(stored, opencode, hermes, pi, false)
     }
 
     fn resolve_opts(
@@ -4159,10 +4077,8 @@ mod notification_tests {
         hermes: bool,
         pi: bool,
         btw: bool,
-        kimi: bool,
-        glm: bool,
     ) -> Result<SelectedAgent> {
-        resolve_attach_agent(stored, opencode, hermes, pi, btw, kimi, glm)
+        resolve_attach_agent(stored, opencode, hermes, pi, btw)
     }
 
     // ── Default agent (no flags) ──────────────────────────────────────────────
@@ -4309,37 +4225,19 @@ mod notification_tests {
         assert!(err.to_string().contains("mutually exclusive"));
     }
 
-    // ── Claude-only options (btw, kimi, glm) ─────────────────────────────────
+    // ── Claude-only options (btw) ──────────────────────────────────────────────
 
     #[test]
     fn test_btw_with_claude_ok() {
         assert_eq!(
-            resolve_opts(
-                &AgentType::ClaudeCode,
-                false,
-                false,
-                false,
-                true,
-                false,
-                false
-            )
-            .unwrap(),
+            resolve_opts(&AgentType::ClaudeCode, false, false, false, true).unwrap(),
             SelectedAgent::Claude
         );
     }
 
     #[test]
     fn test_btw_with_opencode_rejected() {
-        let err = resolve_opts(
-            &AgentType::ClaudeCode,
-            true,
-            false,
-            false,
-            true,
-            false,
-            false,
-        )
-        .unwrap_err();
+        let err = resolve_opts(&AgentType::ClaudeCode, true, false, false, true).unwrap_err();
         assert!(err
             .to_string()
             .contains("--btw is not supported with opencode"));
@@ -4348,16 +4246,7 @@ mod notification_tests {
     #[test]
     fn test_btw_with_pi_ok() {
         assert_eq!(
-            resolve_opts(
-                &AgentType::ClaudeCode,
-                false,
-                false,
-                true,
-                true,
-                false,
-                false
-            )
-            .unwrap(),
+            resolve_opts(&AgentType::ClaudeCode, false, false, true, true).unwrap(),
             SelectedAgent::Pi
         );
     }
@@ -4365,15 +4254,14 @@ mod notification_tests {
     #[test]
     fn test_btw_with_pi_on_pi_sandbox_ok() {
         assert_eq!(
-            resolve_opts(&AgentType::Pi, false, false, true, true, false, false).unwrap(),
+            resolve_opts(&AgentType::Pi, false, false, true, true).unwrap(),
             SelectedAgent::Pi
         );
     }
 
     #[test]
     fn test_btw_with_hermes_default_rejected() {
-        let err =
-            resolve_opts(&AgentType::Hermes, false, false, false, true, false, false).unwrap_err();
+        let err = resolve_opts(&AgentType::Hermes, false, false, false, true).unwrap_err();
         assert!(err
             .to_string()
             .contains("--btw is not supported with hermes"));
@@ -4381,127 +4269,10 @@ mod notification_tests {
 
     #[test]
     fn test_btw_with_hermes_explicit_rejected() {
-        let err =
-            resolve_opts(&AgentType::Hermes, false, true, false, true, false, false).unwrap_err();
+        let err = resolve_opts(&AgentType::Hermes, false, true, false, true).unwrap_err();
         assert!(err
             .to_string()
             .contains("--btw is not supported with hermes"));
-    }
-
-    #[test]
-    fn test_kimi_with_claude_ok() {
-        assert_eq!(
-            resolve_opts(
-                &AgentType::ClaudeCode,
-                false,
-                false,
-                false,
-                false,
-                true,
-                false
-            )
-            .unwrap(),
-            SelectedAgent::Claude
-        );
-    }
-
-    #[test]
-    fn test_kimi_with_opencode_rejected() {
-        let err = resolve_opts(
-            &AgentType::ClaudeCode,
-            true,
-            false,
-            false,
-            false,
-            true,
-            false,
-        )
-        .unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("--kimi is not supported with opencode"));
-    }
-
-    #[test]
-    fn test_kimi_with_pi_rejected() {
-        let err = resolve_opts(
-            &AgentType::ClaudeCode,
-            false,
-            false,
-            true,
-            false,
-            true,
-            false,
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("--kimi is not supported with pi"));
-    }
-
-    #[test]
-    fn test_kimi_with_hermes_rejected() {
-        let err =
-            resolve_opts(&AgentType::Hermes, false, false, false, false, true, false).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("--kimi is not supported with hermes"));
-    }
-
-    #[test]
-    fn test_glm_with_claude_ok() {
-        assert_eq!(
-            resolve_opts(
-                &AgentType::ClaudeCode,
-                false,
-                false,
-                false,
-                false,
-                false,
-                true
-            )
-            .unwrap(),
-            SelectedAgent::Claude
-        );
-    }
-
-    #[test]
-    fn test_glm_with_opencode_rejected() {
-        let err = resolve_opts(
-            &AgentType::ClaudeCode,
-            true,
-            false,
-            false,
-            false,
-            false,
-            true,
-        )
-        .unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("--glm is not supported with opencode"));
-    }
-
-    #[test]
-    fn test_glm_with_pi_rejected() {
-        let err = resolve_opts(
-            &AgentType::ClaudeCode,
-            false,
-            false,
-            true,
-            false,
-            false,
-            true,
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("--glm is not supported with pi"));
-    }
-
-    #[test]
-    fn test_glm_with_hermes_rejected() {
-        let err =
-            resolve_opts(&AgentType::Hermes, false, false, false, false, false, true).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("--glm is not supported with hermes"));
     }
 
     // ── Hermes sandbox restrictions ───────────────────────────────────────────

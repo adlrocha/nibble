@@ -644,8 +644,6 @@ fn handle_spawn_command(
             false, // fresh
             None,  // session_id
             true,  // no_attach
-            false, // kimi
-            false, // glm
             false, // opencode
             false, // factory
             false, // hermes
@@ -1060,11 +1058,9 @@ fn find_or_spawn_for_cron(
         None,
         true,
         false,
-        false,
-        false,
         cfg.factory.enabled,
-        false, // hermes
-        false, // pi
+        false,
+        false,
     )?;
 
     db.get_task_by_id(&new_task_id)?

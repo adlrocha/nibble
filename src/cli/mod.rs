@@ -158,12 +158,6 @@ pub enum SandboxAction {
         /// Useful for ad-hoc research or non-conflicting changes alongside a main session.
         #[arg(long)]
         btw: bool,
-        /// Use Kimi as the LLM backend (reads KIMI_BASE_URL and KIMI_API_KEY from host env)
-        #[arg(long)]
-        kimi: bool,
-        /// Use GLM as the LLM backend (reads GLM_BASE_URL and GLM_API_KEY from host env)
-        #[arg(long)]
-        glm: bool,
         /// Use opencode instead of Claude Code as the coding agent
         #[arg(long)]
         opencode: bool,
