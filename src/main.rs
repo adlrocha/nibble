@@ -843,6 +843,8 @@ fn cmd_hermes_spawn_internal(db: &Database) -> Result<String> {
         "OPENAI_API_KEY",
         "HOME",
         "CLAUDE_CONFIG_DIR",
+        "KIMI_API_KEY",
+        "GLM_API_KEY",
     ] {
         if let Ok(val) = std::env::var(key) {
             env_vars.insert(key.to_string(), val);
@@ -1389,6 +1391,8 @@ pub(crate) fn cmd_sandbox_spawn(
         "OPENAI_API_KEY",
         "HOME",
         "CLAUDE_CONFIG_DIR",
+        "KIMI_API_KEY",
+        "GLM_API_KEY",
     ] {
         if let Ok(val) = std::env::var(key) {
             env_vars.insert(key.to_string(), val);
