@@ -104,7 +104,7 @@ The lessons-learned log accumulates pipeline wisdom over time. **Read it at the 
 <!-- nibble-sandbox:begin -->
 # nibble Sandbox Agent Instructions
 
-You are running inside an isolated Podman sandbox managed by **nibble** for the **nibble--pi** project. This file contains all instructions for how to operate inside this environment. Read it fully before starting any task.
+You are running inside an isolated Podman sandbox managed by **nibble** for the **nibble** project. This file contains all instructions for how to operate inside this environment. Read it fully before starting any task.
 
 ## Environment
 

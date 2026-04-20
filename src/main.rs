@@ -844,7 +844,7 @@ fn cmd_hermes_spawn_internal(db: &Database) -> Result<String> {
         "HOME",
         "CLAUDE_CONFIG_DIR",
         "KIMI_API_KEY",
-        "GLM_API_KEY",
+        "ZAI_API_KEY",
     ] {
         if let Ok(val) = std::env::var(key) {
             env_vars.insert(key.to_string(), val);
@@ -1392,7 +1392,7 @@ pub(crate) fn cmd_sandbox_spawn(
         "HOME",
         "CLAUDE_CONFIG_DIR",
         "KIMI_API_KEY",
-        "GLM_API_KEY",
+        "ZAI_API_KEY",
     ] {
         if let Ok(val) = std::env::var(key) {
             env_vars.insert(key.to_string(), val);
@@ -1443,15 +1443,35 @@ pub(crate) fn cmd_sandbox_spawn(
     if pi {
         let home_dir = dirs::home_dir().context("Failed to get home directory")?;
         let pi_dir = home_dir.join(".pi");
-        if !pi_dir.exists() {
-            std::fs::create_dir_all(pi_dir.join("agent").join("skills"))
+        let agent_dir = pi_dir.join("agent");
+
+        if agent_dir.is_symlink() {
+            let resolved = agent_dir
+                .canonicalize()
+                .with_context(|| format!("Failed to resolve ~/.pi/agent symlink"))?;
+            std::fs::create_dir_all(&resolved)
+                .with_context(|| "Failed to create resolved ~/.pi/agent target")?;
+            std::fs::create_dir_all(resolved.join("skills"))
                 .with_context(|| "Failed to create ~/.pi/agent/skills")?;
-            std::fs::create_dir_all(pi_dir.join("agent").join("sessions"))
+            std::fs::create_dir_all(resolved.join("sessions"))
                 .with_context(|| "Failed to create ~/.pi/agent/sessions")?;
-            std::fs::create_dir_all(pi_dir.join("agent").join("extensions"))
+            std::fs::create_dir_all(resolved.join("extensions"))
                 .with_context(|| "Failed to create ~/.pi/agent/extensions")?;
+            extra_volumes.push(format!("{}:/home/node/.pi:rw", pi_dir.display()));
+            extra_volumes.push(format!("{}:/home/node/.pi/agent:rw", resolved.display()));
+        } else {
+            if !agent_dir.exists() {
+                std::fs::create_dir_all(&agent_dir)
+                    .with_context(|| "Failed to create ~/.pi/agent")?;
+            }
+            std::fs::create_dir_all(agent_dir.join("skills"))
+                .with_context(|| "Failed to create ~/.pi/agent/skills")?;
+            std::fs::create_dir_all(agent_dir.join("sessions"))
+                .with_context(|| "Failed to create ~/.pi/agent/sessions")?;
+            std::fs::create_dir_all(agent_dir.join("extensions"))
+                .with_context(|| "Failed to create ~/.pi/agent/extensions")?;
+            extra_volumes.push(format!("{}:/home/node/.pi:rw", pi_dir.display()));
         }
-        extra_volumes.push(format!("{}:/home/node/.pi:rw", pi_dir.display()));
         ensure_pi_skills_symlink(&home_dir);
     }
 
@@ -1483,6 +1503,7 @@ pub(crate) fn cmd_sandbox_spawn(
                     .args([
                         "exec",
                         &info.id,
+                        "sudo",
                         "npm",
                         "install",
                         "-g",
