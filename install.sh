@@ -26,11 +26,13 @@ die()  { echo -e "  ${RED}✗${NC} $1" >&2; exit 1; }
 # ── Parse flags ───────────────────────────────────────────────────────────────
 RUN_TELEGRAM=false
 RUN_LISTEN=false
+RUN_LLAMA=false
 REBUILD_IMAGE=false
 for arg in "$@"; do
     case "$arg" in
         --telegram) RUN_TELEGRAM=true ;;
         --listen)   RUN_LISTEN=true ;;
+        --llama)    RUN_LLAMA=true ;;
         --rebuild)  REBUILD_IMAGE=true ;;
         *) die "Unknown argument: $arg" ;;
     esac
@@ -40,6 +42,7 @@ echo -e "${BOLD}=== Nibble — Install / Upgrade ===${NC}"
 echo ""
 echo "  Flags: --telegram  set up Telegram notifications"
 echo "         --listen    set up Telegram reply listener daemon"
+echo "         --llama     set up llama-server systemd service"
 echo "         --rebuild   force rebuild the sandbox container image"
 echo ""
 [ "$REBUILD_IMAGE" = true ] && echo -e "  ${YELLOW}--rebuild${NC}: sandbox image will be rebuilt from scratch"
@@ -342,7 +345,19 @@ else
     fi
 fi
 
-# ── 9. Done ───────────────────────────────────────────────────────────────────
+# ── 9. Llama server (optional) ─────────────────────────────────────────────────
+if [ "$RUN_LLAMA" = true ]; then
+    step "Setting up llama-server service"
+    bash "$REPO_DIR/scripts/setup-llama-server.sh"
+else
+    if [ ! -f /etc/systemd/system/llama-server.service ]; then
+        echo ""
+        warn "llama-server not installed. Set up with:"
+        warn "  ./install.sh --llama"
+    fi
+fi
+
+# ── 10. Done ───────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}${GREEN}Done!${NC} Restart Claude Code for hooks to take effect."
 echo ""
