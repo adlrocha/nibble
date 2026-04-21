@@ -28,7 +28,7 @@ This section lists every feature area in the project. Use it to audit what's wor
 | 14 | **Telegram bot commands** | notifications | `/help`, `/sandboxes`, `/spawn`, `/cron list` — control nibble from phone |
 | 15 | **Cron jobs** | scheduling | Schedule prompts to run inside sandboxes on a cron expression; markdown file format; skip-if-running; expiry |
 | 16 | **Status line** | dx | Claude Code terminal status bar showing dir, branch, model, context %, 5h and 7d rate limit bars |
-| 17 | **AI Factory pipeline** | meta | `factory-spec` → `factory-implement` → `factory-tdd` → `factory-adversarial` → `factory-risk-score` → `factory-qa-gate` skills; `--factory` flag on spawn injects pipeline instructions into AGENTS.md; blueprints/reports stored under `.nibble/factory/` |
+| 17 | **AI Factory pipeline** | meta | 3-tier pipeline (Quick/Standard/Full) with 5 skills; `--factory` flag on spawn injects pipeline instructions into AGENTS.md; blueprints/reports stored under `.nibble/factory/` |
 | 18 | **Health checks** | ops | `SandboxHealth` enum (Healthy/Degraded/Dead); periodic prune in listen daemon; Telegram alert on unexpected container death |
 | 19 | **Auto-resume on reboot** | ops | systemd user service (`nibble-resume.service`) restarts containers after host reboot |
 | 20 | **Inject** | ops | `nibble inject <id> <msg>` — send a message directly to any sandbox agent, bypassing Telegram |
@@ -224,6 +224,37 @@ nibble sandbox attach . --glm
 ```
 
 Detach with `exit` or `Ctrl+C`.
+
+### What gets injected into your repo
+
+When a sandbox spawns, nibble writes agent instructions into two files inside the repo:
+
+| File | Purpose |
+|------|---------|
+| `AGENTS.md` | Sandbox environment info, toolchain detection, and (if enabled) the AI Factory pipeline instructions |
+| `.claude/CLAUDE.md` | Claude Code entry point — first line is `@../AGENTS.md` which imports the file above |
+
+**How it works:**
+- If the file doesn't exist, nibble creates it with just the injected block.
+- If the file exists but has no nibble markers, nibble **appends** the block (your content is untouched).
+- If the file exists and has nibble markers (`<!-- nibble-sandbox:begin -->` / `<!-- nibble-sandbox:end -->`), nibble **replaces** the marked block in-place.
+
+Your own content outside the sentinel markers is never modified.
+
+**Git impact:** The repo is bind-mounted from the host, so these injected changes are visible to git. If your repo tracks `AGENTS.md`, you'll see a diff. If it doesn't, you'll see a new untracked file. In both cases, these are sandbox-local artifacts — discard them with:
+
+```bash
+git checkout -- AGENTS.md          # if your repo tracks AGENTS.md
+git clean -fd AGENTS.md .claude/   # if they're untracked
+```
+
+A recommended `.gitignore` addition for repos that use sandboxes:
+
+```
+.claude/
+```
+
+(`AGENTS.md` is not added to `.gitignore` automatically because many projects legitimately track it.)
 
 ### Watch container logs
 

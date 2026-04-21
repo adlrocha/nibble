@@ -1,126 +1,90 @@
 ---
 name: factory-pipeline
-description: AI Factory Pipeline manifest — read this first to understand the full Spec→Implement→TDD→Adversarial→Risk Score→QA Gate pipeline
+description: AI Factory — 3-tier development pipeline. Load this first to classify the task and determine which stages to run.
 ---
 
-# AI Factory — Pipeline Manifest
+# AI Factory Pipeline
 
-A structured development pipeline inspired by chip manufacturing. Every feature goes
-through six stages before reaching production. The human only reviews what matters.
+## Startup
 
-## Pipeline
+1. Load `factory-lessons` and read the lessons log.
+2. Classify the task (Quick / Standard / Full) using the criteria below.
+3. State your classification to the human. They can override.
+4. Execute stages in order per tier.
+
+## Tier Classification
+
+| Criterion | Quick | Standard | Full |
+|-----------|-------|----------|------|
+| Functions changed | ≤ 3 | 4–15 | 16+ |
+| Security-sensitive? | No | — | Yes |
+| Public API / interface change? | No | — | Yes |
+| New state machine / complex flow? | No | — | Yes |
+| Database schema change? | No | — | Yes |
+
+**Rules:** If ANY criterion hits Full → run Full. If majority Quick and none Full → run Quick. Otherwise → Standard.
+
+## Pipeline by Tier
 
 ```
- SPEC  ──▶  IMPLEMENT  ──▶   TDD    ──▶  ADVERSARIAL ──▶  RISK SCORE  ──▶  QA GATE
-(Blueprint)  (Synthesis)    (DV)        (Red Team)       (Analysis)       (Tape-out)
+Quick:     SPEC ──▶ IMPLEMENT ──▶ VERIFY ──────────────────────── done*
+Standard:  SPEC ──▶ IMPLEMENT ──▶ VERIFY ──▶ AUDIT ───────────── done*
+Full:      SPEC ──▶ IMPLEMENT ──▶ VERIFY ──▶ AUDIT ──▶ QA GATE ─ done
+
+* QA Gate fires for ANY tier if Audit finds unfixed Critical/High findings.
 ```
 
-| # | Stage | Artifact In | Artifact Out | Gate Criteria |
-|---|-------|-------------|--------------|---------------|
-| 0 | Spec | Task description | `blueprints/YYYY-MM-DD_<feature>.md` | All sections filled, invariants stated, acceptance criteria testable |
-| 1 | Implement | Blueprint | Source code | Code compiles, lint passes, typecheck passes |
-| 2 | TDD | Blueprint + Code | Test suite (red→green) | All acceptance criteria covered, coverage target met |
-| 3 | Adversarial | Code + Tests | `reports/adversarial/YYYY-MM-DD_<feature>.md` | All attacks documented, no critical unresolved findings |
-| 4 | Risk Score | Code + Adversarial report | `reports/risk/YYYY-MM-DD_<feature>.md` | Every function scored, critical sections identified |
-| 5 | QA Gate | Risk report | `reports/qa/YYYY-MM-DD_<feature>.md` + human stamp | All critical sections approved by human |
+| Stage | Quick | Standard | Full |
+|-------|-------|----------|------|
+| Spec | Brief template | Standard template | Full template |
+| Implement | Code + compile + lint | + Invariant assertions (INV-N) | + DFT: injectable deps, pure logic separated |
+| Verify | Existing tests + targeted tests for the change | AC/INV/boundary/error path tests, ≥80% coverage | Full TDD, strict coverage targets |
+| Audit | Skip | Adversarial scan: explore attack surface, fix findings inline, no formal report | Full adversarial report + risk scoring |
+| QA Gate | Only if Critical/High finding | Only if Critical/High finding | Always (formal gate) |
 
-## How to Use
+## Stage Transitions
 
-### Automatic (recommended)
+- Load the appropriate skill at each stage: `factory-spec`, `factory-verify`, `factory-qa-gate`.
+- Implementation guidance is inline below (no separate skill needed).
 
-When factory is enabled, every coding task follows this pipeline. Load each stage's
-skill as you enter it. No manual intervention needed until the QA Gate.
+## Implementation Rules (all tiers)
 
-### Manual
+- Encode every blueprint invariant as an assertion: `assert!(condition, "INV-N: description")`
+- Follow existing codebase conventions (naming, error handling, module structure)
+- Pure functions preferred — separate business logic from side effects
+- Dependencies injected, not hardcoded (for Standard/Full tiers)
+- Code must compile, lint passes, typecheck passes before proceeding
 
-Load a specific stage's skill at any time via the skill tool, e.g. `factory-spec`.
+## Retrospective Mode
 
-### Bypass
+For changes to **existing code** (bug fix, refactor): scope each stage to the delta only. Don't re-spec unchanged code. Confirm existing tests still pass. Scope audit to changed functions.
 
-For trivial changes (typo fixes, config updates), the human can instruct the agent to skip
-the factory pipeline. The agent should confirm before skipping. The agent should also be able
-to evaluate when is worth running the pipeline and when to skip it.
+## Scale Guidance for Reports
 
-### Retrospective Mode
+| Functions changed | Report depth |
+|-------------------|-------------|
+| 1–4 | Findings-only: list issues found, skip the "no issues found" sections |
+| 5–15 | Standard templates, skip Low-risk sections |
+| 16+ | Full templates for all sections |
 
-When working on **existing code** (bug fix, refactor, small addition) rather than a new
-feature, adapt the pipeline:
+## Artifacts
 
-- **Spec**: Document what exists + what's changing and why. Skip sections that don't apply.
-- **TDD**: Confirm existing tests still pass + add tests specifically for the change.
-- **Adversarial / Risk Score**: Scope to the changed functions only, not the whole module.
+```
+.nibble/factory/
+  blueprints/YYYY-MM-DD_<slug>.md    # COMMITTED
+  reports/
+    audit/YYYY-MM-DD_<slug>.md       # NOT committed (adversarial + risk merged for Full tier)
+    qa/YYYY-MM-DD_<slug>.md          # COMMITTED
+```
 
-The gate criteria still apply — don't skip them, just scope them to the delta.
+## Lessons
 
-### Scale Guidance
-
-Match report depth to feature size. Overhead should be proportional to risk.
-
-| Feature size | Functions changed | Report style |
-|---|---|---|
-| Small | 1–4 | Collapse adversarial + risk into a single brief section per function |
-| Medium | 5–15 | Full templates, but skip Low-risk sections in the risk report |
-| Large | 16+ | Full templates for all sections |
-
-When in doubt, err toward brevity — a concise finding is more useful than a padded one.
-
-## Skills
-
-| Skill name | Stage | Purpose |
-|------------|-------|---------|
-| `factory-spec` | Blueprint Design | Write structured feature specifications |
-| `factory-implement` | Synthesis | Implement code from spec |
-| `factory-tdd` | Design Verification | Write red/green TDD tests |
-| `factory-adversarial` | Red Team | Find holes in the implementation |
-| `factory-risk-score` | Analysis | Score risk, flag critical sections |
-| `factory-qa-gate` | Tape-out Gate | Present findings for human approval |
-| `factory-lessons` | All stages | Read the continuous improvement log |
+Load `factory-lessons` once at pipeline start. At pipeline end, append new lessons if something slipped through a stage.
 
 ## Principles
 
-1. **Spec is the contract** — Like a chip blueprint, the spec is the source of truth. Code
-   that doesn't match the spec is wrong, even if it works.
-
-2. **Tests prove correctness** — Tests are written from the spec, not from the
-   implementation. They verify the contract, not the code.
-
-3. **Adversarial thinking catches what tests miss** — No test suite is complete. The
-   adversarial phase looks for gaps using attacker mindset.
-
-4. **Risk scores focus human attention** — Not all code is equally important. Risk scoring
-   ensures the human reviews only what matters.
-
-5. **Every failure teaches** — When something slips through, it's documented in the
-   lessons-learned log and becomes part of every future run.
-
-6. **Portability over lock-in** — Skills are plain markdown. Any coding agent can use them.
-   No proprietary formats, no tool-specific syntax.
-
-## Artifact Locations
-
-```
-.nibble/
-  factory/
-    .gitignore               # ignores adversarial/ and risk/ (process artifacts)
-    blueprints/              # COMMITTED — design decisions, long-term value
-      YYYY-MM-DD_<feature>.md
-    reports/
-      adversarial/           # NOT committed — stale after findings are fixed
-        YYYY-MM-DD_<feature>.md
-      risk/                  # NOT committed — scores are pre-fix, stale after merge
-        YYYY-MM-DD_<feature>.md
-      qa/                    # COMMITTED — audit trail of human approval decisions
-        YYYY-MM-DD_<feature>.md
-```
-
-Use `YYYY-MM-DD` = the date the pipeline run started. Keep the same date across all
-artifacts for one feature run so they sort together.
-
-## Continuous Learning
-
-After every factory run, load `factory-lessons` and check:
-
-- Did the adversarial phase find something the spec missed? → Add to Spec Gaps
-- Did a bug survive testing? → Add to Implementation Bugs
-- Did the QA gate catch something? → Add to QA Catches
-- Was a stage redundant or missing? → Add to Process Improvements
+1. **Spec is the contract** — code that doesn't match the spec is wrong.
+2. **Tests prove correctness** — written from the spec, not the implementation.
+3. **Adversarial thinking catches what tests miss** — attacker mindset finds gaps.
+4. **Risk scores focus human attention** — only review what matters.
+5. **Every failure teaches** — lessons log prevents repeat mistakes.
