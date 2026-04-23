@@ -50,6 +50,29 @@ echo ""
 # ── 1. Prerequisites ──────────────────────────────────────────────────────────
 step "Checking prerequisites"
 
+# ---- C compiler / linker -----------------------------------------------------
+if command -v cc >/dev/null 2>&1; then
+    ok "cc ($(cc --version | head -n1))"
+else
+    warn "cc (C compiler / linker) not found — attempting to install..."
+    if [ "$(uname -s)" = "Darwin" ]; then
+        die "cc not found. Install Xcode Command Line Tools:  xcode-select --install"
+    elif command -v apt-get >/dev/null 2>&1; then
+        sudo apt-get update -qq && sudo apt-get install -y build-essential \
+            || die "Failed to install build-essential via apt-get."
+    elif command -v dnf >/dev/null 2>&1; then
+        sudo dnf install -y gcc gcc-c++ make \
+            || die "Failed to install gcc via dnf."
+    elif command -v pacman >/dev/null 2>&1; then
+        sudo pacman -S --noconfirm base-devel \
+            || die "Failed to install base-devel via pacman."
+    else
+        die "Cannot auto-install cc. Install a C compiler/toolchain manually."
+    fi
+    ok "cc installed"
+fi
+
+# ---- Rust / cargo ------------------------------------------------------------
 # Source rustup env if cargo is not yet on PATH (common in non-login shells
 # inside sandboxes where ~/.cargo/bin isn't added automatically).
 if ! command -v cargo >/dev/null 2>&1; then
@@ -69,12 +92,48 @@ if ! command -v cargo >/dev/null 2>&1; then
         [ -x "$_cargo_dir/cargo" ] && export PATH="$_cargo_dir:$PATH" && break
     done
 fi
-command -v cargo >/dev/null 2>&1 || die "cargo not found. Install Rust from https://rustup.rs"
+
+if ! command -v cargo >/dev/null 2>&1; then
+    warn "cargo not found — installing Rust via rustup..."
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+    # Re-source so cargo is available in the current shell
+    # shellcheck source=/dev/null
+    [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
+    for _cargo_dir in \
+        "$HOME/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin" \
+        "$HOME/.nibble/cache/rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin"
+    do
+        [ -x "$_cargo_dir/cargo" ] && export PATH="$_cargo_dir:$PATH" && break
+    done
+fi
+command -v cargo >/dev/null 2>&1 || die "cargo still not found after installation. Open a new terminal or re-source ~/.cargo/env and try again."
 ok "cargo ($(cargo --version))"
 
-command -v jq >/dev/null 2>&1 \
-    && ok "jq found" \
-    || warn "jq not found — hooks will not extract message bodies. Install jq for full functionality."
+# ---- jq ----------------------------------------------------------------------
+if command -v jq >/dev/null 2>&1; then
+    ok "jq found"
+else
+    warn "jq not found — attempting to install..."
+    if [ "$(uname -s)" = "Darwin" ]; then
+        if command -v brew >/dev/null 2>&1; then
+            brew install jq || die "Failed to install jq via brew."
+        else
+            die "jq not found and Homebrew not available. Install jq manually: https://jqlang.github.io/jq/download/"
+        fi
+    elif command -v apt-get >/dev/null 2>&1; then
+        sudo apt-get update -qq && sudo apt-get install -y jq \
+            || die "Failed to install jq via apt-get."
+    elif command -v dnf >/dev/null 2>&1; then
+        sudo dnf install -y jq \
+            || die "Failed to install jq via dnf."
+    elif command -v pacman >/dev/null 2>&1; then
+        sudo pacman -S --noconfirm jq \
+            || die "Failed to install jq via pacman."
+    else
+        die "Cannot auto-install jq. Visit https://jqlang.github.io/jq/download/"
+    fi
+    ok "jq installed"
+fi
 
 # ── Podman (required for sandbox) ─────────────────────────────────────────────
 if command -v podman >/dev/null 2>&1; then
@@ -121,7 +180,10 @@ ok "Build succeeded (host binary)"
 # Also build a statically linked musl binary for use inside sandbox containers.
 # The host binary is linked against the host glibc which may not be available
 # inside the container (e.g. Arch host vs Debian container).
-if command -v musl-gcc >/dev/null 2>&1; then
+if [ "$(uname -s)" = "Darwin" ]; then
+    warn "musl static build is not supported on macOS — skipping nibble-musl"
+    warn "Container hooks will rely on the host binary (this may work if glibc matches)."
+elif command -v musl-gcc >/dev/null 2>&1; then
     RUSTFLAGS="-C target-feature=+crt-static" \
         cargo build --release \
             --manifest-path "$REPO_DIR/Cargo.toml" \
