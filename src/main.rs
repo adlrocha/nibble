@@ -3,6 +3,7 @@ mod cli;
 mod config;
 mod cron;
 mod db;
+mod memory;
 mod models;
 mod notifications;
 mod sandbox;
@@ -141,6 +142,130 @@ fn main() -> Result<()> {
                 db.update_task(&task)?;
             }
         },
+        Commands::Memory { action } => {
+            // Ensure memory directory exists
+            crate::memory::init_memory_dir()?;
+            match action {
+                cli::MemoryAction::Search {
+                    query,
+                    project,
+                    r#type,
+                    limit,
+                    semantic,
+                } => {
+                    memory::cli::handle_search(
+                        &query,
+                        project.as_deref(),
+                        r#type.as_deref(),
+                        Some(limit),
+                        semantic,
+                    )?;
+                }
+                cli::MemoryAction::List {
+                    project,
+                    r#type,
+                    since,
+                    limit,
+                } => {
+                    memory::cli::handle_list(
+                        project.as_deref(),
+                        r#type.as_deref(),
+                        since.as_deref(),
+                        Some(limit),
+                    )?;
+                }
+                cli::MemoryAction::Show { id } => {
+                    memory::cli::handle_show(&id)?;
+                }
+                cli::MemoryAction::Write {
+                    content,
+                    r#type,
+                    project,
+                    tags,
+                    update,
+                } => {
+                    memory::cli::handle_write(
+                        &content,
+                        &r#type,
+                        project.as_deref(),
+                        tags.as_deref(),
+                        update.as_deref(),
+                    )?;
+                }
+                cli::MemoryAction::Forget { id } => {
+                    memory::cli::handle_forget(&id)?;
+                }
+                cli::MemoryAction::Stats { project } => {
+                    memory::cli::handle_stats(project.as_deref())?;
+                }
+                cli::MemoryAction::Capture {
+                    task_id,
+                    role,
+                    content,
+                    tool_name,
+                    tool_input,
+                    tool_output,
+                } => {
+                    memory::cli::handle_capture(
+                        &task_id,
+                        &role,
+                        &content,
+                        tool_name.as_deref(),
+                        tool_input.as_deref(),
+                        tool_output.as_deref(),
+                    )?;
+                }
+                cli::MemoryAction::Lessons {
+                    context,
+                    status,
+                    severity,
+                    limit,
+                } => {
+                    memory::cli::handle_lessons(
+                        context.as_deref(),
+                        Some(&status),
+                        severity.as_deref(),
+                        Some(limit),
+                    )?;
+                }
+                cli::MemoryAction::LessonAdd {
+                    content,
+                    category,
+                    severity,
+                    prevention,
+                    project,
+                    tags,
+                } => {
+                    memory::cli::handle_lesson_add(
+                        &content,
+                        &category,
+                        &severity,
+                        &prevention,
+                        project.as_deref(),
+                        tags.as_deref(),
+                    )?;
+                }
+                cli::MemoryAction::LessonResolve { id, note } => {
+                    memory::cli::handle_lesson_resolve(&id, note.as_deref())?;
+                }
+                cli::MemoryAction::Inspect { project } => {
+                    memory::cli::handle_inspect(project.as_deref())?;
+                }
+                cli::MemoryAction::Reindex => {
+                    memory::cli::handle_reindex()?;
+                }
+                cli::MemoryAction::Config { setup } => {
+                    if setup {
+                        memory::cli::handle_setup()?;
+                    } else {
+                        memory::cli::handle_config()?;
+                    }
+                }
+                cli::MemoryAction::Sync => {
+                    memory::cli::handle_sync()?;
+                }
+            }
+        }
         Commands::Cron { action } => match action {
             CronAction::Add {
                 repo,

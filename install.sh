@@ -178,7 +178,7 @@ ok "claude-wrapper"
 CLAUDE_SKILLS_DIR="$HOME/.claude/skills"
 mkdir -p "$CLAUDE_SKILLS_DIR"
 
-for skill_dir in "$REPO_DIR/skills"/factory-*/; do
+for skill_dir in "$REPO_DIR/skills"/{factory,nibble}-*/; do
     skill_name="$(basename "$skill_dir")"
     dest="$CLAUDE_SKILLS_DIR/$skill_name"
     mkdir -p "$dest"
@@ -312,7 +312,75 @@ fi
 
 bash "$REPO_DIR/scripts/setup-claude-hooks.sh"
 
-# ── 7. Telegram (optional) ────────────────────────────────────────────────────
+# ── 7. Memory system setup ──────────────────────────────────────────────────
+step "Setting up memory system"
+
+MEMORY_DIR="$HOME/.nibble/memory"
+NEEDS_SETUP=false
+
+# Auto-initialize if directory doesn't exist yet
+if [ ! -d "$MEMORY_DIR/.git" ]; then
+    if "$BIN_DIR/nibble" memory reindex 2>/dev/null; then
+        ok "Memory directory created and git-initialized"
+    else
+        warn "Could not auto-initialize memory dir"
+    fi
+fi
+
+# Check current state
+if [ -d "$MEMORY_DIR/.git" ]; then
+    ok "memory directory initialized ($MEMORY_DIR)"
+
+    # Quick stats
+    MEM_COUNT=$(find "$MEMORY_DIR/memories" -name '*.md' 2>/dev/null | wc -l | tr -d ' ')
+    LESSON_COUNT=$(find "$MEMORY_DIR/lessons" -name '*.md' 2>/dev/null | wc -l | tr -d ' ')
+    ok "$MEM_COUNT memories, $LESSON_COUNT lessons"
+
+    # Check if remote is wired
+    MEM_REMOTE=$(git -C "$MEMORY_DIR" remote 2>/dev/null | head -1)
+    if [ -n "$MEM_REMOTE" ]; then
+        MEM_REMOTE_URL=$(git -C "$MEMORY_DIR" remote get-url "$MEM_REMOTE" 2>/dev/null)
+        ok "sync remote: $MEM_REMOTE_URL"
+    else
+        NEEDS_SETUP=true
+    fi
+else
+    NEEDS_SETUP=true
+fi
+
+if [ "$NEEDS_SETUP" = true ]; then
+    echo ""
+    warn "Memory system needs configuration."
+
+    # Only offer interactive wizard when stdin is a terminal
+    if [ -t 0 ]; then
+        echo ""
+        echo -n "  Launch setup wizard? [Y/n] "
+        read -r answer
+        case "$answer" in
+            [Nn]* | [Nn][Oo] )
+                echo ""
+                echo "  Skipped. Run anytime:"
+                echo -e "    ${BOLD}nibble memory config --setup${NC}"
+                echo ""
+                ;;
+            * )
+                echo ""
+                "$BIN_DIR/nibble" memory config --setup
+                ;;
+        esac
+    else
+        echo ""
+        echo "  Run the setup wizard:"
+        echo -e "    ${BOLD}nibble memory config --setup${NC}"
+        echo ""
+        echo "  Or clone an existing memory repo:"
+        echo "    git clone <your-repo-url> ~/.nibble/memory"
+        echo ""
+    fi
+fi
+
+# ── 8. Telegram (optional) ────────────────────────────────────────────────────
 if [ "$RUN_TELEGRAM" = true ]; then
     step "Setting up Telegram notifications"
     bash "$REPO_DIR/scripts/setup-telegram.sh"
@@ -327,7 +395,7 @@ else
     fi
 fi
 
-# ── 8. Telegram listener daemon (optional) ────────────────────────────────────
+# ── 9. Telegram listener daemon (optional) ────────────────────────────────────
 if [ "$RUN_LISTEN" = true ]; then
     step "Setting up Telegram reply listener (systemd service)"
     bash "$REPO_DIR/scripts/setup-listen.sh"
@@ -345,7 +413,7 @@ else
     fi
 fi
 
-# ── 9. Llama server (optional) ─────────────────────────────────────────────────
+# ── 10. Llama server (optional) ────────────────────────────────────────────────
 if [ "$RUN_LLAMA" = true ]; then
     step "Setting up llama-server service"
     bash "$REPO_DIR/scripts/setup-llama-server.sh"
@@ -357,7 +425,7 @@ else
     fi
 fi
 
-# ── 10. Done ───────────────────────────────────────────────────────────────────
+# ── 11. Done ───────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}${GREEN}Done!${NC} Restart Claude Code for hooks to take effect."
 echo ""
@@ -380,4 +448,12 @@ echo "  Mount repo:   nibble hermes mount /path/to/repo"
 echo "  Unmount repo: nibble hermes unmount /path/to/repo"
 echo "  List repos:   nibble hermes list"
 echo "  Stop:         nibble hermes kill"
+echo ""
+echo -e "${BOLD}Memory usage:${NC}"
+echo "  Config:       nibble memory config"
+echo "  Write:        nibble memory write 'decision: chose Rust over Go'"
+echo "  Search:       nibble memory search 'database decision'"
+echo "  List:         nibble memory list"
+echo "  Lessons:      nibble memory lessons"
+echo "  Sync:         nibble memory sync"
 echo ""

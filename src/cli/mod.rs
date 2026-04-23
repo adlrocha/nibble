@@ -61,6 +61,12 @@ pub enum Commands {
         #[command(subcommand)]
         action: ReportAction,
     },
+
+    /// Manage persistent cross-session memory
+    Memory {
+        #[command(subcommand)]
+        action: MemoryAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -267,6 +273,166 @@ pub enum HermesAction {
 
     /// Stop and remove the Hermes sandbox (repos are preserved for next init)
     Kill,
+}
+
+#[derive(Subcommand)]
+pub enum MemoryAction {
+    /// Search memories by keyword
+    Search {
+        /// Search query
+        query: String,
+        /// Filter by project name
+        #[arg(long)]
+        project: Option<String>,
+        /// Filter by memory type
+        #[arg(long)]
+        r#type: Option<String>,
+        /// Maximum results to return
+        #[arg(short, long, default_value = "20")]
+        limit: usize,
+        /// Use semantic search (Phase 3: falls back to keyword for now)
+        #[arg(long)]
+        semantic: bool,
+    },
+
+    /// List all memories
+    List {
+        /// Filter by project name
+        #[arg(long)]
+        project: Option<String>,
+        /// Filter by memory type
+        #[arg(long)]
+        r#type: Option<String>,
+        /// Only show memories since this date (YYYY-MM-DD)
+        #[arg(long)]
+        since: Option<String>,
+        /// Maximum results to return
+        #[arg(short, long, default_value = "50")]
+        limit: usize,
+    },
+
+    /// Show full content of a specific memory
+    Show {
+        /// Memory ID (or prefix)
+        id: String,
+    },
+
+    /// Write a new memory or update an existing one
+    Write {
+        /// Memory content
+        content: String,
+        /// Memory type: decision, pattern, user_instruction, observation, bug_record, session_summary
+        #[arg(short, long, default_value = "observation")]
+        r#type: String,
+        /// Project name (defaults to current directory name)
+        #[arg(short, long)]
+        project: Option<String>,
+        /// Comma-separated tags
+        #[arg(short, long)]
+        tags: Option<String>,
+        /// Update an existing memory by ID
+        #[arg(long)]
+        update: Option<String>,
+    },
+
+    /// Delete a memory
+    Forget {
+        /// Memory ID to delete
+        id: String,
+    },
+
+    /// Show memory statistics
+    Stats {
+        /// Filter by project name
+        #[arg(long)]
+        project: Option<String>,
+    },
+
+    /// Capture a session event (internal: called by hooks/extensions)
+    #[command(hide = true)]
+    Capture {
+        /// Task ID
+        task_id: String,
+        /// Event role: user, assistant, tool, system
+        role: String,
+        /// Event content
+        content: String,
+        /// Tool name (for tool events)
+        #[arg(long)]
+        tool_name: Option<String>,
+        /// Tool input (for tool events)
+        #[arg(long)]
+        tool_input: Option<String>,
+        /// Tool output (for tool events)
+        #[arg(long)]
+        tool_output: Option<String>,
+    },
+
+    /// List and search lessons
+    Lessons {
+        /// Context description for semantic matching of relevant lessons
+        #[arg(long)]
+        context: Option<String>,
+        /// Filter by status: active, resolved, encoded
+        #[arg(long, default_value = "active")]
+        status: String,
+        /// Filter by severity: low, medium, high, critical
+        #[arg(long)]
+        severity: Option<String>,
+        /// Maximum results to return
+        #[arg(short, long, default_value = "10")]
+        limit: usize,
+    },
+
+    /// Add a new lesson
+    LessonAdd {
+        /// Lesson content
+        content: String,
+        /// Category: spec_gap, impl_bug, test_gap, audit_blind_spot, qa_catch, process
+        #[arg(short, long, default_value = "impl_bug")]
+        category: String,
+        /// Severity: low, medium, high, critical
+        #[arg(short, long, default_value = "medium")]
+        severity: String,
+        /// How to prevent this issue
+        #[arg(short, long, default_value = "")]
+        prevention: String,
+        /// Project name
+        #[arg(short, long)]
+        project: Option<String>,
+        /// Comma-separated tags
+        #[arg(short, long)]
+        tags: Option<String>,
+    },
+
+    /// Resolve a lesson
+    LessonResolve {
+        /// Lesson ID
+        id: String,
+        /// Resolution note
+        #[arg(short, long)]
+        note: Option<String>,
+    },
+
+    /// Browse memories interactively (opens in pager)
+    Inspect {
+        /// Filter by project name
+        #[arg(long)]
+        project: Option<String>,
+    },
+
+    /// Rebuild the index cache and regenerate index.md
+    Reindex,
+
+    /// Display memory system configuration and status
+    Config {
+        /// Launch interactive setup wizard to configure memory settings
+        #[arg(long)]
+        setup: bool,
+    },
+
+    /// Sync memory store (git add + commit + pull + push)
+    Sync,
 }
 
 #[derive(Subcommand)]

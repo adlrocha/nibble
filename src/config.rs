@@ -18,6 +18,9 @@ pub struct Config {
 
     #[serde(default)]
     pub pi: PiConfig,
+
+    #[serde(default)]
+    pub memory: MemoryConfig,
 }
 
 /// AI Factory pipeline configuration.
@@ -205,6 +208,116 @@ pub fn save(config: &Config) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to write config to {}: {}", path.display(), e))?;
 
     Ok(())
+}
+
+// ── Memory system configuration ──────────────────────────────────────────────
+
+/// Memory system configuration.
+///
+/// Controls persistent cross-session memory storage, LLM extraction,
+/// and git-based sync.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    #[serde(default)]
+    pub llm: MemoryLlmConfig,
+
+    #[serde(default)]
+    pub sync: MemorySyncConfig,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            llm: MemoryLlmConfig::default(),
+            sync: MemorySyncConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryLlmConfig {
+    #[serde(default = "default_llm_provider")]
+    pub provider: String,
+    #[serde(default = "default_llm_base_url")]
+    pub base_url: String,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default = "default_llm_model")]
+    pub model: String,
+    #[serde(default = "default_llm_model")]
+    pub embedding_model: String,
+    #[serde(default = "default_embedding_dims")]
+    pub embedding_dims: usize,
+}
+
+fn default_llm_provider() -> String {
+    "openai_compatible".to_string()
+}
+fn default_llm_base_url() -> String {
+    "http://localhost:6969/v1".to_string()
+}
+fn default_llm_model() -> String {
+    "default".to_string()
+}
+fn default_embedding_dims() -> usize {
+    768
+}
+
+impl Default for MemoryLlmConfig {
+    fn default() -> Self {
+        Self {
+            provider: default_llm_provider(),
+            base_url: default_llm_base_url(),
+            api_key: String::new(),
+            model: default_llm_model(),
+            embedding_model: default_llm_model(),
+            embedding_dims: default_embedding_dims(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemorySyncConfig {
+    #[serde(default)]
+    pub remote: String,
+    #[serde(default)]
+    pub auto_sync: bool,
+    #[serde(default = "default_sync_author")]
+    pub author_name: String,
+    #[serde(default = "default_sync_email")]
+    pub author_email: String,
+}
+
+fn default_sync_author() -> String {
+    "nibble".to_string()
+}
+fn default_sync_email() -> String {
+    "nibble@local".to_string()
+}
+
+impl Default for MemorySyncConfig {
+    fn default() -> Self {
+        Self {
+            remote: String::new(),
+            auto_sync: false,
+            author_name: default_sync_author(),
+            author_email: default_sync_email(),
+        }
+    }
+}
+
+/// Returns the path to the memory directory: ~/.nibble/memory/
+pub fn memory_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".nibble").join("memory")
 }
 
 #[cfg(test)]
