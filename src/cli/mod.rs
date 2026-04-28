@@ -67,6 +67,12 @@ pub enum Commands {
         #[command(subcommand)]
         action: MemoryAction,
     },
+
+    /// List and inspect agent sessions (diagnostic)
+    Session {
+        #[command(subcommand)]
+        action: SessionAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -173,6 +179,10 @@ pub enum SandboxAction {
         /// Use Pi (pi.dev) coding agent instead of Claude Code
         #[arg(long)]
         pi: bool,
+        /// Resume a specific session by ID (from `nibble session list`).
+        /// Overrides the stored session for this task.
+        #[arg(long)]
+        session: Option<String>,
         /// Create a git worktree for this branch and spawn+attach a sandbox for it.
         /// The worktree is created at <repo_parent>/<repo_name>--<branch-slug>.
         /// The branch is auto-created from the repo's current HEAD if it doesn't exist.
@@ -433,6 +443,58 @@ pub enum MemoryAction {
 
     /// Sync memory store (git add + commit + pull + push)
     Sync,
+
+    /// Extract memories and lessons from a captured session
+    Summarize {
+        /// Task ID of the session to summarize
+        task_id: String,
+        /// Force re-summarization even if already done
+        #[arg(long)]
+        force: bool,
+        /// Path to a pi session JSONL file to summarize instead of capture JSONL
+        #[arg(long)]
+        from_pi_session: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SessionAction {
+    /// List all discoverable sessions across agents (browser-history style)
+    List {
+        /// Filter by agent type: claude, pi, opencode, hermes
+        #[arg(short, long)]
+        agent: Option<String>,
+        /// Filter by repo/workspace path substring
+        #[arg(short, long)]
+        repo: Option<String>,
+        /// Show only sessions from today
+        #[arg(long, group = "date_filter")]
+        today: bool,
+        /// Show only sessions from yesterday
+        #[arg(long, group = "date_filter")]
+        yesterday: bool,
+        /// Show only sessions from the last 7 days
+        #[arg(long, group = "date_filter")]
+        week: bool,
+        /// Show only sessions from the last 30 days
+        #[arg(long, group = "date_filter")]
+        month: bool,
+        /// Show only the last N sessions
+        #[arg(long)]
+        last: Option<usize>,
+        /// Maximum results to show per group
+        #[arg(short, long, default_value = "50")]
+        limit: usize,
+    },
+
+    /// Read and display a session transcript by its ID
+    Read {
+        /// Session ID (from `nibble session list`)
+        id: String,
+        /// Output raw JSON/JSONL instead of formatted transcript
+        #[arg(long)]
+        raw: bool,
+    },
 }
 
 #[derive(Subcommand)]

@@ -248,7 +248,19 @@ for skill_dir in "$REPO_DIR/skills"/{factory,nibble}-*/; do
     ok "skill: $skill_name → $dest/"
 done
 
-# ── 4b. Install Claude Code statusline ────────────────────────────────────────
+# ── 4b. Install Pi extension ──────────────────────────────────────────────────
+# The Pi extension captures session events and triggers summarization.
+PI_EXTENSIONS_DIR="$HOME/.pi/agent/extensions"
+if [ -d "$PI_EXTENSIONS_DIR" ] || [ -d "$HOME/.pi" ]; then
+    mkdir -p "$PI_EXTENSIONS_DIR"
+    cp "$REPO_DIR/extension/nibble-memory.ts" "$PI_EXTENSIONS_DIR/nibble-memory.ts"
+    ok "pi extension: nibble-memory.ts → $PI_EXTENSIONS_DIR/"
+else
+    warn "~/.pi/ not found — skipping Pi extension install"
+    warn "  (it will be installed automatically when you spawn a Pi sandbox)"
+fi
+
+# ── 4c. Install Claude Code statusline ────────────────────────────────────────
 # Always copy the script; only add the statusLine key to settings.json if one
 # is not already configured (so custom statuslines aren't clobbered).
 STATUSLINE_SCRIPT="$HOME/.claude/statusline-command.sh"

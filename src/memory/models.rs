@@ -265,3 +265,21 @@ pub struct IndexStatStats {
     pub oldest: Option<DateTime<Utc>>,
     pub newest: Option<DateTime<Utc>>,
 }
+
+/// A single event from a capture JSONL file, used by the summarizer.
+/// Shared between agents (Claude Code writes these directly; pi sessions
+/// are transcribed into this format).
+#[derive(Debug, Clone, Deserialize)]
+pub struct CaptureEvent {
+    #[allow(dead_code)]
+    pub ts: String,
+    pub role: String,
+    #[serde(default)]
+    pub content: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub input: String,
+    #[serde(default)]
+    pub output: String,
+}

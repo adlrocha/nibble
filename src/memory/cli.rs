@@ -934,3 +934,26 @@ fn find_memory_by_id_prefix(id_prefix: &str) -> Result<MemoryEntry> {
 
     anyhow::bail!("Memory not found: {}", id_prefix)
 }
+
+// ── Summarize command ────────────────────────────────────────────────────────
+
+pub fn handle_summarize(task_id: &str, force: bool, from_pi_session: Option<&str>) -> Result<()> {
+    let count = if let Some(pi_path) = from_pi_session {
+        let path = std::path::PathBuf::from(pi_path);
+        crate::memory::summarize::summarize_pi_session(task_id, &path, force)?
+    } else {
+        crate::memory::summarize::summarize_session(task_id, force)?
+    };
+    if count > 0 {
+        println!(
+            "Summarized session {} — wrote {} memory/lesson files.",
+            task_id, count
+        );
+    } else {
+        println!(
+            "Session {} summarized — nothing worth remembering.",
+            task_id
+        );
+    }
+    Ok(())
+}

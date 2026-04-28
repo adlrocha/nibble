@@ -7,6 +7,7 @@ mod memory;
 mod models;
 mod notifications;
 mod sandbox;
+mod session;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -264,8 +265,181 @@ fn main() -> Result<()> {
                 cli::MemoryAction::Sync => {
                     memory::cli::handle_sync()?;
                 }
+                cli::MemoryAction::Summarize {
+                    task_id,
+                    force,
+                    from_pi_session,
+                } => {
+                    memory::cli::handle_summarize(&task_id, force, from_pi_session.as_deref())?;
+                }
             }
         }
+        Commands::Session { action } => match action {
+            cli::SessionAction::List {
+                agent,
+                repo,
+                today,
+                yesterday,
+                week,
+                month,
+                last,
+                limit,
+            } => {
+                // Compute date filter
+                let date_range = if today {
+                    let local_now = chrono::Local::now();
+                    let start_of_day = local_now
+                        .date_naive()
+                        .and_hms_opt(0, 0, 0)
+                        .unwrap()
+                        .and_local_timezone(chrono::Local)
+                        .unwrap();
+                    let tomorrow = start_of_day + chrono::Duration::days(1);
+                    Some(session::DateRange {
+                        since: Some(start_of_day.with_timezone(&chrono::Utc)),
+                        until: Some(tomorrow.with_timezone(&chrono::Utc)),
+                    })
+                } else if yesterday {
+                    let local_now = chrono::Local::now();
+                    let start_of_today = local_now
+                        .date_naive()
+                        .and_hms_opt(0, 0, 0)
+                        .unwrap()
+                        .and_local_timezone(chrono::Local)
+                        .unwrap();
+                    let start_of_yesterday = start_of_today - chrono::Duration::days(1);
+                    Some(session::DateRange {
+                        since: Some(start_of_yesterday.with_timezone(&chrono::Utc)),
+                        until: Some(start_of_today.with_timezone(&chrono::Utc)),
+                    })
+                } else if week {
+                    Some(session::DateRange {
+                        since: Some(chrono::Utc::now() - chrono::Duration::days(7)),
+                        until: None,
+                    })
+                } else if month {
+                    Some(session::DateRange {
+                        since: Some(chrono::Utc::now() - chrono::Duration::days(30)),
+                        until: None,
+                    })
+                } else {
+                    None
+                };
+
+                let effective_limit = last.unwrap_or(limit);
+
+                let groups = session::list_sessions_grouped(
+                    agent.as_deref(),
+                    repo.as_deref(),
+                    date_range,
+                    effective_limit,
+                )?;
+
+                if groups.is_empty() || groups.iter().all(|g| g.sessions.is_empty()) {
+                    println!("No sessions found.");
+                    return Ok(());
+                }
+
+                // Build lookup maps from session identifiers → project_path
+                let tasks = db.list_tasks().unwrap_or_default();
+                let mut claude_task_repo: HashMap<String, String> = HashMap::new();
+                let mut opencode_task_repo: HashMap<String, String> = HashMap::new();
+                let mut pi_task_repo: HashMap<String, String> = HashMap::new();
+                for task in &tasks {
+                    if let Some(ref ctx) = task.context {
+                        if let Some(ref path) = ctx.project_path {
+                            if let Some(ref sid) = ctx.claude_session_id {
+                                claude_task_repo.insert(sid.clone(), path.clone());
+                            }
+                            if let Some(ref sid) = ctx.opencode_session_id {
+                                opencode_task_repo.insert(sid.clone(), path.clone());
+                            }
+                            if let Some(serde_json::Value::String(ref p)) =
+                                ctx.extra.get("pi_session_path")
+                            {
+                                pi_task_repo.insert(p.clone(), path.clone());
+                            }
+                        }
+                    }
+                }
+
+                // Compute max title width for alignment
+                let mut max_title_width = 40;
+                for group in &groups {
+                    for s in &group.sessions {
+                        let title = session::get_session_title(s);
+                        max_title_width = max_title_width.max(title.len().min(60));
+                    }
+                }
+                max_title_width = max_title_width.max(20);
+
+                for group in &groups {
+                    println!("\n{} ({})", group.label, group.sessions.len());
+                    println!("{}", "─".repeat(max_title_width + 58));
+                    for s in &group.sessions {
+                        let time = session::format_time(s.modified);
+                        let title = session::get_session_title(s);
+                        let sid = &s.session_id[..s.session_id.len().min(8)];
+
+                        // Resolve workspace: prefer task project_path for sandbox sessions
+                        let resolved_ws = match s.agent.as_str() {
+                            "claude" => claude_task_repo.get(&s.session_id).cloned(),
+                            "opencode" => opencode_task_repo.get(&s.session_id).cloned(),
+                            "pi" => pi_task_repo
+                                .get(&s.path.to_string_lossy().to_string())
+                                .cloned(),
+                            _ => None,
+                        };
+                        let ws = session::format_workspace(
+                            resolved_ws.as_deref().or(s.workspace.as_deref()),
+                        );
+
+                        let agent_short = match s.agent.as_str() {
+                            "claude" => "c",
+                            "pi" => "π",
+                            "opencode" => "o",
+                            "hermes" => "h",
+                            _ => &s.agent[..1],
+                        };
+                        println!(
+                            "  {:<6} {:<10} {:<8}  {:<width$}  {:<12} {}",
+                            time,
+                            agent_short,
+                            sid,
+                            title,
+                            ws,
+                            session::format_size(s.size_bytes),
+                            width = max_title_width.min(60)
+                        );
+                    }
+                }
+                println!();
+            }
+            cli::SessionAction::Read { id, raw } => {
+                if raw {
+                    let content = session::read_session_raw(&id)?;
+                    println!("{}", content);
+                } else {
+                    let content = session::read_session(&id)?;
+                    // Use pager for formatted output
+                    let pager = std::env::var("PAGER").unwrap_or_else(|_| "less".to_string());
+                    let mut child = std::process::Command::new(&pager)
+                        .stdin(std::process::Stdio::piped())
+                        .spawn()
+                        .unwrap_or_else(|_| {
+                            std::process::Command::new("cat")
+                                .stdin(std::process::Stdio::piped())
+                                .spawn()
+                                .expect("cat should always work")
+                        });
+                    if let Some(mut stdin) = child.stdin.take() {
+                        use std::io::Write;
+                        let _ = stdin.write_all(content.as_bytes());
+                    }
+                    let _ = child.wait();
+                }
+            }
+        },
         Commands::Cron { action } => match action {
             CronAction::Add {
                 repo,
@@ -357,6 +531,7 @@ fn main() -> Result<()> {
                 opencode,
                 hermes,
                 pi,
+                session,
                 branch,
             } => {
                 // If --branch is given, resolve the worktree path (creating it if needed)
@@ -371,7 +546,16 @@ fn main() -> Result<()> {
 
                 match resolve_sandbox_id(&db, &effective_path) {
                     Ok(task_id) => {
-                        cmd_sandbox_attach(&db, task_id, fresh, btw, opencode, hermes, pi)?;
+                        cmd_sandbox_attach(
+                            &db,
+                            task_id,
+                            fresh,
+                            btw,
+                            opencode,
+                            hermes,
+                            pi,
+                            session.clone(),
+                        )?;
                     }
                     Err(e) => {
                         let looks_like_path = effective_path.starts_with('.')
@@ -396,7 +580,16 @@ fn main() -> Result<()> {
                                 hermes,
                                 pi,
                             )?;
-                            cmd_sandbox_attach(&db, task_id, fresh, btw, opencode, hermes, pi)?;
+                            cmd_sandbox_attach(
+                                &db,
+                                task_id,
+                                fresh,
+                                btw,
+                                opencode,
+                                hermes,
+                                pi,
+                                session.clone(),
+                            )?;
                         } else {
                             return Err(e);
                         }
@@ -916,6 +1109,52 @@ fn delete_latest_pi_session() {
             ),
         }
     }
+}
+
+/// Find the most recent Pi session file whose `cwd` matches the given path.
+///
+/// Pi session files start with a JSON line like:
+///   {"type":"session","cwd":"/workspace",...}
+///
+/// Returns the absolute path to the matching session file, or None if no match.
+fn find_pi_session_for_cwd(cwd: &str) -> Option<std::path::PathBuf> {
+    let home = dirs::home_dir()?;
+    let sessions_dir = home.join(".pi").join("agent").join("sessions");
+    if !sessions_dir.exists() {
+        return None;
+    }
+
+    let mut newest: Option<(std::path::PathBuf, std::time::SystemTime)> = None;
+
+    for entry in std::fs::read_dir(&sessions_dir).ok()?.flatten() {
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        for file in std::fs::read_dir(entry.path()).ok()?.flatten() {
+            let path = file.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+
+            // Fast check: read first line and look for matching cwd
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                let first_line = content.lines().next().unwrap_or("");
+                if first_line.contains(&format!("\"cwd\":\"{cwd}\""))
+                    || first_line.contains(&format!("\"cwd\": \"{cwd}\""))
+                {
+                    if let Ok(meta) = file.metadata() {
+                        if let Ok(mtime) = meta.modified() {
+                            if newest.as_ref().map_or(true, |(_, t)| mtime > *t) {
+                                newest = Some((path, mtime));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    newest.map(|(path, _)| path)
 }
 
 // ── Hermes command handlers ──────────────────────────────────────────────────
@@ -1453,6 +1692,7 @@ pub(crate) fn cmd_sandbox_spawn(
                             opencode,
                             hermes,
                             pi,
+                            None,
                         )?;
                     }
                     return Ok(existing_task_id);
@@ -1488,6 +1728,7 @@ pub(crate) fn cmd_sandbox_spawn(
                                     opencode,
                                     hermes,
                                     pi,
+                                    None,
                                 )?;
                             }
                             return Ok(tid.clone());
@@ -1878,7 +2119,16 @@ pub(crate) fn cmd_sandbox_spawn(
             short_id, abs_repo_path
         );
         println!();
-        cmd_sandbox_attach(db, task_id.clone(), fresh, false, opencode, hermes, pi)?;
+        cmd_sandbox_attach(
+            db,
+            task_id.clone(),
+            fresh,
+            false,
+            opencode,
+            hermes,
+            pi,
+            None,
+        )?;
     }
 
     Ok(task_id)
@@ -2520,6 +2770,7 @@ fn cmd_sandbox_attach(
     opencode: bool,
     hermes: bool,
     pi: bool,
+    session_id: Option<String>,
 ) -> Result<()> {
     let task = db
         .get_task_by_id(&task_id)?
@@ -2540,34 +2791,95 @@ fn cmd_sandbox_attach(
         _ => anyhow::bail!("Container {} is not running", container_id),
     }
 
+    // If --session was passed, look it up early so we can auto-detect the agent.
+    let override_session = session_id.as_ref().and_then(|sid| {
+        crate::session::find_session_by_id(sid).or_else(|| {
+            eprintln!("  Warning:   session {sid} not found, using stored session");
+            None
+        })
+    });
+
+    // Auto-derive agent flags from the requested session when the user didn't
+    // explicitly specify an agent. If they did specify one but it conflicts,
+    // warn and let the session's agent win.
+    let (opencode, hermes, pi, agent_override) = if let Some(ref sesh) = override_session {
+        let (oc, h, pi_flag, overridden) =
+            crate::session::derive_agent_flags_from_session(opencode, hermes, pi, sesh);
+        if [opencode, hermes, pi].iter().filter(|&&f| f).count() > 0 {
+            eprintln!(
+                "  Session:   {} session {} — overriding explicit agent flag",
+                sesh.agent,
+                &sesh.session_id[..sesh.session_id.len().min(8)]
+            );
+        } else {
+            eprintln!(
+                "  Session:   auto-detected {} agent for session {}",
+                sesh.agent,
+                &sesh.session_id[..sesh.session_id.len().min(8)]
+            );
+        }
+        (oc, h, pi_flag, overridden)
+    } else {
+        (opencode, hermes, pi, false)
+    };
+
     let agent = resolve_attach_agent(&task.agent_type, opencode, hermes, pi, btw)?;
 
     // Resolve the per-agent session IDs stored for this task.
     // Each agent writes its own field so they never clobber each other.
     // Legacy rows (pre-split) may only have the generic `session_id`; fall back to
     // that when the typed field is absent so existing sandboxes keep working.
-    let claude_session_id: Option<&str> = task.context.as_ref().and_then(|c| {
-        let raw = c.claude_session_id.as_deref().or_else(|| {
-            // Legacy fallback: use generic session_id only for non-opencode tasks.
-            match task.agent_type {
-                AgentType::OpenCode => None,
-                _ => c.session_id.as_deref(),
-            }
-        });
-        // Guard: a ses_... value is an opencode session ID that was mistakenly stored
-        // in claude_session_id by an older version of the session-id handler. Treat it
-        // as absent so Claude never tries `--resume ses_...`.
-        raw.filter(|id| !id.starts_with("ses_"))
-    });
-    let opencode_session_id: Option<&str> = task.context.as_ref().and_then(|c| {
-        c.opencode_session_id.as_deref().or_else(|| {
-            // Legacy fallback: use generic session_id only for opencode tasks.
-            match task.agent_type {
-                AgentType::OpenCode => c.session_id.as_deref(),
-                _ => None,
-            }
+    let claude_session_id: Option<&str> = if let Some(ref sesh) = override_session {
+        if sesh.agent == "claude" {
+            Some(&sesh.session_id)
+        } else if agent_override {
+            // Agent was auto-derived from the session; don't warn about mismatches
+            None
+        } else {
+            eprintln!(
+                "  Warning:   requested session is for {}, not claude",
+                sesh.agent
+            );
+            None
+        }
+    } else {
+        task.context.as_ref().and_then(|c| {
+            let raw = c.claude_session_id.as_deref().or_else(|| {
+                // Legacy fallback: use generic session_id only for non-opencode tasks.
+                match task.agent_type {
+                    AgentType::OpenCode => None,
+                    _ => c.session_id.as_deref(),
+                }
+            });
+            // Guard: a ses_... value is an opencode session ID that was mistakenly stored
+            // in claude_session_id by an older version of the session-id handler. Treat it
+            // as absent so Claude never tries `--resume ses_...`.
+            raw.filter(|id| !id.starts_with("ses_"))
         })
-    });
+    };
+    let opencode_session_id: Option<&str> = if let Some(ref sesh) = override_session {
+        if sesh.agent == "opencode" {
+            Some(&sesh.session_id)
+        } else if agent_override {
+            None
+        } else {
+            eprintln!(
+                "  Warning:   requested session is for {}, not opencode",
+                sesh.agent
+            );
+            None
+        }
+    } else {
+        task.context.as_ref().and_then(|c| {
+            c.opencode_session_id.as_deref().or_else(|| {
+                // Legacy fallback: use generic session_id only for opencode tasks.
+                match task.agent_type {
+                    AgentType::OpenCode => c.session_id.as_deref(),
+                    _ => None,
+                }
+            })
+        })
+    };
 
     let shell_cmd = match agent {
         SelectedAgent::Hermes => {
@@ -2585,8 +2897,77 @@ fn cmd_sandbox_attach(
                 format!("{pi_install}; pi")
             } else if btw {
                 format!("{pi_install}; pi")
+            } else if let Some(ref sesh) = override_session {
+                // --session override: look up the session path from the session ID
+                if sesh.agent == "pi" {
+                    let host_path = sesh.path.clone();
+                    let home = dirs::home_dir().unwrap_or_default();
+                    let cp = if host_path.starts_with(&home) {
+                        std::path::PathBuf::from("/home/node")
+                            .join(host_path.strip_prefix(&home).unwrap_or(&host_path))
+                    } else {
+                        host_path
+                    };
+                    eprintln!(
+                        "  Session:   resuming pi session {} (override)",
+                        cp.display()
+                    );
+                    format!("{pi_install}; pi --session '{cp}'", cp = cp.display())
+                } else {
+                    eprintln!(
+                        "  Warning:   requested session is for {}, not pi",
+                        sesh.agent
+                    );
+                    format!("{pi_install}; pi")
+                }
             } else {
-                format!("{pi_install}; pi -c")
+                // Prefer a stored session path from a previous attach, otherwise discover
+                // the most recent session whose cwd matches /workspace.
+                let stored_path = task
+                    .context
+                    .as_ref()
+                    .and_then(|c| c.extra.get("pi_session_path").and_then(|v| v.as_str()));
+
+                if let Some(path_str) = stored_path {
+                    let cp = std::path::PathBuf::from(path_str);
+                    if cp.exists() {
+                        eprintln!("  Session:   resuming stored pi session {}", cp.display());
+                        format!("{pi_install}; pi --session '{cp}'", cp = cp.display())
+                    } else {
+                        eprintln!("  Session:   stored pi session gone, re-discovering...");
+                        format!("{pi_install}; pi")
+                    }
+                } else {
+                    // Discover the correct session for this workspace
+                    match find_pi_session_for_cwd("/workspace") {
+                        Some(host_path) => {
+                            let home = dirs::home_dir().unwrap_or_default();
+                            let cp = if host_path.starts_with(&home) {
+                                std::path::PathBuf::from("/home/node")
+                                    .join(host_path.strip_prefix(&home).unwrap_or(&host_path))
+                            } else {
+                                host_path
+                            };
+                            eprintln!("  Session:   resuming pi session {}", cp.display());
+                            // Store the discovered path in task context for next attach
+                            let mut updated_task = task.clone();
+                            if let Some(ref mut ctx) = updated_task.context {
+                                ctx.extra.insert(
+                                    "pi_session_path".to_string(),
+                                    serde_json::Value::String(cp.to_string_lossy().to_string()),
+                                );
+                            }
+                            let _ = db.update_task(&updated_task);
+                            format!("{pi_install}; pi --session '{cp}'", cp = cp.display())
+                        }
+                        None => {
+                            eprintln!(
+                                "  Session:   no pi session found for /workspace, starting fresh"
+                            );
+                            format!("{pi_install}; pi")
+                        }
+                    }
+                }
             }
         }
         SelectedAgent::OpenCode => {

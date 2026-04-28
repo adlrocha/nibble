@@ -6,9 +6,11 @@
 pub mod cli;
 pub mod git;
 pub mod index;
+pub mod llm;
 pub mod models;
 pub mod search;
 pub mod store;
+pub mod summarize;
 
 #[cfg(test)]
 mod tests;

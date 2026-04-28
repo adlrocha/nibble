@@ -439,6 +439,24 @@ impl Database {
         Ok(first)
     }
 
+    /// List all tasks from the database (most recent first).
+    pub fn list_tasks(&self) -> Result<Vec<Task>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, task_id, agent_type, title, status, created_at, updated_at,
+                    completed_at, pid, ppid, monitor_pid, attention_reason,
+                    exit_code, context, metadata, container_id, sandbox_type, sandbox_config
+             FROM tasks
+             ORDER BY updated_at DESC",
+        )?;
+
+        let mut rows = stmt.query([])?;
+        let mut tasks = Vec::new();
+        while let Some(row) = rows.next()? {
+            tasks.push(self.row_to_task(row)?);
+        }
+        Ok(tasks)
+    }
+
     /// Record that a Telegram message was sent for a task, so replies can be routed back.
     pub fn insert_bot_message(&self, message_id: i64, task_id: &str) -> Result<()> {
         let now = Utc::now().timestamp();

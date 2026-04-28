@@ -5,6 +5,17 @@ set -euo pipefail
 
 echo "[setup] Starting nibble sandbox setup..."
 
+# ── SSH known_hosts for memory auto-sync ──────────────────────────────────────
+# Pin GitHub's ED25519 key to avoid interactive prompts and MITM risks from
+# dynamic ssh-keyscan. Fingerprint: SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU
+# Source: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints
+mkdir -p ~/.ssh
+GITHUB_KEY='github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl'
+if ! grep -qF "$GITHUB_KEY" ~/.ssh/known_hosts 2>/dev/null; then
+    echo "[setup] Pinning GitHub SSH host key..."
+    echo "$GITHUB_KEY" >> ~/.ssh/known_hosts
+fi
+
 # ── System build dependencies ─────────────────────────────────────────────────
 if ! command -v cc &>/dev/null; then
     echo "[setup] Installing build-essential..."

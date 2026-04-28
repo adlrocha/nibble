@@ -4,6 +4,9 @@ use anyhow::{Context, Result};
 use std::path::Path;
 use std::process::Command;
 
+/// SSH command used by git to avoid interactive host-key prompts in headless environments.
+const GIT_SSH_COMMAND: &str = "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new";
+
 /// Initialize a git repo in the memory directory.
 pub fn init_repo(dir: &Path) -> Result<()> {
     let output = Command::new("git")
@@ -89,6 +92,7 @@ pub fn pull(dir: &Path) -> Result<()> {
     }
 
     let output = Command::new("git")
+        .env("GIT_SSH_COMMAND", GIT_SSH_COMMAND)
         .args(["-C", &dir.to_string_lossy()])
         .args(["pull", "--rebase"])
         .output();
@@ -120,6 +124,7 @@ pub fn push(dir: &Path) -> Result<()> {
     }
 
     let output = Command::new("git")
+        .env("GIT_SSH_COMMAND", GIT_SSH_COMMAND)
         .args(["-C", &dir.to_string_lossy()])
         .args(["push"])
         .output();
