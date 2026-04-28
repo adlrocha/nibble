@@ -14,7 +14,7 @@
 set -e
 
 # ── Defaults (override via environment or edit below) ─────────────────────────
-LLAMA_MODEL="${LLAMA_MODEL:-/home/adlrocha/workspace/llm-models/Qwen3.5-27B-UD-Q5_K_XL.gguf}"
+LLAMA_MODEL="${LLAMA_MODEL:-/home/adlrocha/workspace/llm-models/Qwen3.6-27B-UD-Q5_K_XL.gguf}"
 LLAMA_USER="${LLAMA_USER:-$(whoami)}"
 LLAMA_PORT="${LLAMA_PORT:-6969}"
 LLAMA_BIN="${LLAMA_BIN:-/usr/bin/llama-server}"
@@ -75,14 +75,14 @@ ExecStart=$LLAMA_BIN \
     -c 65536 \
     -n 4096 \
     -fa on \
-    -ctk q8_0 \
-    -ctv q8_0 \
-    -b 512 \
-    -ub 512 \
+    -ctk q4_0 \
+    -ctv q4_0 \
+    -b 4096 \
+    -ub 4096 \
     --temp 0.6 \
     --top-p 0.95 \
-    --top-k 20 \
-    --min-p 0.0 \
+    --top-k 40 \
+    --min-p 0.05 \
     --repeat-penalty 1.0 \
     --chat-template-kwargs '$CHAT_TEMPLATE_KWARGS'
 Restart=always
