@@ -1,4 +1,5 @@
 mod agent_input;
+mod backup;
 mod cli;
 mod config;
 mod cron;
@@ -440,6 +441,15 @@ fn main() -> Result<()> {
                 }
             }
         },
+        Commands::Backup { output } => {
+            let output_path = output.map(PathBuf::from);
+            let path = backup::create_backup(output_path)?;
+            println!("Backup created: {}", path.display());
+        }
+        Commands::Import { path } => {
+            let zip_path = PathBuf::from(path);
+            backup::import_backup(&zip_path)?;
+        }
         Commands::Cron { action } => match action {
             CronAction::Add {
                 repo,

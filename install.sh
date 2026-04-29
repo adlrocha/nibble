@@ -2,8 +2,9 @@
 # install.sh — build and install nibble end-to-end
 #
 # Usage:
-#   ./install.sh             # full install / upgrade
-#   ./install.sh --telegram  # also (re)run Telegram bot setup
+#   ./install.sh                    # full install / upgrade
+#   ./install.sh --telegram         # also (re)run Telegram bot setup
+#   ./install.sh --recover backup.zip  # install fresh then restore from backup
 
 set -e
 
@@ -28,13 +29,22 @@ RUN_TELEGRAM=false
 RUN_LISTEN=false
 RUN_LLAMA=false
 REBUILD_IMAGE=false
-for arg in "$@"; do
-    case "$arg" in
-        --telegram) RUN_TELEGRAM=true ;;
-        --listen)   RUN_LISTEN=true ;;
-        --llama)    RUN_LLAMA=true ;;
-        --rebuild)  REBUILD_IMAGE=true ;;
-        *) die "Unknown argument: $arg" ;;
+RECOVER_ZIP=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --telegram) RUN_TELEGRAM=true; shift ;;
+        --listen)   RUN_LISTEN=true; shift ;;
+        --llama)    RUN_LLAMA=true; shift ;;
+        --rebuild)  REBUILD_IMAGE=true; shift ;;
+        --recover)
+            if [ -z "${2:-}" ] || [ "${2#-}" != "$2" ]; then
+                die "--recover requires a path to a backup zip file"
+            fi
+            RECOVER_ZIP="$2"
+            shift 2
+            ;;
+        *) die "Unknown argument: $1" ;;
     esac
 done
 
@@ -44,8 +54,12 @@ echo "  Flags: --telegram  set up Telegram notifications"
 echo "         --listen    set up Telegram reply listener daemon"
 echo "         --llama     set up llama-server systemd service"
 echo "         --rebuild   force rebuild the sandbox container image"
+echo "         --recover   restore from a backup zip after install"
 echo ""
 [ "$REBUILD_IMAGE" = true ] && echo -e "  ${YELLOW}--rebuild${NC}: sandbox image will be rebuilt from scratch"
+if [ -n "$RECOVER_ZIP" ]; then
+    echo -e "  ${YELLOW}--recover${NC}: will restore from $RECOVER_ZIP after install"
+fi
 
 # ── 1. Prerequisites ──────────────────────────────────────────────────────────
 step "Checking prerequisites"
@@ -499,7 +513,18 @@ else
     fi
 fi
 
-# ── 11. Done ───────────────────────────────────────────────────────────────────
+# ── 11. Recover from backup (optional) ────────────────────────────────────────
+if [ -n "$RECOVER_ZIP" ]; then
+    step "Recovering from backup"
+    if [ ! -f "$RECOVER_ZIP" ]; then
+        die "Backup file not found: $RECOVER_ZIP"
+    fi
+    "$BIN_DIR/nibble" import "$RECOVER_ZIP" \
+        || die "Failed to import backup"
+    ok "Restored from $RECOVER_ZIP"
+fi
+
+# ── 12. Done ───────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}${GREEN}Done!${NC} Restart Claude Code for hooks to take effect."
 echo ""
@@ -510,7 +535,6 @@ echo -e "${BOLD}Sandbox usage:${NC}"
 echo "  Start agent:  nibble sandbox spawn /path/to/repo"
 echo "  List agents:  nibble sandbox list"
 echo "  Attach:       nibble sandbox attach <task-id>"
-echo "  Attach (oc):  nibble sandbox attach <task-id> --opencode"
 echo "  Kill agent:   nibble sandbox kill <task-id>"
 echo "  Watch:        nibble watch"
 echo "  Rebuild img:  ./install.sh --rebuild"
@@ -530,4 +554,9 @@ echo "  Search:       nibble memory search 'database decision'"
 echo "  List:         nibble memory list"
 echo "  Lessons:      nibble memory lessons"
 echo "  Sync:         nibble memory sync"
+echo ""
+echo -e "${BOLD}Backup usage:${NC}"
+echo "  Backup:       nibble backup"
+echo "  Import:       nibble import <backup.zip>"
+echo "  Recover:      ./install.sh --recover <backup.zip>"
 echo ""

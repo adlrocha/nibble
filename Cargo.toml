@@ -29,5 +29,7 @@ toml = "0.8"
 serde_yaml = "0.9"
 tempfile = "3.13"
 libc = "0.2.182"
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
+walkdir = "2.5"
 
 [dev-dependencies]

@@ -73,6 +73,19 @@ pub enum Commands {
         #[command(subcommand)]
         action: SessionAction,
     },
+
+    /// Backup all nibble state to a zip file
+    Backup {
+        /// Output path for the zip file (defaults to nibble-backup-<timestamp>.zip)
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+
+    /// Import nibble state from a backup zip file
+    Import {
+        /// Path to the backup zip file
+        path: String,
+    },
 }
 
 #[derive(Subcommand)]
