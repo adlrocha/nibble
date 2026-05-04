@@ -175,6 +175,8 @@ pub struct MemoryEntry {
     pub task_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub tags: Vec<String>,
     pub confidence: f32,
     pub created_at: DateTime<Utc>,
@@ -242,6 +244,8 @@ pub struct IndexMemoryEntry {
     pub memory_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub tags: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub confidence: f32,

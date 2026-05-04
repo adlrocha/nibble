@@ -3,7 +3,9 @@
 //! Stores memories and lessons as Markdown files with YAML frontmatter
 //! in ~/.nibble/memory/, git-tracked for versioning and sync.
 
+pub mod archive;
 pub mod cli;
+pub mod format;
 pub mod git;
 pub mod index;
 pub mod llm;
@@ -27,14 +29,12 @@ pub fn init_memory_dir() -> Result<PathBuf> {
     fs::create_dir_all(base.join("lessons"))?;
     fs::create_dir_all(base.join("sessions"))?;
     fs::create_dir_all(base.join("capture"))?;
+    fs::create_dir_all(base.join("archive"))?;
 
     // Write .gitignore if it doesn't exist
     let gitignore = base.join(".gitignore");
     if !gitignore.exists() {
-        fs::write(
-            &gitignore,
-            "capture/\n.index.json\n.embeddings.json\n*.tmp\n",
-        )?;
+        fs::write(&gitignore, ".index.json\n.embeddings.json\n*.tmp\n")?;
     }
 
     // Initialize git repo if needed

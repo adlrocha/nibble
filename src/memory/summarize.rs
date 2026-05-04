@@ -1,13 +1,16 @@
-//! Session summarization: read capture JSONL, extract memories via LLM.
+//! Session summarization: read capture JSONL, extract structured memories.
 //!
 //! When `nibble memory summarize <task-id>` runs:
 //! 1. Read the capture JSONL for that session
-//! 2. Build an extraction prompt with the last N turns
-//! 3. Call the configured LLM provider
-//! 4. Parse the JSON response
-//! 5. Write memory and lesson Markdown files
-//! 6. Update .index.json and regenerate index.md
-//! 7. Git commit
+//! 2. Extract a title and summary from the transcript heuristically
+//! 3. Write a session_summary memory Markdown file
+//! 4. Update .index.json and regenerate index.md
+//! 5. Git commit
+//!
+//! NOTE: LLM-based extraction is disabled in this version. It was unreliable
+//! with local models (Qwen 3.6 via llama.cpp) and produced malformed JSON or
+//! thinking-tag noise. A future version may re-enable it with JSON-schema
+//! constraints or a dedicated extraction model. See TODOs below.
 
 use crate::config;
 use crate::memory::git;
@@ -28,9 +31,9 @@ const MAX_EVENT_LEN: usize = 800;
 
 /// Summarize a session from its capture JSONL.
 ///
-/// Reads capture events, calls the LLM to extract memories, writes files,
+/// Reads capture events, extracts a summary heuristically, writes files,
 /// updates caches, and optionally commits to git.
-pub fn summarize_session(task_id: &str, _force: bool) -> Result<usize> {
+pub fn summarize_session(task_id: &str, force: bool) -> Result<usize> {
     let capture_file = find_capture_file(task_id)?;
     let events = match capture_file {
         Some(path) => read_capture_jsonl(&path)?,
@@ -39,7 +42,7 @@ pub fn summarize_session(task_id: &str, _force: bool) -> Result<usize> {
             return Ok(0);
         }
     };
-    summarize_from_events(task_id, &events)
+    summarize_from_events(task_id, &events, force)
 }
 
 /// Summarize a pi session from its JSONL file.
@@ -49,7 +52,7 @@ pub fn summarize_session(task_id: &str, _force: bool) -> Result<usize> {
 pub fn summarize_pi_session(
     task_id: &str,
     pi_session_path: &std::path::Path,
-    _force: bool,
+    force: bool,
 ) -> Result<usize> {
     let content = fs::read_to_string(pi_session_path)
         .with_context(|| format!("Failed to read pi session: {}", pi_session_path.display()))?;
@@ -63,11 +66,11 @@ pub fn summarize_pi_session(
         events.len(),
         task_id
     );
-    summarize_from_events(task_id, &events)
+    summarize_from_events(task_id, &events, force)
 }
 
-/// Core summarization: extract memories/lessons from a list of capture events.
-fn summarize_from_events(task_id: &str, events: &[CaptureEvent]) -> Result<usize> {
+/// Core summarization: extract a session_summary from capture events.
+fn summarize_from_events(task_id: &str, events: &[CaptureEvent], force: bool) -> Result<usize> {
     let base = config::memory_dir();
 
     if events.is_empty() {
@@ -75,46 +78,38 @@ fn summarize_from_events(task_id: &str, events: &[CaptureEvent]) -> Result<usize
         return Ok(0);
     }
 
-    // 1. Build the extraction prompt
-    let prompt = build_extraction_prompt(events, task_id);
-
-    // 2. Call LLM
-    let cfg = config::load().unwrap_or_default();
-    let llm = LlmClient::from_config(&cfg.memory.llm);
-
-    let extracted = if llm.is_available() {
-        match call_llm_extraction(&llm, &prompt) {
-            Ok(ex) => {
-                eprintln!(
-                    "[summarize] LLM extracted {} memories, {} lessons",
-                    ex.memories.len(),
-                    ex.lessons.len()
-                );
-                ex
-            }
-            Err(e) => {
-                eprintln!("[summarize] LLM extraction failed: {e:#}. Falling back to heuristic.");
-                heuristic_extraction(events)
-            }
+    // Deduplication: skip if a session_summary already exists for this task
+    if !force {
+        if let Some(existing) = find_existing_session_summary(task_id)? {
+            eprintln!(
+                "[summarize] Session summary already exists for {} (memory {}). Use --force to overwrite.",
+                task_id,
+                &existing.memory_id[..8]
+            );
+            return Ok(0);
         }
-    } else {
-        eprintln!(
-            "[summarize] LLM not available at {}. Using heuristic extraction.",
-            cfg.memory.llm.base_url
-        );
-        heuristic_extraction(events)
-    };
+    }
 
-    if extracted.memories.is_empty() && extracted.lessons.is_empty() {
+    // Heuristic extraction (LLM extraction disabled — see module doc)
+    let extracted = heuristic_extraction(events);
+
+    if extracted.memories.is_empty() {
         eprintln!("[summarize] Nothing worth remembering in this session.");
         return Ok(0);
     }
 
-    // 3. Write memory and lesson files
-    let mut written = 0;
-    let agent = std::env::var("NIBBLE_AGENT_TYPE").unwrap_or_else(|_| "unknown".to_string());
+    // Resolve agent type: prefer env var, fall back to task DB record
+    let mut agent = std::env::var("NIBBLE_AGENT_TYPE").unwrap_or_else(|_| "unknown".to_string());
+    if agent == "unknown" {
+        if let Ok(db) = crate::db::Database::open(&crate::db::default_db_path()) {
+            if let Ok(Some(task)) = db.get_task_by_id(task_id) {
+                agent = task.agent_type.as_str().to_string();
+            }
+        }
+    }
 
-    // Infer project from capture events
+    // Write memory files
+    let mut written = 0;
     let project = infer_project_from_events(events);
 
     for mem in &extracted.memories {
@@ -137,6 +132,7 @@ fn summarize_from_events(task_id: &str, events: &[CaptureEvent]) -> Result<usize
             None,
             Some(confidence),
             None,
+            mem.title.as_deref(),
         )?;
         eprintln!("[summarize] Written memory: {} ({})", id, path.display());
         written += 1;
@@ -165,11 +161,21 @@ fn summarize_from_events(task_id: &str, events: &[CaptureEvent]) -> Result<usize
         written += 1;
     }
 
-    // 4. Update caches
+    // Archive the original agent session file as a standalone backup
+    let _ = crate::memory::archive::archive_session(task_id);
+
+    // Also archive the capture file if it exists
+    if let Ok(Some(capture_path)) = find_capture_file(task_id) {
+        if let Err(e) = crate::memory::archive::archive_from_path(&capture_path, &agent, task_id) {
+            eprintln!("[summarize] Failed to archive capture: {}", e);
+        }
+    }
+
+    // Update caches
     let _ = index::reindex();
     let _ = index::regenerate_index_md();
 
-    // 5. Git commit
+    let cfg = config::load().unwrap_or_default();
     let _ = git::commit(
         &base,
         &format!(
@@ -180,7 +186,6 @@ fn summarize_from_events(task_id: &str, events: &[CaptureEvent]) -> Result<usize
         &cfg.memory.sync.author_email,
     );
 
-    // 6. Auto-sync if configured
     if cfg.memory.sync.auto_sync && !cfg.memory.sync.remote.is_empty() {
         let _ = git::sync(
             &base,
@@ -251,13 +256,15 @@ fn infer_project_from_events(_events: &[CaptureEvent]) -> Option<String> {
 
 // ── LLM extraction ───────────────────────────────────────────────────────────
 
-/// Structured response from the LLM extraction.
+/// Structured response from the heuristic/LLM extraction.
 #[derive(Debug, Deserialize)]
 struct ExtractedMemory {
     memory_type: String,
     content: String,
     tags: String,
     confidence: f32,
+    #[serde(default)]
+    title: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -277,6 +284,11 @@ struct ExtractionResult {
     lessons: Vec<ExtractedLesson>,
 }
 
+// TODO: Re-enable LLM extraction once we have a reliable local model
+// or JSON-schema/grammar support. Qwen 3.6 via llama.cpp returns
+// thinking tags and malformed JSON that breaks parsing.
+// See module doc for details.
+#[allow(dead_code)]
 fn call_llm_extraction(llm: &LlmClient, prompt: &str) -> Result<ExtractionResult> {
     let messages = vec![
         Message {
@@ -304,6 +316,7 @@ fn call_llm_extraction(llm: &LlmClient, prompt: &str) -> Result<ExtractionResult
     Ok(result)
 }
 
+#[allow(dead_code)]
 const EXTRACTION_SYSTEM_PROMPT: &str = r#"You are a memory extraction system. Given a coding session transcript, extract structured memories that would be useful for future sessions.
 
 For each memory, provide:
@@ -336,6 +349,7 @@ Respond in JSON. No markdown code fences. Just raw JSON:
 {"memories": [...], "lessons": [...]}
 If nothing worth remembering, return {"memories": [], "lessons": []}."#;
 
+#[allow(dead_code)]
 fn build_extraction_prompt(events: &[CaptureEvent], _task_id: &str) -> String {
     let mut prompt =
         String::from("Here is a coding session transcript. Extract memories and lessons.\n\n");
@@ -366,6 +380,7 @@ fn build_extraction_prompt(events: &[CaptureEvent], _task_id: &str) -> String {
     prompt
 }
 
+#[allow(dead_code)]
 fn extract_json_from_markdown(text: &str) -> String {
     // If the response is wrapped in ```json ... ```, extract the inner JSON
     if let Some(start) = text.find("```json") {
@@ -494,6 +509,13 @@ pub fn pi_session_to_capture_events(content: &str) -> Vec<CaptureEvent> {
 
 // ── Heuristic fallback extraction ────────────────────────────────────────────
 
+fn find_existing_session_summary(session_id: &str) -> Result<Option<MemoryEntry>> {
+    let all = store::list_memories(None, Some(&MemoryType::SessionSummary), None, None)?;
+    Ok(all
+        .into_iter()
+        .find(|m| m.session_id.as_deref() == Some(session_id)))
+}
+
 fn heuristic_extraction(events: &[CaptureEvent]) -> ExtractionResult {
     let mut memories = Vec::new();
     let lessons = Vec::new();
@@ -511,53 +533,81 @@ fn heuristic_extraction(events: &[CaptureEvent]) -> ExtractionResult {
                     content: event.content.clone(),
                     tags: "user-preference".to_string(),
                     confidence: 0.9,
+                    title: None,
                 });
             }
         }
     }
 
-    // Heuristic 2: Add a session summary
-    let summary = build_session_summary(events);
+    // Heuristic 2: Build a session summary with a real title
+    let (title, summary) = build_session_summary(events);
     if !summary.is_empty() {
         memories.push(ExtractedMemory {
             memory_type: "session_summary".to_string(),
             content: summary,
             tags: "session-summary".to_string(),
-            confidence: 0.7,
+            confidence: 0.75,
+            title: Some(title),
         });
     }
 
     ExtractionResult { memories, lessons }
 }
 
-fn build_session_summary(events: &[CaptureEvent]) -> String {
-    let user_msgs: Vec<&str> = events
-        .iter()
-        .filter(|e| e.role == "user")
-        .map(|e| e.content.as_str())
-        .collect();
+/// Build a session summary with a human-readable title.
+/// Returns (title, full_summary_text).
+fn build_session_summary(events: &[CaptureEvent]) -> (String, String) {
+    let user_msgs: Vec<&CaptureEvent> = events.iter().filter(|e| e.role == "user").collect();
 
-    let assistant_msgs: Vec<&str> = events
-        .iter()
-        .filter(|e| e.role == "assistant")
-        .map(|e| e.content.as_str())
-        .collect();
+    let assistant_msgs: Vec<&CaptureEvent> =
+        events.iter().filter(|e| e.role == "assistant").collect();
+
+    let tool_events: Vec<&CaptureEvent> = events.iter().filter(|e| e.role == "tool").collect();
+
+    // Title: first user message, truncated to ~100 chars
+    let title = user_msgs
+        .first()
+        .map(|e| truncate(&e.content, 100))
+        .or_else(|| assistant_msgs.first().map(|e| truncate(&e.content, 100)))
+        .unwrap_or_else(|| "Untitled session".to_string());
 
     let mut summary = String::new();
     summary.push_str(&format!(
-        "Session with {} user messages and {} assistant messages.\n",
+        "**Turns**: {} user, {} assistant, {} tool calls\n\n",
         user_msgs.len(),
-        assistant_msgs.len()
+        assistant_msgs.len(),
+        tool_events.len()
     ));
 
-    if let Some(first) = user_msgs.first() {
-        summary.push_str(&format!("Started with: {}\n", truncate(first, 200)));
-    }
-    if let Some(last) = assistant_msgs.last() {
-        summary.push_str(&format!("Ended with: {}\n", truncate(last, 200)));
+    // List the topics/tools covered
+    if !tool_events.is_empty() {
+        let mut tool_names: Vec<&str> = tool_events
+            .iter()
+            .map(|e| e.name.as_str())
+            .filter(|n| !n.is_empty())
+            .collect();
+        tool_names.sort_unstable();
+        tool_names.dedup();
+        if !tool_names.is_empty() {
+            summary.push_str(&format!("**Tools used**: {}\n\n", tool_names.join(", ")));
+        }
     }
 
-    summary
+    if let Some(first) = user_msgs.first() {
+        summary.push_str(&format!(
+            "**Started with**: {}\n\n",
+            truncate(&first.content, 300)
+        ));
+    }
+
+    if let Some(last) = assistant_msgs.last() {
+        summary.push_str(&format!(
+            "**Ended with**: {}\n",
+            truncate(&last.content, 300)
+        ));
+    }
+
+    (title, summary)
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

@@ -13,6 +13,7 @@ pub fn handle_write(
     project: Option<&str>,
     tags: Option<&str>,
     update: Option<&str>,
+    title: Option<&str>,
 ) -> Result<()> {
     let mt = MemoryType::from_str_lossy(memory_type);
     let tag_vec: Vec<String> = tags
@@ -38,6 +39,7 @@ pub fn handle_write(
         None, // task_id not available for manual writes
         None, // confidence defaults to 1.0 for manual writes
         update,
+        title,
     )?;
 
     // Update caches
@@ -94,11 +96,14 @@ pub fn handle_search(
     println!("Found {} memory(ies):\n", results.len());
     for entry in &results {
         let date = entry.created_at.format("%Y-%m-%d").to_string();
-        let preview: String = entry.content.chars().take(120).collect();
+        let display = entry.title.clone().unwrap_or_else(|| {
+            let preview: String = entry.content.chars().take(120).collect();
+            preview.trim_end_matches('…').to_string()
+        });
         println!(
             "  [{}] {} ({}{}) confidence={:.2}",
             entry.memory_type,
-            preview.trim_end_matches('…'),
+            display,
             entry
                 .project
                 .as_deref()
@@ -140,28 +145,75 @@ pub fn handle_list(
         return Ok(());
     }
 
-    println!("{} memory(ies):\n", entries.len());
-    for entry in &entries {
-        let date = entry.created_at.format("%Y-%m-%d").to_string();
-        let preview: String = entry.content.chars().take(100).collect();
-        println!(
-            "  {} [{}] {}{} ({})",
-            &entry.memory_id[..8],
-            entry.memory_type,
-            entry
+    // Group by date using shared utility
+    let groups = crate::memory::format::group_by_date(&entries, |e| e.created_at);
+
+    // Compute max title width for alignment
+    let titles: Vec<String> = entries
+        .iter()
+        .map(|m| {
+            m.title
+                .clone()
+                .unwrap_or_else(|| crate::memory::format::truncate_title(&m.content, 80))
+        })
+        .collect();
+    let max_title_width = crate::memory::format::compute_max_title_width(&titles, 20, 60);
+
+    println!("{} memory(ies)", entries.len());
+
+    for group in &groups {
+        println!("\n{} ({})", group.label, group.items.len());
+        println!("{}", "─".repeat(max_title_width + 55));
+        for m in &group.items {
+            let time = m.created_at.format("%H:%M").to_string();
+            let title = m
+                .title
+                .clone()
+                .unwrap_or_else(|| crate::memory::format::truncate_title(&m.content, 60));
+            let mid = &m.memory_id[..m.memory_id.len().min(8)];
+            let type_short = type_abbrev(&m.memory_type);
+            let agent_short = crate::memory::format::agent_short_name(&m.agent);
+            let proj: String = m
                 .project
                 .as_deref()
-                .map(|p| format!("{p}: "))
-                .unwrap_or_default(),
-            preview.trim_end_matches('…'),
-            date,
-        );
+                .map(|p| {
+                    if p.len() > 12 {
+                        format!("{}…", &p[..11])
+                    } else {
+                        p.to_string()
+                    }
+                })
+                .unwrap_or_else(|| "—".to_string());
+
+            println!(
+                "  {:<6} {:<4} {:<8}  {:<width$}  {:<13} {}",
+                time,
+                agent_short,
+                mid,
+                title,
+                proj,
+                type_short,
+                width = max_title_width
+            );
+        }
     }
+    println!();
 
     Ok(())
 }
 
-pub fn handle_show(id: &str) -> Result<()> {
+fn type_abbrev(mt: &MemoryType) -> &'static str {
+    match mt {
+        MemoryType::SessionSummary => "summary",
+        MemoryType::Decision => "decision",
+        MemoryType::Pattern => "pattern",
+        MemoryType::UserInstruction => "instruction",
+        MemoryType::Observation => "observation",
+        MemoryType::BugRecord => "bug",
+    }
+}
+
+pub fn handle_show(id: &str) -> Result<Option<MemoryEntry>> {
     let dir = config::memory_dir().join("memories");
     if !dir.is_dir() {
         anyhow::bail!("Memory directory not found");
@@ -173,6 +225,114 @@ pub fn handle_show(id: &str) -> Result<()> {
     // Print the full file content
     let content = std::fs::read_to_string(&entry.file_path)?;
     println!("{content}");
+
+    // Print navigation footer
+    println!("\n---\n");
+    if let Some(ref sid) = entry.session_id {
+        println!("**Session**: {} (`nibble session read {}`)", sid, sid);
+        println!("             (`nibble memory by-session {}`)", sid);
+    }
+    if let Some(ref tid) = entry.task_id {
+        println!("**Task**:     {} (`nibble memory archive {}`)", tid, tid);
+    }
+
+    Ok(Some(entry))
+}
+
+pub fn handle_by_session(session_id: &str) -> Result<()> {
+    let all = store::list_memories(None, None, None, None)?;
+    // Support prefix matching like show/forget do
+    let matched: Vec<_> = all
+        .into_iter()
+        .filter(|m| {
+            m.session_id
+                .as_deref()
+                .map(|s| s == session_id || s.starts_with(session_id))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    if matched.is_empty() {
+        println!("No memories linked to session {}.", session_id);
+        return Ok(());
+    }
+
+    println!(
+        "{} memory(ies) for session {}:\n",
+        matched.len(),
+        &session_id[..session_id.len().min(8)]
+    );
+    for entry in &matched {
+        let date = entry.created_at.format("%Y-%m-%d").to_string();
+        let display = entry.title.clone().unwrap_or_else(|| {
+            let preview: String = entry.content.chars().take(80).collect();
+            preview.trim_end_matches('…').to_string()
+        });
+        println!(
+            "  {} [{}] {} ({})",
+            &entry.memory_id[..8],
+            entry.memory_type,
+            display,
+            date,
+        );
+    }
+
+    Ok(())
+}
+
+pub fn handle_context(query: &str, project: Option<&str>, limit: usize) -> Result<()> {
+    // Search memories
+    let memories = search::search_memories(query, project, None, Some(limit))?;
+
+    // Search active lessons
+    let lessons =
+        search::search_lessons_by_context(query, Some(&LessonStatus::Active), Some(limit))?;
+
+    if memories.is_empty() && lessons.is_empty() {
+        println!("No relevant context found for '{}'.", query);
+        return Ok(());
+    }
+
+    println!("# Context Briefing: {}\n", query);
+
+    if !memories.is_empty() {
+        println!("## Recent Memories\n");
+        for (i, m) in memories.iter().enumerate().take(limit) {
+            let title = m.title.as_deref().unwrap_or("(no title)");
+            let date = m.created_at.format("%Y-%m-%d").to_string();
+            println!(
+                "{}. **{}** — *{}* ({}, {})",
+                i + 1,
+                title,
+                &m.content[..120.min(m.content.len())],
+                m.memory_type,
+                date
+            );
+            if !m.tags.is_empty() {
+                println!("   Tags: {}", m.tags.join(", "));
+            }
+            println!();
+        }
+    }
+
+    if !lessons.is_empty() {
+        println!("## Active Lessons\n");
+        for (i, l) in lessons.iter().enumerate().take(limit) {
+            println!(
+                "{}. **[{}]** {}",
+                i + 1,
+                l.severity,
+                &l.content[..120.min(l.content.len())]
+            );
+            if !l.prevention.is_empty() {
+                println!(
+                    "   Prevention: {}",
+                    &l.prevention[..100.min(l.prevention.len())]
+                );
+            }
+            println!();
+        }
+    }
 
     Ok(())
 }
@@ -933,6 +1093,96 @@ fn find_memory_by_id_prefix(id_prefix: &str) -> Result<MemoryEntry> {
     }
 
     anyhow::bail!("Memory not found: {}", id_prefix)
+}
+
+// ── Dedup command ───────────────────────────────────────────────────────────
+
+pub fn handle_dedup(yes: bool) -> Result<()> {
+    let all = store::list_memories(None, None, None, None)?;
+
+    // Group session_summary memories by session_id
+    let mut by_session: std::collections::HashMap<String, Vec<MemoryEntry>> =
+        std::collections::HashMap::new();
+    for m in all {
+        if m.memory_type == MemoryType::SessionSummary {
+            if let Some(ref sid) = m.session_id {
+                by_session.entry(sid.clone()).or_default().push(m);
+            }
+        }
+    }
+
+    let mut to_delete: Vec<String> = Vec::new();
+    for (sid, mut memories) in by_session {
+        if memories.len() <= 1 {
+            continue;
+        }
+        // Sort by created_at descending (newest first)
+        memories.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        let keep = &memories[0];
+        println!(
+            "Session {} has {} duplicates — keeping {} ({})",
+            &sid[..sid.len().min(8)],
+            memories.len(),
+            &keep.memory_id[..8],
+            keep.created_at.format("%Y-%m-%d %H:%M")
+        );
+        for dup in &memories[1..] {
+            println!(
+                "  will delete {} ({})",
+                &dup.memory_id[..8],
+                dup.created_at.format("%Y-%m-%d %H:%M")
+            );
+            to_delete.push(dup.memory_id.clone());
+        }
+    }
+
+    if to_delete.is_empty() {
+        println!("No duplicate session_summary memories found.");
+        return Ok(());
+    }
+
+    if !yes {
+        println!(
+            "\n{} duplicate(s) would be deleted. Run with --yes to actually delete.",
+            to_delete.len()
+        );
+        return Ok(());
+    }
+
+    let mut deleted = 0;
+    for id in &to_delete {
+        if let Ok(path) = store::forget_memory(id) {
+            println!("Deleted: {} ({})", id, path.display());
+            deleted += 1;
+        } else {
+            eprintln!("Failed to delete: {}", id);
+        }
+    }
+
+    // Rebuild index
+    let _ = index::reindex();
+    let _ = index::regenerate_index_md();
+
+    println!("\nDeleted {} duplicate(s).", deleted);
+    Ok(())
+}
+
+// ── Archive command ──────────────────────────────────────────────────────────
+
+pub fn handle_archive(task_id: &str) -> Result<()> {
+    match crate::memory::archive::archive_session(task_id)? {
+        Some(path) => {
+            println!("Archived session {} to {}", task_id, path.display());
+        }
+        None => {
+            println!(
+                "Could not archive session {} — no session file found on disk.",
+                task_id
+            );
+            println!("The capture file (if any) is still in ~/.nibble/memory/capture/");
+        }
+    }
+    Ok(())
 }
 
 // ── Summarize command ────────────────────────────────────────────────────────

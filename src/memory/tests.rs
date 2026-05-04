@@ -1156,6 +1156,7 @@ fn index_cache_serialization_round_trip() {
                     path: "memories/2026-01-01_test_observation.md".to_string(),
                     memory_type: "observation".to_string(),
                     project: Some("nibble".to_string()),
+                    title: None,
                     tags: vec!["rust".to_string()],
                     created_at: Utc::now(),
                     confidence: 0.9,

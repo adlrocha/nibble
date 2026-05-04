@@ -28,15 +28,17 @@ die()  { echo -e "  ${RED}✗${NC} $1" >&2; exit 1; }
 RUN_TELEGRAM=false
 RUN_LISTEN=false
 RUN_LLAMA=false
+RUN_BASELIGHT=false
 REBUILD_IMAGE=false
 RECOVER_ZIP=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --telegram) RUN_TELEGRAM=true; shift ;;
-        --listen)   RUN_LISTEN=true; shift ;;
-        --llama)    RUN_LLAMA=true; shift ;;
-        --rebuild)  REBUILD_IMAGE=true; shift ;;
+        --telegram)   RUN_TELEGRAM=true; shift ;;
+        --listen)     RUN_LISTEN=true; shift ;;
+        --llama)      RUN_LLAMA=true; shift ;;
+        --baselight)  RUN_BASELIGHT=true; shift ;;
+        --rebuild)    REBUILD_IMAGE=true; shift ;;
         --recover)
             if [ -z "${2:-}" ] || [ "${2#-}" != "$2" ]; then
                 die "--recover requires a path to a backup zip file"
@@ -50,11 +52,12 @@ done
 
 echo -e "${BOLD}=== Nibble — Install / Upgrade ===${NC}"
 echo ""
-echo "  Flags: --telegram  set up Telegram notifications"
-echo "         --listen    set up Telegram reply listener daemon"
-echo "         --llama     set up llama-server systemd service"
-echo "         --rebuild   force rebuild the sandbox container image"
-echo "         --recover   restore from a backup zip after install"
+echo "  Flags: --telegram   set up Telegram notifications"
+echo "         --listen     set up Telegram reply listener daemon"
+echo "         --llama      set up llama-server systemd service"
+echo "         --baselight  install Baselight MCP server in Claude Code"
+echo "         --rebuild    force rebuild the sandbox container image"
+echo "         --recover    restore from a backup zip after install"
 echo ""
 [ "$REBUILD_IMAGE" = true ] && echo -e "  ${YELLOW}--rebuild${NC}: sandbox image will be rebuilt from scratch"
 if [ -n "$RECOVER_ZIP" ]; then
@@ -513,7 +516,58 @@ else
     fi
 fi
 
-# ── 11. Recover from backup (optional) ────────────────────────────────────────
+# ── 11. Baselight MCP server (optional) ───────────────────────────────────────
+if [ "$RUN_BASELIGHT" = true ]; then
+    step "Installing Baselight MCP server into Claude Code settings"
+
+    if ! command -v jq >/dev/null 2>&1; then
+        die "jq is required for --baselight but was not found"
+    fi
+
+    # Resolve API key: env var > prompt
+    if [ -z "${BASELIGHT_API_KEY:-}" ]; then
+        echo ""
+        echo "  Enter your Baselight API key (from app.baselight.ai → Settings → API Keys):"
+        read -r -p "  API key: " BASELIGHT_API_KEY
+        BASELIGHT_API_KEY="${BASELIGHT_API_KEY// /}"
+    fi
+
+    if [ -z "$BASELIGHT_API_KEY" ]; then
+        die "No Baselight API key provided. Set BASELIGHT_API_KEY or pass it interactively."
+    fi
+
+    MCP_JSON=$(jq -n --arg key "$BASELIGHT_API_KEY" '{
+        mcpServers: {
+            baselight: {
+                type: "http",
+                url: "https://api.baselight.app/mcp",
+                headers: { "x-api-key": $key }
+            }
+        }
+    }')
+
+    if [ -f "$CLAUDE_SETTINGS" ] && [ "$(cat "$CLAUDE_SETTINGS")" != "{}" ] && [ -s "$CLAUDE_SETTINGS" ]; then
+        jq -s '.[0] * .[1]' "$CLAUDE_SETTINGS" <(echo "$MCP_JSON") > "$CLAUDE_SETTINGS.tmp" \
+            && mv "$CLAUDE_SETTINGS.tmp" "$CLAUDE_SETTINGS"
+    else
+        echo "$MCP_JSON" > "$CLAUDE_SETTINGS"
+    fi
+
+    ok "Baselight MCP server configured in $CLAUDE_SETTINGS"
+    ok "Restart Claude Code for the MCP server to appear"
+else
+    # Show hint if not already configured
+    if [ -f "$CLAUDE_SETTINGS" ] && jq -e '.mcpServers.baselight' "$CLAUDE_SETTINGS" >/dev/null 2>&1; then
+        ok "Baselight MCP already configured in settings.json"
+    else
+        echo ""
+        warn "Baselight MCP not configured. Install with:"
+        warn "  ./install.sh --baselight"
+        warn "  (or set BASELIGHT_API_KEY=... ./install.sh --baselight)"
+    fi
+fi
+
+# ── 12. Recover from backup (optional) ────────────────────────────────────────
 if [ -n "$RECOVER_ZIP" ]; then
     step "Recovering from backup"
     if [ ! -f "$RECOVER_ZIP" ]; then
@@ -524,7 +578,7 @@ if [ -n "$RECOVER_ZIP" ]; then
     ok "Restored from $RECOVER_ZIP"
 fi
 
-# ── 12. Done ───────────────────────────────────────────────────────────────────
+# ── 13. Done ───────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}${GREEN}Done!${NC} Restart Claude Code for hooks to take effect."
 echo ""

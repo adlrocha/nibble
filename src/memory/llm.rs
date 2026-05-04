@@ -19,6 +19,9 @@ pub struct LlmClient {
 }
 
 impl LlmClient {
+    /// Build client from config. Currently unused (LLM extraction disabled),
+    /// kept for future re-enablement.
+    #[allow(dead_code)]
     pub fn from_config(cfg: &crate::config::MemoryLlmConfig) -> Self {
         Self {
             base_url: cfg.base_url.clone(),
@@ -30,6 +33,8 @@ impl LlmClient {
     }
 
     /// Check if the LLM endpoint is reachable.
+    /// Currently unused (LLM extraction disabled), kept for future re-enablement.
+    #[allow(dead_code)]
     pub fn is_available(&self) -> bool {
         let url = format!("{}/models", self.base_url.trim_end_matches('/'));
         let req = ureq::get(&url).timeout(std::time::Duration::from_secs(3));

@@ -29,6 +29,8 @@ struct MemoryFrontmatter {
     task_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     project: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
     tags: Vec<String>,
     confidence: f32,
     created_at: String,
@@ -57,7 +59,9 @@ struct LessonFrontmatter {
     resolution_note: Option<String>,
 }
 
-const MAX_CONTENT_LEN: usize = 4096;
+/// Maximum content length for memory bodies.
+/// Session summaries can be long; 8192 captures most sessions without truncation.
+const MAX_CONTENT_LEN: usize = 8192;
 
 // ── Memory operations ────────────────────────────────────────────────────────
 
@@ -72,13 +76,14 @@ pub fn write_memory(
     task_id: Option<&str>,
     confidence: Option<f32>,
     update_id: Option<&str>,
+    title: Option<&str>,
 ) -> Result<(PathBuf, String)> {
     let now = Utc::now();
     let content = truncate_content(content);
 
     // If updating, find and overwrite the existing file
     if let Some(id) = update_id {
-        return update_existing_memory(id, &content, &now);
+        return update_existing_memory(id, &content, title, &now);
     }
 
     let memory_id = Uuid::new_v4().to_string();
@@ -96,6 +101,7 @@ pub fn write_memory(
         session_id: session_id.map(|s| s.to_string()),
         task_id: task_id.map(|s| s.to_string()),
         project: project.map(|s| s.to_string()),
+        title: title.map(|s| s.to_string()),
         tags: tags.to_vec(),
         confidence: confidence.unwrap_or(1.0).clamp(0.0, 1.0),
         created_at: now.to_rfc3339(),
@@ -113,6 +119,7 @@ pub fn write_memory(
 fn update_existing_memory(
     memory_id: &str,
     content: &str,
+    title: Option<&str>,
     now: &chrono::DateTime<Utc>,
 ) -> Result<(PathBuf, String)> {
     let path = find_memory_file(memory_id)?
@@ -122,6 +129,9 @@ fn update_existing_memory(
     let (fm, _old_content) = read_memory_file(&path)?;
     let mut updated_fm = fm;
     updated_fm.updated_at = now.to_rfc3339();
+    if let Some(t) = title {
+        updated_fm.title = Some(t.to_string());
+    }
 
     write_frontmatter_file(&path, &updated_fm, content)?;
     Ok((path, memory_id.to_string()))
@@ -191,6 +201,7 @@ pub fn parse_memory_entry(path: &Path) -> Result<MemoryEntry> {
         session_id: fm.session_id,
         task_id: fm.task_id,
         project: fm.project,
+        title: fm.title,
         tags: fm.tags,
         confidence: fm.confidence,
         created_at: chrono::DateTime::parse_from_rfc3339(&fm.created_at)?.with_timezone(&Utc),

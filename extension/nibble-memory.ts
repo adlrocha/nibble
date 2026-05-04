@@ -50,6 +50,7 @@ const summarize = (taskId: string): void => {
 		execSync(`nibble memory summarize '${taskId.replace(/'/g, "'\\''")}'`, {
 			timeout: 120000,
 			stdio: "pipe",
+			env: { ...process.env, NIBBLE_AGENT_TYPE: "pi" },
 		});
 	} catch {
 		// Non-fatal: summarization may fail if LLM is down
@@ -135,7 +136,7 @@ export default function (pi: ExtensionAPI) {
 		if (!taskId) return;
 
 		// Summarize in background so Pi exits cleanly
-		summarize(taskId);
+		setTimeout(() => summarize(taskId), 500);
 	});
 
 	// Log that the extension loaded

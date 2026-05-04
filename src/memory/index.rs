@@ -33,6 +33,7 @@ pub fn reindex() -> Result<()> {
                 path: rel_path,
                 memory_type: m.memory_type.as_str().to_string(),
                 project: m.project.clone(),
+                title: m.title.clone(),
                 tags: m.tags.clone(),
                 created_at: m.created_at,
                 confidence: m.confidence,

@@ -176,8 +176,30 @@ fn main() -> Result<()> {
                         Some(limit),
                     )?;
                 }
-                cli::MemoryAction::Show { id } => {
-                    memory::cli::handle_show(&id)?;
+                cli::MemoryAction::Show { id, with_session } => {
+                    let entry = memory::cli::handle_show(&id)?;
+                    if with_session {
+                        if let Some(mem) = entry {
+                            if let Some(ref sid) = mem.session_id {
+                                println!("\n═══════════════════════════════════════════════════════════════════════════════\n");
+                                println!("# Session Transcript: {}\n", sid);
+                                match session::read_session(sid) {
+                                    Ok(transcript) => println!("{}", transcript),
+                                    Err(e) => {
+                                        eprintln!("Could not read live session transcript: {}", e);
+                                        eprintln!(
+                                            "The agent may have garbage-collected its local copy."
+                                        );
+                                        eprintln!("");
+                                        eprintln!("Archived copy (if summarized): ~/.nibble/memory/archive/<agent>/{}.jsonl", sid);
+                                        eprintln!("Capture file (if captured):     ~/.nibble/memory/capture/*/{sid}.jsonl");
+                                    }
+                                }
+                            } else {
+                                println!("\n(No session ID linked to this memory.)");
+                            }
+                        }
+                    }
                 }
                 cli::MemoryAction::Write {
                     content,
@@ -185,6 +207,7 @@ fn main() -> Result<()> {
                     project,
                     tags,
                     update,
+                    title,
                 } => {
                     memory::cli::handle_write(
                         &content,
@@ -192,7 +215,18 @@ fn main() -> Result<()> {
                         project.as_deref(),
                         tags.as_deref(),
                         update.as_deref(),
+                        title.as_deref(),
                     )?;
+                }
+                cli::MemoryAction::BySession { session_id } => {
+                    memory::cli::handle_by_session(&session_id)?;
+                }
+                cli::MemoryAction::Context {
+                    query,
+                    project,
+                    limit,
+                } => {
+                    memory::cli::handle_context(&query, project.as_deref(), limit)?;
                 }
                 cli::MemoryAction::Forget { id } => {
                     memory::cli::handle_forget(&id)?;
@@ -265,6 +299,12 @@ fn main() -> Result<()> {
                 }
                 cli::MemoryAction::Sync => {
                     memory::cli::handle_sync()?;
+                }
+                cli::MemoryAction::Dedup { yes } => {
+                    memory::cli::handle_dedup(yes)?;
+                }
+                cli::MemoryAction::Archive { task_id } => {
+                    memory::cli::handle_archive(&task_id)?;
                 }
                 cli::MemoryAction::Summarize {
                     task_id,
@@ -341,24 +381,41 @@ fn main() -> Result<()> {
                     return Ok(());
                 }
 
+                // Build memory count lookup per session_id
+                let memories =
+                    memory::store::list_memories(None, None, None, None).unwrap_or_default();
+                let mut memory_counts: HashMap<String, usize> = HashMap::new();
+                for m in &memories {
+                    if let Some(ref sid) = m.session_id {
+                        *memory_counts.entry(sid.clone()).or_insert(0) += 1;
+                    }
+                }
+
                 // Build lookup maps from session identifiers → project_path
                 let tasks = db.list_tasks().unwrap_or_default();
                 let mut claude_task_repo: HashMap<String, String> = HashMap::new();
                 let mut opencode_task_repo: HashMap<String, String> = HashMap::new();
                 let mut pi_task_repo: HashMap<String, String> = HashMap::new();
+                // Reverse maps: agent session_id → task_id (for memory badge linkage)
+                let mut claude_session_to_task: HashMap<String, String> = HashMap::new();
+                let mut opencode_session_to_task: HashMap<String, String> = HashMap::new();
+                let mut pi_path_to_task: HashMap<String, String> = HashMap::new();
                 for task in &tasks {
                     if let Some(ref ctx) = task.context {
                         if let Some(ref path) = ctx.project_path {
                             if let Some(ref sid) = ctx.claude_session_id {
                                 claude_task_repo.insert(sid.clone(), path.clone());
+                                claude_session_to_task.insert(sid.clone(), task.task_id.clone());
                             }
                             if let Some(ref sid) = ctx.opencode_session_id {
                                 opencode_task_repo.insert(sid.clone(), path.clone());
+                                opencode_session_to_task.insert(sid.clone(), task.task_id.clone());
                             }
                             if let Some(serde_json::Value::String(ref p)) =
                                 ctx.extra.get("pi_session_path")
                             {
                                 pi_task_repo.insert(p.clone(), path.clone());
+                                pi_path_to_task.insert(p.clone(), task.task_id.clone());
                             }
                         }
                     }
@@ -395,20 +452,32 @@ fn main() -> Result<()> {
                             resolved_ws.as_deref().or(s.workspace.as_deref()),
                         );
 
-                        let agent_short = match s.agent.as_str() {
-                            "claude" => "c",
-                            "pi" => "π",
-                            "opencode" => "o",
-                            "hermes" => "h",
-                            _ => &s.agent[..1],
+                        let agent_short = memory::format::agent_short_name(&s.agent);
+                        // Resolve task_id for memory badge lookup
+                        let task_id_for_mem = match s.agent.as_str() {
+                            "claude" => claude_session_to_task.get(&s.session_id).cloned(),
+                            "opencode" => opencode_session_to_task.get(&s.session_id).cloned(),
+                            "pi" => pi_path_to_task
+                                .get(&s.path.to_string_lossy().to_string())
+                                .cloned(),
+                            _ => None,
+                        };
+                        let mem_count = task_id_for_mem
+                            .and_then(|tid| memory_counts.get(&tid).copied())
+                            .unwrap_or(0);
+                        let mem_badge = if mem_count > 0 {
+                            format!("M:{}", mem_count)
+                        } else {
+                            "   ".to_string()
                         };
                         println!(
-                            "  {:<6} {:<10} {:<8}  {:<width$}  {:<12} {}",
+                            "  {:<6} {:<10} {:<8}  {:<width$}  {:<12} {:>5} {}",
                             time,
                             agent_short,
                             sid,
                             title,
                             ws,
+                            mem_badge,
                             session::format_size(s.size_bytes),
                             width = max_title_width.min(60)
                         );

@@ -338,6 +338,9 @@ pub enum MemoryAction {
     Show {
         /// Memory ID (or prefix)
         id: String,
+        /// Also display the full session transcript
+        #[arg(long)]
+        with_session: bool,
     },
 
     /// Write a new memory or update an existing one
@@ -356,6 +359,27 @@ pub enum MemoryAction {
         /// Update an existing memory by ID
         #[arg(long)]
         update: Option<String>,
+        /// Short title for quick identification (recommended for session_summary)
+        #[arg(short, long)]
+        title: Option<String>,
+    },
+
+    /// Show memories linked to a specific session
+    BySession {
+        /// Session ID (or prefix)
+        session_id: String,
+    },
+
+    /// Load relevant memories and lessons as a context briefing
+    Context {
+        /// Query describing what you're working on
+        query: String,
+        /// Filter by project name
+        #[arg(long)]
+        project: Option<String>,
+        /// Maximum results to return
+        #[arg(short, long, default_value = "5")]
+        limit: usize,
     },
 
     /// Delete a memory
@@ -444,6 +468,13 @@ pub enum MemoryAction {
         project: Option<String>,
     },
 
+    /// Remove duplicate session_summary memories (keep the newest)
+    Dedup {
+        /// Actually delete duplicates (default: dry-run)
+        #[arg(long)]
+        yes: bool,
+    },
+
     /// Rebuild the index cache and regenerate index.md
     Reindex,
 
@@ -456,6 +487,12 @@ pub enum MemoryAction {
 
     /// Sync memory store (git add + commit + pull + push)
     Sync,
+
+    /// Copy the original agent session file into the memory repo as a standalone archive
+    Archive {
+        /// Task ID of the session to archive
+        task_id: String,
+    },
 
     /// Extract memories and lessons from a captured session
     Summarize {
