@@ -41,6 +41,14 @@
       "license": "proprietary",
       "computedHash": "d7b338670dd3488c4875a7402456e3a8ff897a02e4d4ba0cb685ba055d7bebfa"
     },
+    "nibble-no-ai-slop": {
+      "source": "vendored:local",
+      "sourceType": "local",
+      "skillPath": "skills/nibble-no-ai-slop/SKILL.md",
+      "version": "unpinned",
+      "license": "unknown",
+      "computedHash": "d527a108959186843a096326d78a5b4454f9052ad92a61a8eaeb9da6df9923bc"
+    },
     "nibble-pr-review": {
       "source": "vendored:local",
       "sourceType": "local",

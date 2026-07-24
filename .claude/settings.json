@@ -1,8 +1,1 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(curl http://localhost:9222*)",
-      "Bash(curl -s http://localhost:9222*)"
-    ]
-  }
-}
+{}
