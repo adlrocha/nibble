@@ -239,7 +239,8 @@ pub enum SandboxAction {
         /// Start a fresh session instead of resuming the last conversation
         #[arg(long)]
         fresh: bool,
-        /// Start an independent throwaway session that doesn't affect the main session history.
+        /// Start an independent side session that doesn't overwrite which session the main
+        /// attach would continue. The session is kept on disk like any other.
         /// Useful for ad-hoc research or non-conflicting changes alongside a main session.
         #[arg(long)]
         btw: bool,
@@ -299,19 +300,6 @@ pub enum SandboxAction {
         image: String,
         #[arg(long)]
         rebuild: bool,
-    },
-
-    /// Delete old Claude conversation files for a sandbox to free memory
-    ///
-    /// Removes .jsonl conversation files from ~/.claude/projects/ that belong
-    /// to this sandbox's repo. Keeps the most recent session intact.
-    /// Use before `attach --fresh` to start completely clean.
-    Gc {
-        /// Repo path (e.g. "." or "/path/to/repo") OR container name
-        container_or_path: String,
-        /// Also delete the most recent session (full wipe, no resume possible)
-        #[arg(long)]
-        all: bool,
     },
 }
 

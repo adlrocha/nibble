@@ -19,8 +19,8 @@ This section lists every feature area in the project. Use it to audit what's wor
 | 5 | **Claude Code hooks** | core | Stop hook → `nibble report session-id` + `nibble notify`; wrappers register tasks at startup |
 | 6 | **Setup scripts** | dx | `.nibble/setup.sh` in any repo — auto-runs at spawn to install toolchain before first attach |
 | 7 | **Git worktrees** | dx | `--branch` flag on spawn/attach/kill — creates/cleans up a worktree automatically per branch |
-| 8 | **`--btw` sessions** | dx | `attach --btw` — throwaway session that doesn't affect main session history (ad-hoc research, parallel work) |
-| 9 | **Session GC** | dx | `nibble sandbox gc` — deletes old `.jsonl` history files from `~/.claude/projects/` to free disk |
+| 8 | **`--btw` sessions** | dx | `attach --btw` — side session that doesn't overwrite which session the main attach would continue (ad-hoc research, parallel work); kept on disk like any other |
+| 9 | **Session retention** | core | Sessions are never deleted — `--fresh` only renames the current file to `.jsonl.bak`; Claude's own 30-day purge is disabled via `cleanupPeriodDays` |
 | 10 | **Hermes Agent** | experimental | Singleton sandbox where you mount/unmount repos dynamically; `hermes gateway` as PID 1 |
 | 11 | **Alternative LLM backends** | experimental | `--kimi`, `--glm` flags on attach — use non-Claude agents inside the same sandbox |
 | 12 | **Telegram notifications** | notifications | Sends last-message/attention alert to phone when agent finishes or needs input |
@@ -40,7 +40,7 @@ This section lists every feature area in the project. Use it to audit what's wor
 - **Podman Sandboxes**: Run agents in rootless containers — repo mounted read-write, ports exposed, full dev flexibility inside
 - **Setup Scripts**: Drop a `.nibble/setup.sh` in any repo to auto-install its toolchain and dependencies at spawn time
 - **Persistent Session Continuity**: Every repo gets a stable session UUID — re-attaching and Telegram replies always resume the same conversation
-- **Session GC**: Clean up old Claude conversation history with `nibble sandbox gc`
+- **Sessions are never deleted**: every conversation (main, `--fresh`, `--btw`) stays on disk forever; Claude's built-in 30-day transcript purge is disabled
 - **Telegram Notifications**: Receive the agent's last message on your phone when it finishes or needs a decision
 - **Telegram Replies**: Reply to notifications from your phone to unblock agents (input injected via `podman exec`)
 - **Auto-Resume**: Sandbox agents are tracked across host reboots
@@ -657,22 +657,7 @@ Session history is stored in `~/.claude/projects/<hash>/<uuid>.jsonl` on the hos
 nibble sandbox attach . --fresh
 ```
 
-`--fresh` renames the current `.jsonl` to `.jsonl.bak` (preserving it for recovery) and starts Claude with a blank slate. The session UUID stays the same so Telegram injection keeps working without any DB changes.
-
-#### Cleaning up old session history
-
-Claude conversation files accumulate over time and can grow large. Use `gc` to clean them up:
-
-```bash
-# Delete old sessions and backups, keep the most recent session
-nibble sandbox gc .
-nibble sandbox gc <task-id>
-
-# Wipe all sessions including the current one
-nibble sandbox gc . --all
-```
-
-The GC command finds the right `~/.claude/projects/` subdirectory for the repo (by matching the known session UUID, or by scanning file contents as a fallback), then deletes all `.jsonl.bak` backup files and all `.jsonl` session files except the most recent active one. It reports how many files were removed and how much disk was freed.
+`--fresh` renames the current `.jsonl` to `.jsonl.bak` and starts Claude with a blank slate. The backup is never deleted — nibble keeps every session file forever, and Claude Code's own transcript cleanup is pinned to ~100 years (`cleanupPeriodDays` in `~/.claude/settings.json`, set by `scripts/setup-claude-hooks.sh`). The session UUID stays the same so Telegram injection keeps working without any DB changes.
 
 ### Telegram injection
 
@@ -733,8 +718,6 @@ Network is host-mode, so services started inside the container (e.g. `npm run de
 | `nibble sandbox kill <id>` | Stop sandbox |
 | `nibble sandbox kill --all` | Stop all sandboxes |
 | `nibble sandbox resume --all` | Resume agents after reboot |
-| `nibble sandbox gc <id>` | Delete old session history, keep latest |
-| `nibble sandbox gc <id> --all` | Wipe all session history |
 | `nibble hermes init` | Start Hermes Agent sandbox (singleton) |
 | `nibble hermes attach` | Attach to Hermes CLI (auto-spawns if needed) |
 | `nibble hermes mount <path>` | Mount a repo into the Hermes sandbox |

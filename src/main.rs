@@ -875,13 +875,6 @@ fn main() -> Result<()> {
                 sandbox.ensure_image_with_opts(&image, rebuild)?;
                 println!("Sandbox image ready.");
             }
-            SandboxAction::Gc {
-                container_or_path,
-                all,
-            } => {
-                let task_id = resolve_sandbox_id(&db, &container_or_path)?;
-                cmd_sandbox_gc(&db, task_id, all)?;
-            }
         },
         Commands::Hermes { action } => match action {
             HermesAction::Init => {
@@ -1172,7 +1165,8 @@ fn repo_session_id(repo_path: &str) -> Uuid {
 ///
 /// Claude Code stores each session as `~/.claude/projects/<hash>/<uuid>.jsonl`.
 /// Rather than deleting it, we rename it to `<uuid>.<timestamp>.jsonl.bak` so it
-/// is invisible to Claude (wrong extension) but recoverable until `gc` cleans it up.
+/// is invisible to Claude (wrong extension) but kept forever — nibble never deletes
+/// session data, so it stays recoverable on disk.
 fn backup_session_file(session_id: &str) {
     let home = match dirs::home_dir() {
         Some(h) => h,
@@ -1253,52 +1247,6 @@ fn ensure_pi_skills_symlink(home_dir: &std::path::Path) {
             claude_skills.display(),
             e
         );
-    }
-}
-
-/// Delete the most recent pi session file for a given container working directory.
-///
-/// With repo-specific mount points, Pi stores sessions in dedicated directories
-/// (e.g. `--nibble--`). We delete the newest `.jsonl` in that directory.
-fn delete_latest_pi_session(container_dir: &str) {
-    let home = match dirs::home_dir() {
-        Some(h) => h,
-        None => return,
-    };
-    let slug = pi_session_dir_name(container_dir);
-    let sessions_dir = home.join(".pi").join("agent").join("sessions").join(&slug);
-    if !sessions_dir.exists() {
-        return;
-    }
-
-    let mut newest: Option<(std::path::PathBuf, std::time::SystemTime)> = None;
-    if let Ok(files) = std::fs::read_dir(&sessions_dir) {
-        for file in files.flatten() {
-            let path = file.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                continue;
-            }
-            if let Ok(meta) = file.metadata() {
-                if let Ok(mtime) = meta.modified() {
-                    if newest.as_ref().is_none_or(|(_, t)| mtime > *t) {
-                        newest = Some((path, mtime));
-                    }
-                }
-            }
-        }
-    }
-    if let Some((path, _)) = newest {
-        match std::fs::remove_file(&path) {
-            Ok(()) => eprintln!(
-                "  Session:   deleted latest pi session ({})",
-                path.display()
-            ),
-            Err(e) => eprintln!(
-                "  Warning:   could not delete pi session {}: {}",
-                path.display(),
-                e
-            ),
-        }
     }
 }
 
@@ -3037,7 +2985,7 @@ fn resolve_attach_agent(
 
     if btw && agent != SelectedAgent::Claude && agent != SelectedAgent::Pi {
         anyhow::bail!(
-            "--btw is not supported with {} (throwaway sessions require Claude Code or pi)",
+            "--btw is not supported with {} (side sessions require Claude Code or pi)",
             agent
         );
     }
@@ -3100,8 +3048,9 @@ fn cmd_sandbox_bash(db: &Database, task_id: String) -> Result<()> {
 ///
 /// Resumes the session UUID stored on the task (derived deterministically from the repo
 /// path at spawn, then updated by the Stop hook after each session). The UUID is stable
-/// for the lifetime of the sandbox — `--fresh` wipes the conversation history for that
-/// UUID rather than minting a new one, so Telegram injection always uses the same ID.
+/// for the lifetime of the sandbox — `--fresh` backs up the conversation history for that
+/// UUID (rename to .jsonl.bak, never deleted) rather than minting a new one, so Telegram
+/// injection always uses the same ID.
 fn cmd_sandbox_attach(
     db: &Database,
     task_id: String,
@@ -3217,10 +3166,9 @@ fn cmd_sandbox_attach(
         SelectedAgent::Pi => {
             let pi_install =
                 "command -v pi >/dev/null 2>&1 || sudo npm install -g @earendil-works/pi-coding-agent";
-            if fresh {
-                delete_latest_pi_session(&container_dir);
-                format!("{pi_install}; pi")
-            } else if btw {
+            if fresh || btw {
+                // Plain `pi` always starts a brand-new session. Previous sessions are
+                // never deleted — they stay on disk and remain resumable via --session.
                 format!("{pi_install}; pi")
             } else if let Some(ref sesh) = override_session {
                 // --session override: look up the session path from the session ID
@@ -3346,8 +3294,8 @@ fn cmd_sandbox_attach(
             }
 
             if btw {
-                let throwaway_id = uuid::Uuid::new_v4();
-                format!("cd {container_dir} && {claude} --session-id {throwaway_id}")
+                let side_id = uuid::Uuid::new_v4();
+                format!("cd {container_dir} && {claude} --session-id {side_id}")
             } else if let Some(sid) = claude_session_id {
                 format!(
                     "cd {container_dir} && {claude} --resume {sid} 2>&1 || {claude} --session-id {sid}"
@@ -3370,7 +3318,7 @@ fn cmd_sandbox_attach(
         "CLAUDE_CONFIG_DIR=/home/node/.claude".into(),
     ];
 
-    // --btw sessions are throwaway: omit AGENT_TASK_ID so hooks and epilogues
+    // --btw sessions are side sessions: omit AGENT_TASK_ID so hooks and epilogues
     // inside the container no-op and don't overwrite the main task's stored session_id.
     if !btw {
         podman_args.extend(["-e".into(), format!("AGENT_TASK_ID={}", task_id)]);
@@ -3396,7 +3344,7 @@ fn cmd_sandbox_attach(
         SelectedAgent::Pi => {
             if btw {
                 eprintln!(
-                    "Attaching to sandbox {} ({}) [pi, btw — throwaway session]…",
+                    "Attaching to sandbox {} ({}) [pi, btw — side session]…",
                     task.title, container_id
                 );
                 eprintln!("(Independent session — main history untouched. Exit to close.)");
@@ -3411,7 +3359,7 @@ fn cmd_sandbox_attach(
         SelectedAgent::Claude => {
             if btw {
                 eprintln!(
-                    "Attaching to sandbox {} ({}) [btw — throwaway session]…",
+                    "Attaching to sandbox {} ({}) [btw — side session]…",
                     task.title, container_id
                 );
                 eprintln!("(Independent session — main history untouched. Exit to close.)");
@@ -3448,173 +3396,6 @@ fn cmd_sandbox_kill(db: &Database, task_id: String) -> Result<()> {
     db.update_task(&task)?;
 
     println!("Killed sandbox {} (task {})", container_id, task_id);
-
-    Ok(())
-}
-
-/// Delete old Claude conversation files for a sandbox to free memory.
-///
-/// Claude Code stores conversation history as .jsonl files under
-/// ~/.claude/projects/<hash>/. Each project directory corresponds to a
-/// working directory path (hashed). This command finds the right project
-/// directory for the sandbox's repo and removes old conversation files,
-/// keeping the most recent session unless `--all` is passed.
-fn cmd_sandbox_gc(db: &Database, task_id: String, all: bool) -> Result<()> {
-    let task = db
-        .get_task_by_id(&task_id)?
-        .ok_or_else(|| anyhow::anyhow!("Task not found: {}", task_id))?;
-
-    let repo_path = task
-        .context
-        .as_ref()
-        .and_then(|c| c.project_path.as_deref())
-        .ok_or_else(|| anyhow::anyhow!("Task {} has no repo path in context", task_id))?;
-
-    let current_session_id = task.context.as_ref().and_then(|c| c.session_id.as_deref());
-
-    // Claude Code hashes the working directory path to produce the project folder name.
-    // The hash is a URL-safe base64 of the SHA256 of the canonical path.
-    // We find the right folder by scanning ~/.claude/projects/ for a metadata file
-    // that references this path, or by matching the known session file names.
-    let home = dirs::home_dir().context("Failed to get home directory")?;
-    let projects_dir = home.join(".claude").join("projects");
-
-    if !projects_dir.exists() {
-        println!(
-            "No Claude projects directory found at {}",
-            projects_dir.display()
-        );
-        return Ok(());
-    }
-
-    // Find all .jsonl files across all project subdirectories.
-    // Each file is named <session-uuid>.jsonl. We identify which project
-    // directory belongs to this repo by checking if the current session file exists there.
-    let mut target_dir: Option<std::path::PathBuf> = None;
-
-    if let Some(sid) = current_session_id {
-        // Fast path: look for the known session file
-        for entry in std::fs::read_dir(&projects_dir)? {
-            let entry = entry?;
-            if !entry.file_type()?.is_dir() {
-                continue;
-            }
-            if entry.path().join(format!("{}.jsonl", sid)).exists() {
-                target_dir = Some(entry.path());
-                break;
-            }
-        }
-    }
-
-    if target_dir.is_none() {
-        // Fallback: check all project dirs for any session that matches this repo path
-        // by reading the first line of each .jsonl (contains the cwd in Claude's format).
-        let canonical_repo = std::fs::canonicalize(repo_path)
-            .unwrap_or_else(|_| std::path::PathBuf::from(repo_path));
-        'outer: for entry in std::fs::read_dir(&projects_dir)? {
-            let entry = entry?;
-            if !entry.file_type()?.is_dir() {
-                continue;
-            }
-            for file in std::fs::read_dir(entry.path())? {
-                let file = file?;
-                if file.path().extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                    continue;
-                }
-                if let Ok(content) = std::fs::read_to_string(file.path()) {
-                    if let Some(first_line) = content.lines().next() {
-                        if first_line.contains(canonical_repo.to_string_lossy().as_ref()) {
-                            target_dir = Some(entry.path());
-                            break 'outer;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    let dir = match target_dir {
-        Some(d) => d,
-        None => {
-            println!("No Claude project directory found for repo: {}", repo_path);
-            println!("(Conversation may not have started yet, or was already cleaned up.)");
-            return Ok(());
-        }
-    };
-
-    // Collect all files: .jsonl (active sessions) and .jsonl.bak (backed-up sessions).
-    // Sort by modification time, oldest first.
-    let mut all_files: Vec<(std::path::PathBuf, std::time::SystemTime, bool)> =
-        std::fs::read_dir(&dir)?
-            .filter_map(|e| e.ok())
-            .filter_map(|e| {
-                let path = e.path();
-                let name = path.file_name()?.to_string_lossy().to_string();
-                let is_bak = name.ends_with(".jsonl.bak");
-                let is_jsonl = !is_bak && name.ends_with(".jsonl");
-                if !is_jsonl && !is_bak {
-                    return None;
-                }
-                let mtime = e.metadata().ok()?.modified().ok()?;
-                Some((path, mtime, is_bak))
-            })
-            .collect();
-
-    all_files.sort_by_key(|(_, mtime, _)| *mtime);
-
-    let jsonl_count = all_files.iter().filter(|(_, _, is_bak)| !is_bak).count();
-    let bak_count = all_files.iter().filter(|(_, _, is_bak)| *is_bak).count();
-
-    if all_files.is_empty() {
-        println!("No conversation files found in {}", dir.display());
-        return Ok(());
-    }
-
-    // Backups (.bak) are always deleted — they exist only as a safety net for --fresh.
-    // For active .jsonl files: keep the most recent one unless --all is passed.
-    let to_delete: Vec<_> = if all {
-        all_files
-    } else {
-        // Split: delete all .bak + all .jsonl except the most recent active one.
-        let last_jsonl_idx = all_files.iter().rposition(|(_, _, is_bak)| !is_bak);
-        all_files
-            .into_iter()
-            .enumerate()
-            .filter(|(i, (_, _, is_bak))| *is_bak || Some(*i) != last_jsonl_idx)
-            .map(|(_, f)| f)
-            .collect()
-    };
-
-    if to_delete.is_empty() {
-        println!("Nothing to delete (1 active session, no backups). Use --all to wipe.");
-        return Ok(());
-    }
-
-    let mut deleted = 0u64;
-    let mut freed_bytes: u64 = 0;
-    for (path, _, _) in &to_delete {
-        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-        match std::fs::remove_file(path) {
-            Ok(()) => {
-                deleted += 1;
-                freed_bytes += size;
-            }
-            Err(e) => eprintln!("  Warning: could not delete {}: {}", path.display(), e),
-        }
-    }
-
-    let freed_mb = freed_bytes as f64 / 1_048_576.0;
-    println!(
-        "GC: deleted {} file(s) ({} session(s), {} backup(s)), freed {:.1} MB  [{}]",
-        deleted,
-        jsonl_count.saturating_sub(if all { 0 } else { 1 }),
-        bak_count,
-        freed_mb,
-        dir.display()
-    );
-    if !all {
-        println!("  Most recent session kept. Use --all to wipe everything.");
-    }
 
     Ok(())
 }

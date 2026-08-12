@@ -31,6 +31,11 @@ STOP_CMD='if [ -n "$AGENT_TASK_ID" ]; then export NIBBLE_AGENT_TYPE=claude; INPU
 # Notification — sends attention-required alerts (permission prompts, etc.).
 NOTIFY_CMD='if [ -n "$AGENT_TASK_ID" ]; then export NIBBLE_AGENT_TYPE=claude; INPUT=$(cat); if command -v jq >/dev/null 2>&1; then TOOL=$(printf "%s" "$INPUT" | jq -r ".tool_name // empty"); TOOL_INPUT=$(printf "%s" "$INPUT" | jq -c ".tool_input // empty"); BASE=$(printf "%s" "$INPUT" | jq -r ".message // \"Permission required\""); if [ -n "$TOOL" ]; then MSG="$BASE\nTool: $TOOL"; if [ -n "$TOOL_INPUT" ] && [ "$TOOL_INPUT" != "null" ]; then SHORT=$(printf "%s" "$TOOL_INPUT" | jq -r "to_entries | map(.key + \": \" + (.value | tostring)) | join(\", \")" 2>/dev/null | cut -c1-120); MSG="$MSG\n$SHORT"; fi; else MSG="$BASE"; fi; else MSG="Permission required (install jq for details)"; fi; nibble notify --task-id "$AGENT_TASK_ID" --message "$MSG" --attention 2>/dev/null; fi'
 
+# Session retention — Claude Code purges local transcripts older than
+# `cleanupPeriodDays` (default: 30 days). Nibble never deletes session data,
+# so pin this to ~100 years to keep every session forever.
+CLEANUP_PERIOD_DAYS=36500
+
 # Check if settings.json exists
 if [ -f "$CLAUDE_SETTINGS_FILE" ]; then
     echo "Found existing settings at $CLAUDE_SETTINGS_FILE"
@@ -56,7 +61,9 @@ if [ -f "$CLAUDE_SETTINGS_FILE" ]; then
             --arg posttool "$POSTTOOL_CMD" \
             --arg stop   "$STOP_CMD" \
             --arg notify "$NOTIFY_CMD" \
+            --argjson cleanup "$CLEANUP_PERIOD_DAYS" \
             '{
+              cleanupPeriodDays: $cleanup,
               hooks: {
                 UserPromptSubmit: [{hooks: [{type:"command", command:$userprompt, timeout:5}]}],
                 PostToolUse:      [{hooks: [{type:"command", command:$posttool, timeout:5}]}],
@@ -91,7 +98,9 @@ else
         --arg posttool "$POSTTOOL_CMD" \
         --arg stop   "$STOP_CMD" \
         --arg notify "$NOTIFY_CMD" \
+        --argjson cleanup "$CLEANUP_PERIOD_DAYS" \
         '{
+          cleanupPeriodDays: $cleanup,
           hooks: {
             UserPromptSubmit: [{hooks: [{type:"command", command:$userprompt, timeout:5}]}],
             PostToolUse:      [{hooks: [{type:"command", command:$posttool, timeout:5}]}],
