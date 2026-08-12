@@ -6,6 +6,7 @@
 
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -26,6 +27,10 @@ pub struct SessionSummary {
     pub message_count: usize,
     pub user_message_count: usize,
     pub tool_call_count: usize,
+    /// Tool name → call count across the session.
+    pub tool_counts: HashMap<String, u64>,
+    /// Span from first to last event, in seconds (INV-7: never negative).
+    pub duration_secs: i64,
     pub models: Vec<String>,
     pub input_tokens: i64,
     pub output_tokens: i64,
@@ -153,6 +158,7 @@ pub fn summarize_file(path: &Path) -> Option<SessionSummary> {
     let mut message_count = 0usize;
     let mut user_message_count = 0usize;
     let mut tool_call_count = 0usize;
+    let mut tool_counts: HashMap<String, u64> = HashMap::new();
     let mut models: Vec<String> = Vec::new();
     let (mut input, mut output, mut cache_read, mut cache_write) = (0i64, 0i64, 0i64, 0i64);
     let mut cost = 0f64;
@@ -224,12 +230,16 @@ pub fn summarize_file(path: &Path) -> Option<SessionSummary> {
                                 .unwrap_or(0.0);
                         }
                         if let Some(blocks) = msg.get("content").and_then(Value::as_array) {
-                            tool_call_count += blocks
-                                .iter()
-                                .filter(|b| {
-                                    b.get("type").and_then(Value::as_str) == Some("toolCall")
-                                })
-                                .count();
+                            for b in blocks.iter().filter(|b| {
+                                b.get("type").and_then(Value::as_str) == Some("toolCall")
+                            }) {
+                                tool_call_count += 1;
+                                let name = b
+                                    .get("name")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("?");
+                                *tool_counts.entry(name.to_string()).or_insert(0) += 1;
+                            }
                         }
                     }
                     _ => {}
@@ -258,6 +268,15 @@ pub fn summarize_file(path: &Path) -> Option<SessionSummary> {
         title = "(no user message)".to_string();
     }
 
+    // INV-7: unparseable or inverted timestamps clamp to 0.
+    let duration_secs = match (
+        chrono::DateTime::parse_from_rfc3339(&started_at),
+        chrono::DateTime::parse_from_rfc3339(&last_active_at),
+    ) {
+        (Ok(a), Ok(b)) => (b - a).num_seconds().max(0),
+        _ => 0,
+    };
+
     Some(SessionSummary {
         id,
         file_path: path.to_path_buf(),
@@ -269,6 +288,8 @@ pub fn summarize_file(path: &Path) -> Option<SessionSummary> {
         message_count,
         user_message_count,
         tool_call_count,
+        tool_counts,
+        duration_secs,
         models,
         input_tokens: input,
         output_tokens: output,

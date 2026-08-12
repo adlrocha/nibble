@@ -40,10 +40,22 @@ tr:last-child td { border-bottom: none; }
 .chart { display: flex; align-items: flex-end; gap: 2px; height: 90px; }
 .chart .bar { flex: 1; min-width: 3px; background: var(--accent); border-radius: 2px 2px 0 0; opacity: .85; position: relative; }
 .chart .bar:hover { opacity: 1; }
-.chart .bar .tip { display: none; position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%);
+.chart .bar .tip, .hm-cell .tip { display: none; position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%);
   background: var(--bg3); border: 1px solid var(--border); padding: 3px 8px; border-radius: 4px;
-  font-size: 11px; white-space: nowrap; z-index: 5; }
-.chart .bar:hover .tip { display: block; }
+  font-size: 11px; white-space: nowrap; z-index: 5; color: var(--fg); }
+.chart .bar:hover .tip, .hm-cell:hover .tip { display: block; }
+.heatmap { display: grid; grid-auto-flow: column; grid-template-rows: repeat(7, 11px);
+  gap: 3px; width: max-content; }
+.hm-cell { width: 11px; height: 11px; border-radius: 2px; background: var(--bg3); position: relative; }
+.hm-cell.l1 { background: #0e4429; } .hm-cell.l2 { background: #006d32; }
+.hm-cell.l3 { background: #26a641; } .hm-cell.l4 { background: #39d353; }
+.hchart { display: flex; align-items: flex-end; gap: 3px; height: 80px; }
+.hchart .bar { flex: 1; background: var(--blue); border-radius: 2px 2px 0 0; opacity: .8; position: relative; min-width: 8px; }
+.hchart .bar:hover { opacity: 1; }
+.hlabels { display: flex; gap: 3px; margin-top: 4px; }
+.hlabels span { flex: 1; text-align: center; font-size: 10px; color: var(--fg3); min-width: 8px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+@media (max-width: 800px) { .grid2 { grid-template-columns: 1fr; } }
 .toolbar { display: flex; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; }
 input[type=search], select { background: var(--bg2); border: 1px solid var(--border); color: var(--fg);
   padding: 8px 12px; border-radius: 6px; font-size: 14px; }
@@ -120,6 +132,33 @@ const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>'
 const fmtN = n => n >= 1e6 ? (n/1e6).toFixed(1)+'M' : n >= 1e3 ? (n/1e3).toFixed(1)+'k' : String(n);
 const fmtCost = c => c >= 0.005 ? '$'+c.toFixed(2) : c > 0 ? '<$0.01' : '$0';
 const fmtTs = ts => ts ? ts.replace('T',' ').slice(0,16) : '—';
+const fmtDur = secs => {
+  if (secs < 60) return secs + 's';
+  if (secs < 3600) return Math.round(secs/60) + 'm';
+  const h = Math.floor(secs/3600), m = Math.round((secs%3600)/60);
+  return m ? `${h}h ${m}m` : `${h}h`;
+};
+
+// GitHub-style heatmap: fill every day from first active day → today (zeros included).
+function heatmap(days) {
+  if (!days.length) return '<span class="muted">no activity</span>';
+  const byDay = Object.fromEntries(days.map(d => [d.day, d]));
+  const start = new Date(days[0].day + 'T00:00:00Z');
+  const today = new Date(); today.setUTCHours(0,0,0,0);
+  const max = Math.max(1, ...days.map(d => d.output_tokens));
+  const lvl = v => v === 0 ? 0 : v < max*0.15 ? 1 : v < max*0.4 ? 2 : v < max*0.7 ? 3 : 4;
+  let cells = '';
+  const pad = (start.getUTCDay() + 6) % 7; // Monday-first columns
+  for (let i = 0; i < pad; i++) cells += '<div class="hm-cell" style="visibility:hidden"></div>';
+  for (let t = start.getTime(); t <= today.getTime(); t += 86400000) {
+    const key = new Date(t).toISOString().slice(0,10);
+    const d = byDay[key];
+    cells += d
+      ? `<div class="hm-cell l${lvl(d.output_tokens)}"><span class="tip">${key} · ${fmtN(d.output_tokens)} tok · ${d.sessions} sess</span></div>`
+      : `<div class="hm-cell"><span class="tip">${key} · no activity</span></div>`;
+  }
+  return `<div class="heatmap">${cells}</div>`;
+}
 
 let OVERVIEW = null;
 
@@ -140,15 +179,24 @@ async function loadDash() {
   const o = OVERVIEW = await api('/api/overview');
   document.getElementById('hdr-info').textContent =
     o.total_sessions + ' sessions · ' + fmtN(o.total_output_tokens) + ' output tokens';
-  const maxDay = Math.max(1, ...o.per_day.map(d => d.output_tokens));
+  const last90 = o.per_day.slice(-90);
+  const max90 = Math.max(1, ...last90.map(d => d.output_tokens));
+  // Rotate the UTC hour histogram into the browser's local timezone.
+  const tzOffH = -new Date().getTimezoneOffset() / 60;
+  const localHours = Array.from({length: 24}, (_, h) => o.hours[(h - tzOffH + 48) % 24]);
+  const maxHour = Math.max(1, ...localHours);
+  const maxWd = Math.max(1, ...o.weekdays);
+  const wdNames = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
   el.innerHTML = `
     <div class="cards">
       <div class="card"><div class="n">${o.total_sessions}</div><div class="l">Sessions</div></div>
       <div class="card"><div class="n">${o.total_messages}</div><div class="l">Messages</div></div>
-      <div class="card"><div class="n">${fmtN(o.total_input_tokens)}</div><div class="l">Input tokens</div></div>
       <div class="card"><div class="n">${fmtN(o.total_output_tokens)}</div><div class="l">Output tokens</div></div>
-      <div class="card"><div class="n">${fmtN(o.total_cache_read_tokens)}</div><div class="l">Cache read</div></div>
       <div class="card"><div class="n">${fmtCost(o.total_cost_usd)}</div><div class="l">Reported cost</div></div>
+      <div class="card"><div class="n">${o.time.total_active_hours.toFixed(1)}h</div><div class="l">Active time</div></div>
+      <div class="card"><div class="n">${o.time.avg_session_minutes.toFixed(0)}m</div><div class="l">Avg session</div></div>
+      <div class="card"><div class="n" style="color:var(--green)">${o.streak_current}d</div><div class="l">Current streak</div></div>
+      <div class="card"><div class="n">${o.streak_longest}d</div><div class="l">Longest streak</div></div>
     </div>
     ${o.running_tasks.length ? `<div class="panel"><h2>Live agents (${o.running_tasks.length})</h2><table>
       <tr><th>Task</th><th>Agent</th><th>Title</th><th>Status</th><th>Updated</th></tr>
@@ -156,11 +204,44 @@ async function loadDash() {
         <td class="title-cell">${esc(t.title)}</td><td><span class="pill running">${esc(t.status)}</span></td>
         <td class="num">${fmtTs(t.updated_at)}</td></tr>`).join('')}
     </table></div>` : ''}
-    <div class="panel"><h2>Activity — output tokens per day (last ${o.per_day.length} days)</h2>
-      <div class="chart">${o.per_day.map(d =>
-        `<div class="bar" style="height:${Math.max(2, d.output_tokens/maxDay*100)}%">
+    <div class="panel"><h2>Activity — ${o.per_day.length} active days (hover for detail)</h2>
+      ${heatmap(o.per_day)}
+    </div>
+    <div class="panel"><h2>Output tokens per day (last ${last90.length} active days)</h2>
+      <div class="chart">${last90.map(d =>
+        `<div class="bar" style="height:${Math.max(2, d.output_tokens/max90*100)}%">
           <span class="tip">${esc(d.day)} · ${fmtN(d.output_tokens)} tok · ${d.sessions} sess</span></div>`).join('')}
       </div></div>
+    <div class="grid2">
+      <div class="panel"><h2>When you start sessions (local time)</h2>
+        <div class="hchart">${localHours.map((c, h) =>
+          `<div class="bar" style="height:${Math.max(2, c/maxHour*100)}%"><span class="tip">${h}:00 · ${c} sessions</span></div>`).join('')}
+        </div>
+        <div class="hlabels">${localHours.map((_, h) => h % 3 === 0 ? `<span>${h}</span>` : '<span></span>').join('')}</div>
+      </div>
+      <div class="panel"><h2>Day of week (UTC)</h2>
+        <div class="hchart">${o.weekdays.map((c, i) =>
+          `<div class="bar" style="height:${Math.max(2, c/maxWd*100)}%"><span class="tip">${wdNames[i]} · ${c} sessions</span></div>`).join('')}
+        </div>
+        <div class="hlabels">${wdNames.map(n => `<span>${n}</span>`).join('')}</div>
+      </div>
+    </div>
+    <div class="grid2">
+      <div class="panel"><h2>Top tools</h2><table>
+        <tr><th>Tool</th><th class="num">Calls</th></tr>
+        ${o.top_tools.map(t => `<tr><td>${esc(t.name)}</td><td class="num">${t.count}</td></tr>`).join('')}
+      </table></div>
+      <div class="panel"><h2>Top sessions by output</h2><table>
+        <tr><th>Session</th><th class="num">Output</th><th class="num">Span</th></tr>
+        ${o.top_sessions.map(s => `<tr class="session-row" onclick="loadDetail('${esc(s.id)}')">
+          <td class="title-cell">${esc(s.title)}<br><span class="muted" style="font-size:11px">${esc(s.project)}</span></td>
+          <td class="num">${fmtN(s.output_tokens)}</td><td class="num">${fmtDur(s.duration_secs)}</td></tr>`).join('')}
+      </table></div>
+    </div>
+    ${o.time.longest_session ? `<div class="panel"><h2>Longest session</h2>
+      <a href="#" onclick="loadDetail('${esc(o.time.longest_session.id)}');return false">${esc(o.time.longest_session.title)}</a>
+      <span class="muted"> — ${fmtDur(o.time.longest_session.duration_secs)} · ${esc(o.time.longest_session.project)} · median session ${o.time.median_session_minutes.toFixed(0)}m</span>
+    </div>` : ''}
     <div class="panel"><h2>Models</h2><table>
       <tr><th>Model</th><th class="num">Sessions</th><th class="num">Input</th><th class="num">Output</th><th class="num">Cache read</th><th class="num">Cost</th></tr>
       ${o.per_model.map(m => `<tr><td>${esc(m.model)}</td><td class="num">${m.sessions}</td>
@@ -207,12 +288,12 @@ async function runSearch() {
   const p = document.getElementById('q-project').value;
   const list = await api('/api/sessions?q=' + encodeURIComponent(q) + '&project=' + encodeURIComponent(p));
   document.getElementById('sess-list').innerHTML = list.length ? `<table>
-    <tr><th>Session</th><th>Project</th><th class="num">Msgs</th><th class="num">Tools</th><th class="num">Output</th><th class="num">Cost</th><th class="num">Last active</th></tr>
+    <tr><th>Session</th><th>Project</th><th class="num">Msgs</th><th class="num">Tools</th><th class="num">Output</th><th class="num">Span</th><th class="num">Cost</th><th class="num">Last active</th></tr>
     ${list.map(s => `<tr class="session-row" onclick="loadDetail('${esc(s.id)}')">
       <td class="title-cell">${esc(s.title)}<br><span class="muted" style="font-size:11px">${s.models.map(esc).join(', ')}</span></td>
       <td><span class="pill">${esc(s.project)}</span></td>
       <td class="num">${s.message_count}</td><td class="num">${s.tool_call_count}</td>
-      <td class="num">${fmtN(s.output_tokens)}</td><td class="num">${fmtCost(s.cost_usd)}</td>
+      <td class="num">${fmtN(s.output_tokens)}</td><td class="num">${fmtDur(s.duration_secs)}</td><td class="num">${fmtCost(s.cost_usd)}</td>
       <td class="num">${fmtTs(s.last_active_at)}</td></tr>`).join('')}
   </table>` : '<div class="loading">no sessions match</div>';
 }
@@ -232,7 +313,7 @@ async function loadDetail(id) {
       <h1>${esc(s.title)}</h1>
       <div class="sub">
         <span class="pill">${esc(s.project)}</span> <span class="muted">${esc(s.cwd)}</span><br>
-        ${fmtTs(s.started_at)} → ${fmtTs(s.last_active_at)} ·
+        ${fmtTs(s.started_at)} → ${fmtTs(s.last_active_at)} · span ${fmtDur(s.duration_secs)} ·
         ${s.message_count} msgs · ${fmtN(s.input_tokens)} in / ${fmtN(s.output_tokens)} out ·
         ${fmtCost(s.cost_usd)} · ${esc(s.id)} ·
         <a href="/api/session/${encodeURIComponent(s.id)}/raw${TOKEN?'?token='+encodeURIComponent(TOKEN):''}">raw jsonl</a>
