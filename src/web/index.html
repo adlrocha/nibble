@@ -198,11 +198,12 @@ async function loadDash() {
       <div class="card"><div class="n" style="color:var(--green)">${o.streak_current}d</div><div class="l">Current streak</div></div>
       <div class="card"><div class="n">${o.streak_longest}d</div><div class="l">Longest streak</div></div>
     </div>
-    ${o.running_tasks.length ? `<div class="panel"><h2>Live agents (${o.running_tasks.length})</h2><table>
-      <tr><th>Task</th><th>Agent</th><th>Title</th><th>Status</th><th>Updated</th></tr>
-      ${o.running_tasks.map(t => `<tr><td class="num">${esc(t.task_id)}</td><td>${esc(t.agent_type)}</td>
-        <td class="title-cell">${esc(t.title)}</td><td><span class="pill running">${esc(t.status)}</span></td>
-        <td class="num">${fmtTs(t.updated_at)}</td></tr>`).join('')}
+    ${o.live_sandboxes.length ? `<div class="panel"><h2>Live sandboxes (${o.live_sandboxes.length})</h2><table>
+      <tr><th>Container</th><th>Project</th><th class="num">Up for</th><th>Ports</th></tr>
+      ${o.live_sandboxes.map(s => `<tr><td><span class="pill running">●</span> ${esc(s.name)}</td>
+        <td>${s.project ? esc(s.project) : '<span class="muted">—</span>'}${s.repo_path ? ` <span class="muted" style="font-size:11px">${esc(s.repo_path)}</span>` : ''}</td>
+        <td class="num">${fmtDur(Math.max(0, (Date.now() - new Date(s.started_at)) / 1000 | 0))}</td>
+        <td class="num">${s.ports.map(esc).join(', ')}</td></tr>`).join('')}
     </table></div>` : ''}
     <div class="panel"><h2>Activity — ${o.per_day.length} active days (hover for detail)</h2>
       ${heatmap(o.per_day)}

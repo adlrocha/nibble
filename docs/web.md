@@ -8,7 +8,7 @@ built into the nibble binary.
 
 - **Dashboard** — total sessions/messages/tokens/cost, output-token activity
   chart (last 90 days), per-model and per-project breakdowns, and live
-  running agents from the nibble task DB.
+  sandbox containers (sourced from podman, not the task DB).
 - **Sessions** — every session under `~/.pi/agent/sessions/`, sorted by
   recency, filterable by project, with full-text search across message bodies.
 - **Session detail** — the full conversation: user messages, assistant text,
@@ -58,7 +58,7 @@ task DB.
 | Endpoint | Description |
 |----------|-------------|
 | `GET /` | The UI |
-| `GET /api/overview` | Totals, per-model/per-day/per-project stats, running tasks |
+| `GET /api/overview` | Totals, per-model/per-day/per-project stats, live sandboxes (from podman) |
 | `GET /api/sessions?q=&project=` | Session summaries, optional full-text search |
 | `GET /api/session/{id}` | Full event stream for one session |
 | `GET /api/session/{id}/raw` | Raw JSONL download |

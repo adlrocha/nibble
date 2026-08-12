@@ -9,7 +9,7 @@ pub mod stats;
 use anyhow::Result;
 use serde::Serialize;
 use sessions::SessionSummary;
-use stats::TaskInfo;
+use stats::SandboxInfo;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -130,27 +130,51 @@ impl App {
         f(&guard)
     }
 
-    fn running_tasks(&self) -> Vec<TaskInfo> {
-        // Best-effort: a missing/unreadable DB must never break the API.
-        // Existence check keeps the service strictly read-only (INV-2):
-        // Database::open runs CREATE TABLE migrations on open.
-        if !self.cfg.db_path.exists() {
+    /// Live sandboxes from the container runtime — the source of truth for
+    /// "what is actually running". The task DB is only consulted afterwards,
+    /// best-effort, to attach repo/project labels.
+    fn live_sandboxes(&self) -> Vec<SandboxInfo> {
+        use crate::sandbox::Sandbox;
+        let containers = crate::sandbox::podman::PodmanSandbox::new()
+            .list()
+            .unwrap_or_default();
+        let running: Vec<_> = containers
+            .into_iter()
+            .filter(|c| c.status == crate::sandbox::ContainerStatus::Running)
+            .collect();
+        if running.is_empty() {
             return Vec::new();
         }
-        let Ok(db) = crate::db::Database::open(&self.cfg.db_path) else {
-            return Vec::new();
+
+        // Best-effort label lookup (INV-2: never create a missing DB).
+        let tasks = if self.cfg.db_path.exists() {
+            crate::db::Database::open(&self.cfg.db_path)
+                .and_then(|db| db.list_tasks())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
         };
-        db.list_tasks()
-            .unwrap_or_default()
+
+        running
             .into_iter()
-            .filter(|t| t.status == crate::models::task::TaskStatus::Running)
-            .map(|t| TaskInfo {
-                task_id: t.task_id,
-                agent_type: t.agent_type.as_str().to_string(),
-                title: t.title,
-                status: t.status.as_str().to_string(),
-                updated_at: t.updated_at.to_rfc3339(),
-                repo_path: t.repo_path,
+            .map(|c| {
+                let task = tasks.iter().find(|t| {
+                    t.container_name.as_deref() == Some(c.name.as_str())
+                        || t.container_id.as_deref() == Some(c.id.as_str())
+                });
+                let repo_path = task.and_then(|t| t.repo_path.clone());
+                let project = repo_path.as_deref().and_then(|p| {
+                    std::path::Path::new(p)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                });
+                SandboxInfo {
+                    name: c.name,
+                    project,
+                    repo_path,
+                    started_at: c.created_at.to_rfc3339(),
+                    ports: c.ports,
+                }
             })
             .collect()
     }
@@ -236,13 +260,9 @@ fn route(app: &App, req: &Request) -> Response<std::io::Cursor<Vec<u8>>> {
     }
 
     if path == "/api/overview" {
-        let tasks = app.running_tasks();
+        let sandboxes = app.live_sandboxes();
         return app.with_index(|idx| {
-            json_response(&stats::build_overview(
-                &idx.summaries,
-                tasks,
-                ACTIVITY_DAYS,
-            ))
+            json_response(&stats::build_overview(&idx.summaries, sandboxes, ACTIVITY_DAYS))
         });
     }
 

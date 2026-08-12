@@ -33,13 +33,13 @@ pub struct ProjectStat {
 }
 
 #[derive(Debug, Serialize)]
-pub struct TaskInfo {
-    pub task_id: String,
-    pub agent_type: String,
-    pub title: String,
-    pub status: String,
-    pub updated_at: String,
+pub struct SandboxInfo {
+    pub name: String,
+    /// Best-effort repo/project label from the task DB (may be absent).
+    pub project: Option<String>,
     pub repo_path: Option<String>,
+    pub started_at: String,
+    pub ports: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -78,7 +78,9 @@ pub struct Overview {
     /// Last `days` entries, oldest first.
     pub per_day: Vec<DayStat>,
     pub per_project: Vec<ProjectStat>,
-    pub running_tasks: Vec<TaskInfo>,
+    /// Live sandbox containers, sourced from the container runtime (not the
+    /// task DB, whose rows can be stale).
+    pub live_sandboxes: Vec<SandboxInfo>,
     /// Sessions started per UTC hour (index 0..23). The UI rotates this to
     /// the browser's local timezone.
     pub hours: [u32; 24],
@@ -152,7 +154,7 @@ pub fn streaks(active_days: &std::collections::HashSet<String>, today: chrono::N
 /// happens in the caller, which passes pre-extracted task rows.
 pub fn build_overview(
     summaries: &[SessionSummary],
-    running_tasks: Vec<TaskInfo>,
+    live_sandboxes: Vec<SandboxInfo>,
     days: usize,
 ) -> Overview {
     let mut per_model: HashMap<String, ModelStat> = HashMap::new();
@@ -313,7 +315,7 @@ pub fn build_overview(
         per_model,
         per_day,
         per_project,
-        running_tasks,
+        live_sandboxes,
         hours,
         weekdays,
         streak_current,
