@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nibble · sessions</title>
+<style>
+:root {
+  --bg: #0d1117; --bg2: #161b22; --bg3: #1c2330; --border: #2d333b;
+  --fg: #e6edf3; --fg2: #9da7b3; --fg3: #6e7681;
+  --accent: #f0883e; --accent2: #ffa657;
+  --blue: #58a6ff; --green: #3fb950; --red: #f85149; --purple: #bc8cff;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--fg); font: 14px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif; }
+a { color: var(--blue); text-decoration: none; }
+a:hover { text-decoration: underline; }
+header { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 16px;
+  padding: 10px 20px; background: var(--bg2); border-bottom: 1px solid var(--border); }
+header .logo { font-weight: 700; color: var(--accent); font-size: 16px; white-space: nowrap; }
+nav { display: flex; gap: 4px; }
+nav button { background: none; border: none; color: var(--fg2); font-size: 14px; padding: 6px 12px;
+  border-radius: 6px; cursor: pointer; }
+nav button.active { background: var(--bg3); color: var(--fg); }
+nav button:hover { color: var(--fg); }
+main { max-width: 1100px; margin: 0 auto; padding: 20px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 24px; }
+.card { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; }
+.card .n { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.card .l { color: var(--fg2); font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
+.panel { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px;
+  padding: 16px; margin-bottom: 20px; overflow-x: auto; }
+.panel h2 { font-size: 14px; color: var(--fg2); margin-bottom: 12px; text-transform: uppercase; letter-spacing: .05em; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; color: var(--fg3); font-weight: 600; padding: 6px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+td { padding: 6px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+tr:last-child td { border-bottom: none; }
+.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--mono); font-size: 12px; }
+.chart { display: flex; align-items: flex-end; gap: 2px; height: 90px; }
+.chart .bar { flex: 1; min-width: 3px; background: var(--accent); border-radius: 2px 2px 0 0; opacity: .85; position: relative; }
+.chart .bar:hover { opacity: 1; }
+.chart .bar .tip { display: none; position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%);
+  background: var(--bg3); border: 1px solid var(--border); padding: 3px 8px; border-radius: 4px;
+  font-size: 11px; white-space: nowrap; z-index: 5; }
+.chart .bar:hover .tip { display: block; }
+.toolbar { display: flex; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; }
+input[type=search], select { background: var(--bg2); border: 1px solid var(--border); color: var(--fg);
+  padding: 8px 12px; border-radius: 6px; font-size: 14px; }
+input[type=search] { flex: 1; min-width: 200px; }
+input:focus, select:focus { outline: 1px solid var(--accent); }
+.session-row { cursor: pointer; }
+.session-row:hover td { background: var(--bg3); }
+.title-cell { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pill { display: inline-block; background: var(--bg3); border: 1px solid var(--border); border-radius: 999px;
+  padding: 1px 8px; font-size: 11px; color: var(--fg2); margin-right: 4px; white-space: nowrap; }
+.pill.running { color: var(--green); border-color: var(--green); }
+.ev { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 10px; overflow: hidden; }
+.ev .ev-head { display: flex; gap: 10px; align-items: baseline; padding: 8px 12px; background: var(--bg3);
+  font-size: 12px; color: var(--fg2); cursor: pointer; user-select: none; }
+.ev .ev-body { padding: 10px 14px; white-space: pre-wrap; word-break: break-word; font-size: 13.5px; }
+.ev.user .ev-head { border-left: 3px solid var(--blue); }
+.ev.assistant .ev-head { border-left: 3px solid var(--accent); }
+.ev.tool .ev-head { border-left: 3px solid var(--purple); }
+.ev.tool.error .ev-head { border-left-color: var(--red); }
+.ev.model .ev-head { border-left: 3px solid var(--fg3); }
+.ev code, .ev pre { font-family: var(--mono); font-size: 12px; }
+.ev pre { background: var(--bg); padding: 8px 10px; border-radius: 6px; overflow-x: auto; margin-top: 6px; }
+.ev.collapsed .ev-body { display: none; }
+.ev .role { font-weight: 700; }
+.ev.user .role { color: var(--blue); } .ev.assistant .role { color: var(--accent2); }
+.ev.tool .role { color: var(--purple); } .ev.tool.error .role { color: var(--red); }
+.ev .meta { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--fg3); white-space: nowrap; }
+.back { margin-bottom: 14px; display: inline-block; }
+.detail-head { margin-bottom: 16px; }
+.detail-head h1 { font-size: 18px; margin-bottom: 6px; }
+.detail-head .sub { color: var(--fg2); font-size: 13px; }
+.muted { color: var(--fg3); }
+.loading { color: var(--fg2); padding: 40px; text-align: center; }
+.err { color: var(--red); padding: 20px; }
+@media (max-width: 640px) {
+  main { padding: 12px; } .title-cell { max-width: 180px; }
+  header { padding: 8px 12px; gap: 8px; }
+}
+</style>
+</head>
+<body>
+<header>
+  <span class="logo">🥜 nibble</span>
+  <nav>
+    <button id="tab-dash" class="active" onclick="showTab('dash')">Dashboard</button>
+    <button id="tab-sessions" onclick="showTab('sessions')">Sessions</button>
+  </nav>
+  <span id="hdr-info" class="muted" style="margin-left:auto;font-size:12px"></span>
+</header>
+<main>
+  <div id="view-dash"></div>
+  <div id="view-sessions" style="display:none"></div>
+  <div id="view-detail" style="display:none"></div>
+</main>
+<script>
+// ── auth: token comes from ?token= (bookmarkable) and is kept in sessionStorage
+const qs = new URLSearchParams(location.search);
+if (qs.get('token')) sessionStorage.setItem('nibble_token', qs.get('token'));
+const TOKEN = sessionStorage.getItem('nibble_token') || '';
+
+async function api(path) {
+  const sep = path.includes('?') ? '&' : '?';
+  const res = await fetch(path + (TOKEN ? sep + 'token=' + encodeURIComponent(TOKEN) : ''));
+  if (res.status === 401) {
+    document.querySelector('main').innerHTML =
+      '<div class="err">401 — this nibble web instance requires a token. Open it with <code>?token=…</code> in the URL (see install output / <code>~/.nibble/web.env</code>).</div>';
+    throw new Error('unauthorized');
+  }
+  if (!res.ok) throw new Error((await res.json()).error || res.statusText);
+  return res.json();
+}
+
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmtN = n => n >= 1e6 ? (n/1e6).toFixed(1)+'M' : n >= 1e3 ? (n/1e3).toFixed(1)+'k' : String(n);
+const fmtCost = c => c >= 0.005 ? '$'+c.toFixed(2) : c > 0 ? '<$0.01' : '$0';
+const fmtTs = ts => ts ? ts.replace('T',' ').slice(0,16) : '—';
+
+let OVERVIEW = null;
+
+function showTab(name) {
+  for (const t of ['dash','sessions','detail']) {
+    document.getElementById('view-'+t).style.display = t === name ? '' : 'none';
+  }
+  document.getElementById('tab-dash').classList.toggle('active', name === 'dash');
+  document.getElementById('tab-sessions').classList.toggle('active', name === 'sessions');
+  if (name === 'dash') loadDash();
+  if (name === 'sessions') loadSessions();
+}
+
+// ── Dashboard ──────────────────────────────────────────────────────────────
+async function loadDash() {
+  const el = document.getElementById('view-dash');
+  el.innerHTML = '<div class="loading">loading…</div>';
+  const o = OVERVIEW = await api('/api/overview');
+  document.getElementById('hdr-info').textContent =
+    o.total_sessions + ' sessions · ' + fmtN(o.total_output_tokens) + ' output tokens';
+  const maxDay = Math.max(1, ...o.per_day.map(d => d.output_tokens));
+  el.innerHTML = `
+    <div class="cards">
+      <div class="card"><div class="n">${o.total_sessions}</div><div class="l">Sessions</div></div>
+      <div class="card"><div class="n">${o.total_messages}</div><div class="l">Messages</div></div>
+      <div class="card"><div class="n">${fmtN(o.total_input_tokens)}</div><div class="l">Input tokens</div></div>
+      <div class="card"><div class="n">${fmtN(o.total_output_tokens)}</div><div class="l">Output tokens</div></div>
+      <div class="card"><div class="n">${fmtN(o.total_cache_read_tokens)}</div><div class="l">Cache read</div></div>
+      <div class="card"><div class="n">${fmtCost(o.total_cost_usd)}</div><div class="l">Reported cost</div></div>
+    </div>
+    ${o.running_tasks.length ? `<div class="panel"><h2>Live agents (${o.running_tasks.length})</h2><table>
+      <tr><th>Task</th><th>Agent</th><th>Title</th><th>Status</th><th>Updated</th></tr>
+      ${o.running_tasks.map(t => `<tr><td class="num">${esc(t.task_id)}</td><td>${esc(t.agent_type)}</td>
+        <td class="title-cell">${esc(t.title)}</td><td><span class="pill running">${esc(t.status)}</span></td>
+        <td class="num">${fmtTs(t.updated_at)}</td></tr>`).join('')}
+    </table></div>` : ''}
+    <div class="panel"><h2>Activity — output tokens per day (last ${o.per_day.length} days)</h2>
+      <div class="chart">${o.per_day.map(d =>
+        `<div class="bar" style="height:${Math.max(2, d.output_tokens/maxDay*100)}%">
+          <span class="tip">${esc(d.day)} · ${fmtN(d.output_tokens)} tok · ${d.sessions} sess</span></div>`).join('')}
+      </div></div>
+    <div class="panel"><h2>Models</h2><table>
+      <tr><th>Model</th><th class="num">Sessions</th><th class="num">Input</th><th class="num">Output</th><th class="num">Cache read</th><th class="num">Cost</th></tr>
+      ${o.per_model.map(m => `<tr><td>${esc(m.model)}</td><td class="num">${m.sessions}</td>
+        <td class="num">${fmtN(m.input_tokens)}</td><td class="num">${fmtN(m.output_tokens)}</td>
+        <td class="num">${fmtN(m.cache_read_tokens)}</td><td class="num">${fmtCost(m.cost_usd)}</td></tr>`).join('')}
+    </table></div>
+    <div class="panel"><h2>Projects</h2><table>
+      <tr><th>Project</th><th>Path</th><th class="num">Sessions</th><th class="num">Output</th><th class="num">Last active</th></tr>
+      ${o.per_project.map(p => `<tr class="session-row" onclick="filterProject(decodeURIComponent('${encodeURIComponent(p.project)}'))">",
+        <td>${esc(p.project)}</td><td class="muted">${esc(p.cwd)}</td><td class="num">${p.sessions}</td>
+        <td class="num">${fmtN(p.output_tokens)}</td><td class="num">${fmtTs(p.last_active_at)}</td></tr>`).join('')}
+    </table></div>`;
+}
+
+function filterProject(p) {
+  showTab('sessions');
+  document.getElementById('q-project').value = p;
+  loadSessions();
+}
+
+// ── Sessions list ──────────────────────────────────────────────────────────
+let searchTimer = null;
+async function loadSessions() {
+  const el = document.getElementById('view-sessions');
+  const projects = OVERVIEW ? OVERVIEW.per_project.map(p => p.project) : (OVERVIEW = await api('/api/overview')).per_project.map(p => p.project);
+  const prevQ = document.getElementById('q')?.value || '';
+  const prevP = document.getElementById('q-project')?.value || '';
+  el.innerHTML = `
+    <div class="toolbar">
+      <input type="search" id="q" placeholder="Search session text…" value="${esc(prevQ)}">
+      <select id="q-project"><option value="">All projects</option>
+        ${projects.map(p => `<option ${p===prevP?'selected':''}>${esc(p)}</option>`).join('')}</select>
+    </div>
+    <div class="panel"><div id="sess-list"><div class="loading">loading…</div></div></div>`;
+  document.getElementById('q').addEventListener('input', () => {
+    clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 300);
+  });
+  document.getElementById('q-project').addEventListener('change', runSearch);
+  runSearch();
+}
+
+async function runSearch() {
+  const q = document.getElementById('q').value;
+  const p = document.getElementById('q-project').value;
+  const list = await api('/api/sessions?q=' + encodeURIComponent(q) + '&project=' + encodeURIComponent(p));
+  document.getElementById('sess-list').innerHTML = list.length ? `<table>
+    <tr><th>Session</th><th>Project</th><th class="num">Msgs</th><th class="num">Tools</th><th class="num">Output</th><th class="num">Cost</th><th class="num">Last active</th></tr>
+    ${list.map(s => `<tr class="session-row" onclick="loadDetail('${esc(s.id)}')">
+      <td class="title-cell">${esc(s.title)}<br><span class="muted" style="font-size:11px">${s.models.map(esc).join(', ')}</span></td>
+      <td><span class="pill">${esc(s.project)}</span></td>
+      <td class="num">${s.message_count}</td><td class="num">${s.tool_call_count}</td>
+      <td class="num">${fmtN(s.output_tokens)}</td><td class="num">${fmtCost(s.cost_usd)}</td>
+      <td class="num">${fmtTs(s.last_active_at)}</td></tr>`).join('')}
+  </table>` : '<div class="loading">no sessions match</div>';
+}
+
+// ── Session detail ─────────────────────────────────────────────────────────
+async function loadDetail(id) {
+  showTab('detail');
+  const el = document.getElementById('view-detail');
+  el.innerHTML = '<div class="loading">loading…</div>';
+  let d;
+  try { d = await api('/api/session/' + encodeURIComponent(id)); }
+  catch (e) { el.innerHTML = `<a class="back" href="#" onclick="showTab('sessions');return false">← back</a><div class="err">${esc(e.message)}</div>`; return; }
+  const s = d;
+  el.innerHTML = `
+    <a class="back" href="#" onclick="showTab('sessions');return false">← back to sessions</a>
+    <div class="detail-head">
+      <h1>${esc(s.title)}</h1>
+      <div class="sub">
+        <span class="pill">${esc(s.project)}</span> <span class="muted">${esc(s.cwd)}</span><br>
+        ${fmtTs(s.started_at)} → ${fmtTs(s.last_active_at)} ·
+        ${s.message_count} msgs · ${fmtN(s.input_tokens)} in / ${fmtN(s.output_tokens)} out ·
+        ${fmtCost(s.cost_usd)} · ${esc(s.id)} ·
+        <a href="/api/session/${encodeURIComponent(s.id)}/raw${TOKEN?'?token='+encodeURIComponent(TOKEN):''}">raw jsonl</a>
+      </div>
+    </div>
+    ${d.events.map((e, i) => renderEvent(e, i)).join('')}`;
+  // collapse long tool results & thinking by default
+  el.querySelectorAll('.ev .ev-head').forEach(h =>
+    h.addEventListener('click', () => h.parentElement.classList.toggle('collapsed')));
+  el.querySelectorAll('.ev.tool, .ev.model').forEach(e => e.classList.add('collapsed'));
+}
+
+function renderEvent(e, i) {
+  const t = fmtTs(e.ts).slice(11);
+  if (e.kind === 'user') return `<div class="ev user">
+    <div class="ev-head"><span class="role">you</span><span class="meta">${t}</span></div>
+    <div class="ev-body">${esc(e.text)}</div></div>`;
+  if (e.kind === 'assistant') {
+    const usage = e.input_tokens || e.output_tokens
+      ? `↑${fmtN(e.input_tokens)} ↓${fmtN(e.output_tokens)}${e.cost_usd ? ' · ' + fmtCost(e.cost_usd) : ''}` : '';
+    return `<div class="ev assistant">
+      <div class="ev-head"><span class="role">agent</span><span>${esc(e.model || '')}</span><span class="meta">${usage} ${t}</span></div>
+      <div class="ev-body">${e.thinking ? `<details><summary class="muted">thinking…</summary><pre>${esc(e.thinking)}</pre></details>` : ''}
+${esc(e.text)}${e.tool_calls.map(c => `<pre>⚙ ${esc(c.name)}(${esc(c.arguments)})</pre>`).join('')}</div></div>`;
+  }
+  if (e.kind === 'tool_result') return `<div class="ev tool${e.is_error ? ' error' : ''}">
+    <div class="ev-head"><span class="role">⚙ ${esc(e.tool_name)}${e.is_error ? ' — error' : ''}</span><span class="meta">${t}</span></div>
+    <div class="ev-body">${esc(e.text)}</div></div>`;
+  if (e.kind === 'model_change') return `<div class="ev model">
+    <div class="ev-head"><span class="role muted">model → ${esc(e.model)}</span><span>${esc(e.provider)}</span><span class="meta">${t}</span></div>
+    <div class="ev-body"></div></div>`;
+  return '';
+}
+
+loadDash();
+</script>
+</body>
+</html>

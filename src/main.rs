@@ -12,6 +12,7 @@ mod privacy_filter;
 mod sandbox;
 mod session;
 mod usage;
+mod web;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -968,6 +969,16 @@ fn main() -> Result<()> {
                     usage::print_pricing(&pricing)?;
                 }
             }
+        }
+        Commands::Web { host, port, token } => {
+            let cfg = web::WebConfig {
+                host,
+                port,
+                token,
+                sessions_root: usage::pi_log::sessions_root(),
+                db_path,
+            };
+            web::serve(cfg)?;
         }
     }
 
