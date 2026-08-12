@@ -254,6 +254,20 @@ if systemctl --user is-active --quiet nibble-privacy-proxy.service 2>/dev/null; 
     ok "Stopped nibble-privacy-proxy.service for upgrade"
 fi
 
+# Also stop the web UI so we can overwrite the binary if it's running.
+WEB_WAS_ACTIVE=false
+if systemctl --user is-active --quiet nibble-web.service 2>/dev/null; then
+    WEB_WAS_ACTIVE=true
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 5 systemctl --user stop nibble-web.service 2>/dev/null || true
+    else
+        systemctl --user stop --no-block nibble-web.service 2>/dev/null || true
+        sleep 1
+        systemctl --user kill --signal=SIGKILL nibble-web.service 2>/dev/null || true
+    fi
+    ok "Stopped nibble-web.service for upgrade"
+fi
+
 cp "$REPO_DIR/target/release/nibble" "$BIN_DIR/nibble.new"
 chmod +x "$BIN_DIR/nibble.new"
 mv -f "$BIN_DIR/nibble.new" "$BIN_DIR/nibble"
@@ -590,6 +604,52 @@ if [ ! -f "$PRICING_FILE" ]; then
 # Add pricing here if you want to estimate what they'd cost on a paid plan.
 PRICING
     ok "Pricing override stub written: $PRICING_FILE"
+fi
+
+# ── 5e. Web session inspector (systemd-user service) ────────────────────────
+# Dark-mode browser UI for browsing/searching pi sessions, token stats and
+# live tasks. Binds 0.0.0.0:7878 so it's reachable over Tailscale; a bearer
+# token in ~/.nibble/web.env guards against hostile-LAN exposure.
+step "Installing web session inspector"
+
+WEB_ENV="$HOME/.nibble/web.env"
+if [ ! -f "$WEB_ENV" ]; then
+    if command -v openssl >/dev/null 2>&1; then
+        WEB_TOKEN=$(openssl rand -hex 24)
+    else
+        WEB_TOKEN=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    fi
+    printf 'NIBBLE_WEB_TOKEN=%s\n' "$WEB_TOKEN" > "$WEB_ENV"
+    chmod 600 "$WEB_ENV"
+    ok "Generated web auth token: $WEB_ENV"
+fi
+
+cat > "$SYSTEMD_DIR/nibble-web.service" << UNIT
+[Unit]
+Description=Nibble Web — session inspector UI (port 7878)
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=$BIN_DIR/nibble web
+EnvironmentFile=-%h/.nibble/web.env
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+UNIT
+
+if systemctl --user daemon-reload 2>/dev/null; then
+    systemctl --user enable nibble-web.service 2>/dev/null || true
+    systemctl --user restart nibble-web.service 2>/dev/null \
+        && ok "Web session inspector running (nibble-web.service)" \
+        || warn "Could not start nibble-web.service"
+    WEB_TOKEN=$(cut -d= -f2- "$WEB_ENV")
+    TS_IP=$(tailscale ip -4 2>/dev/null | head -1 || true)
+    ok "  Local:    http://localhost:7878/?token=$WEB_TOKEN"
+    [ -n "$TS_IP" ] && ok "  Tailnet:  http://$TS_IP:7878/?token=$WEB_TOKEN"
+else
+    warn "systemd user session not available. Start manually: nibble web"
 fi
 
 # ── 6. Claude Code hooks ──────────────────────────────────────────────────────

@@ -104,6 +104,21 @@ pub enum Commands {
         #[command(subcommand)]
         action: UsageAction,
     },
+
+    /// Run the web session inspector UI (dashboard, search, session review)
+    Web {
+        /// Address to bind (use 127.0.0.1 to restrict to localhost)
+        #[arg(long, default_value = "0.0.0.0")]
+        host: String,
+
+        /// Port to listen on
+        #[arg(long, default_value_t = 7878)]
+        port: u16,
+
+        /// Bearer token required to access the UI (default: $NIBBLE_WEB_TOKEN)
+        #[arg(long, env = "NIBBLE_WEB_TOKEN")]
+        token: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]

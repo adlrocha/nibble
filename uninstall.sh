@@ -76,7 +76,7 @@ fi
 # ── 3. Stop services ──────────────────────────────────────────────────────────
 step "Stopping services"
 
-for svc in nibble-listener nibble-resume nibble-reset nibble-cleanup; do
+for svc in nibble-listener nibble-resume nibble-reset nibble-cleanup nibble-web; do
     if systemctl --user is-active --quiet "$svc.service" 2>/dev/null; then
         systemctl --user stop "$svc.service"
         ok "Stopped $svc.service"
@@ -86,7 +86,7 @@ done
 # ── 4. Disable and remove systemd services ────────────────────────────────────
 step "Removing systemd services"
 
-for svc in nibble-listener nibble-resume nibble-reset nibble-cleanup; do
+for svc in nibble-listener nibble-resume nibble-reset nibble-cleanup nibble-web; do
     if [ -f "$SYSTEMD_DIR/$svc.service" ]; then
         systemctl --user disable "$svc.service" 2>/dev/null || true
         rm -f "$SYSTEMD_DIR/$svc.service"
