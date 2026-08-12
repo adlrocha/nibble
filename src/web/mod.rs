@@ -20,8 +20,8 @@ const INDEX_HTML: &str = include_str!("index.html");
 
 /// How long the session index is reused before rescanning the directory.
 const INDEX_TTL: Duration = Duration::from_secs(3);
-/// Number of days included in the dashboard activity series.
-const ACTIVITY_DAYS: usize = 90;
+/// Number of days included in the dashboard activity/heatmap series.
+const ACTIVITY_DAYS: usize = 365;
 
 #[derive(Debug, Clone)]
 pub struct WebConfig {
@@ -402,6 +402,11 @@ mod tests {
         assert_eq!(s.user_message_count, 1);
         assert_eq!(s.tool_call_count, 1);
         assert_eq!(s.models, vec!["glm-5.1"]);
+        // INV-8: tool name counts sum to the tool call total.
+        assert_eq!(s.tool_counts.get("bash"), Some(&1));
+        assert_eq!(s.tool_counts.values().sum::<u64>(), s.tool_call_count as u64);
+        // 10:00:00 → 10:03:00.
+        assert_eq!(s.duration_secs, 180);
         // INV-5: totals equal the sum of per-message usage.
         assert_eq!(s.input_tokens, 300);
         assert_eq!(s.output_tokens, 130);
@@ -484,6 +489,42 @@ mod tests {
         assert_eq!(o.per_model.len(), 1);
         assert_eq!(o.per_project.len(), 1);
         assert_eq!(o.per_project[0].project, "proj-a");
+        // AC-8: histograms sum to the session count.
+        assert_eq!(o.hours.iter().sum::<u32>(), 2);
+        assert_eq!(o.weekdays.iter().sum::<u32>(), 2);
+        // AC-9: time stats over both 180s sessions.
+        assert!((o.time.avg_session_minutes - 3.0).abs() < 1e-9);
+        assert!((o.time.median_session_minutes - 3.0).abs() < 1e-9);
+        assert!((o.time.total_active_hours - 0.1).abs() < 1e-9);
+        assert_eq!(o.time.longest_session.as_ref().unwrap().duration_secs, 180);
+        // AC-10: tool aggregation.
+        assert_eq!(o.top_tools.len(), 1);
+        assert_eq!(o.top_tools[0].name, "bash");
+        assert_eq!(o.top_tools[0].count, 2);
+        assert_eq!(o.top_sessions.len(), 2);
+    }
+
+    // AC-7
+    #[test]
+    fn streaks_current_and_longest() {
+        let days = |v: &[&str]| v.iter().map(|s| s.to_string()).collect();
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 8, 12).unwrap();
+
+        // Active today + two days back → current 3.
+        let set = days(&["2026-08-10", "2026-08-11", "2026-08-12"]);
+        assert_eq!(stats::streaks(&set, today), (3, 3));
+
+        // Not active today but yesterday → streak still alive (GitHub semantics).
+        let set = days(&["2026-08-10", "2026-08-11"]);
+        assert_eq!(stats::streaks(&set, today), (2, 2));
+
+        // Gap yesterday → current 0, longest remembers the earlier run.
+        let set = days(&["2026-08-01", "2026-08-02", "2026-08-03", "2026-08-12"]);
+        assert_eq!(stats::streaks(&set, today), (1, 3));
+
+        // Empty → (0, 0).
+        let set = days(&[]);
+        assert_eq!(stats::streaks(&set, today), (0, 0));
     }
 
     // AC-4 + AC-5: HTTP-level behaviour including auth and bad ids.
