@@ -111,10 +111,9 @@ cat << 'EOF'
 
 2. Verify:  omp --version && omp -p "say hi"
 
-3. Nibble sandboxes: with this repo's omp support, `nibble sandbox
-   attach <repo> --pi` now runs omp (config knob: [pi] implementation in
-   ~/.nibble/config.toml, or force with --omp). Sandboxes mount both
-   ~/.pi and ~/.omp, so old pi sessions stay resumable.
+3. Nibble sandboxes: `nibble sandbox attach <repo> --omp` runs omp inside
+   the sandbox (`--pi` runs upstream pi). Sandboxes mount both ~/.pi and
+   ~/.omp, so old pi sessions stay resumable from either agent.
 
 Nothing was deleted — your pi config at ~/.pi is untouched.
 EOF

@@ -95,15 +95,13 @@ where
         .filter_map(|e| e.ok())
     {
         let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+        if !crate::session::is_session_file(path) {
             continue;
         }
-        let file = match std::fs::File::open(path) {
-            Ok(f) => f,
-            Err(_) => continue,
+        let Some(reader) = crate::session::open_session_reader(path) else {
+            continue;
         };
-        use std::io::{BufRead, BufReader};
-        let reader = BufReader::new(file);
+        use std::io::BufRead;
 
         let mut session_id: Option<String> = None;
         let mut cwd: Option<String> = None;

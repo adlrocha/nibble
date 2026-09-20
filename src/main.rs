@@ -574,9 +574,9 @@ fn main() -> Result<()> {
                 }
             }
         },
-        Commands::Backup { output } => {
+        Commands::Backup { output, sessions } => {
             let output_path = output.map(PathBuf::from);
-            let path = backup::create_backup(output_path)?;
+            let path = backup::create_backup(output_path, sessions)?;
             println!("Backup created: {}", path.display());
         }
         Commands::Import { path } => {
@@ -1404,7 +1404,7 @@ fn list_pi_sessions_for_cwd_with_home(
         if let Ok(entries) = std::fs::read_dir(&slug_dir) {
             for file in entries.flatten() {
                 let path = file.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                if !crate::session::is_session_file(&path) {
                     continue;
                 }
                 if let Ok(mtime) = file.metadata().and_then(|m| m.modified()) {
@@ -1496,6 +1496,20 @@ fn pick_pi_session(
 /// (`~/.pi/...` / `~/.omp/...`). For omp (`roots = [".omp", ".pi"]`) a stored
 /// `.pi` session also yields its `.omp` twin first so post-migration sessions
 /// win; for upstream pi only `.pi` is tried.
+/// Build the shell command that resumes a pi-family session file.
+///
+/// omp cannot resume gzipped archives by path (`--resume <path>` requires a
+/// plain-text header), but it resolves them fine by session ID — so omp
+/// `.jsonl.gz` archives are resumed by ID instead.
+fn pi_resume_command(install: &str, bin: &str, resume_flag: &str, cp: &std::path::Path) -> String {
+    if bin == "omp" && cp.extension().and_then(|e| e.to_str()) == Some("gz") {
+        let id = crate::session::session_id_from_filename(cp);
+        format!("{install}; {bin} {resume_flag} '{id}'")
+    } else {
+        format!("{install}; {bin} {resume_flag} '{cp}'", cp = cp.display())
+    }
+}
+
 fn pi_session_path_candidates(stored: &str, roots: &[&str]) -> Vec<std::path::PathBuf> {
     let home = dirs::home_dir().unwrap_or_default();
     let stored_path = std::path::Path::new(stored);
@@ -2069,13 +2083,12 @@ pub(crate) fn cmd_sandbox_spawn(
         anyhow::bail!("Podman is not installed. Run ./install.sh to set it up.");
     }
 
-    // Resolve the pi-family implementation for this spawn: --omp forces omp;
-    // --pi uses the configured implementation (default: omp). None = no pi-family
-    // agent was requested.
-    let pi_impl: Option<config::PiImplementation> = if omp {
-        Some(config::PiImplementation::Omp)
+    // Resolve the pi-family implementation for this spawn. --pi and --omp are
+    // explicit and independent; None = no pi-family agent was requested.
+    let pi_impl: Option<PiImplementation> = if omp {
+        Some(PiImplementation::Omp)
     } else if pi {
-        Some(config::load().unwrap_or_default().pi.implementation)
+        Some(PiImplementation::Pi)
     } else {
         None
     };
@@ -2292,10 +2305,28 @@ pub(crate) fn cmd_sandbox_spawn(
         // installer (a self-contained binary — the omp npm package requires bun,
         // which the sandbox image does not ship); upstream pi via npm.
         if let Some(implementation) = pi_impl {
+            // omp stores auth in ~/.omp/agent/agent.db on the host, which is
+            // mounted rw into every sandbox. When it's absent, each sandbox
+            // starts unauthenticated and omp asks for /login again — the exact
+            //per-sandbox setup pain the mount exists to avoid. Warn loudly:
+            // one login (host or inside any sandbox) persists for all future
+            // sandboxes via the mount.
+            if implementation == PiImplementation::Omp {
+                let omp_agent_db = dirs::home_dir()
+                    .map(|h| h.join(".omp").join("agent").join("agent.db"))
+                    .unwrap_or_default();
+                if !omp_agent_db.exists() {
+                    eprintln!("  Auth:      ⚠️  no omp login on host (~/.omp/agent/agent.db missing)");
+                    eprintln!("             Run `omp` → /login once (on the host or inside this");
+                    eprintln!("             sandbox) — ~/.omp is mounted rw, so it persists for");
+                    eprintln!("             every future sandbox. Coming from pi? Run");
+                    eprintln!("             scripts/migrate-pi-to-omp.sh on the host first.");
+                }
+            }
             let pi_cfg = config::load().unwrap_or_default().pi;
             if pi_cfg.install_on_spawn {
                 let core_ok = match implementation {
-                    config::PiImplementation::Omp => {
+                    PiImplementation::Omp => {
                         let status = std::process::Command::new("podman")
                             .args([
                                 "exec",
@@ -2320,7 +2351,7 @@ pub(crate) fn cmd_sandbox_spawn(
                         }
                         matches!(status, Ok(s) if s.success())
                     }
-                    config::PiImplementation::Pi => {
+                    PiImplementation::Pi => {
                         let status = std::process::Command::new("podman")
                             .args([
                                 "exec",
@@ -2353,8 +2384,8 @@ pub(crate) fn cmd_sandbox_spawn(
                 // mounted config dir.
                 if core_ok {
                     let ext_cmd = match implementation {
-                        config::PiImplementation::Omp => "omp",
-                        config::PiImplementation::Pi => "pi",
+                        PiImplementation::Omp => "omp",
+                        PiImplementation::Pi => "pi",
                     };
                     for ext in &pi_cfg.extensions {
                         let ext_status = std::process::Command::new("podman")
@@ -2373,7 +2404,7 @@ pub(crate) fn cmd_sandbox_spawn(
                                 println!("  Tools:     {ext_cmd} extension installed: {ext}")
                             }
                             Ok(_) => {
-                                if implementation == config::PiImplementation::Omp {
+                                if implementation == PiImplementation::Omp {
                                     // `omp install npm:…` shells out to bun, which the
                                     // sandbox image does not ship. After a host-side
                                     // pi→omp migration the extension is already in the
@@ -2569,8 +2600,8 @@ pub(crate) fn cmd_sandbox_spawn(
             "Hermes"
         } else {
             match pi_impl {
-                Some(config::PiImplementation::Omp) => "omp",
-                Some(config::PiImplementation::Pi) => "Pi",
+                Some(PiImplementation::Omp) => "omp",
+                Some(PiImplementation::Pi) => "Pi",
                 None => "Claude",
             }
         };
@@ -2607,8 +2638,8 @@ pub(crate) fn cmd_sandbox_spawn(
         // first attach.
         if let Some(implementation) = pi_impl {
             let dir_name = match implementation {
-                config::PiImplementation::Omp => ".omp",
-                config::PiImplementation::Pi => ".pi",
+                PiImplementation::Omp => ".omp",
+                PiImplementation::Pi => ".pi",
             };
             let cid = info.id.clone();
             let tid = task_id.clone();
@@ -2643,8 +2674,8 @@ pub(crate) fn cmd_sandbox_spawn(
             "Hermes"
         } else {
             match pi_impl {
-                Some(config::PiImplementation::Omp) => "omp",
-                Some(config::PiImplementation::Pi) => "Pi",
+                Some(PiImplementation::Omp) => "omp",
+                Some(PiImplementation::Pi) => "Pi",
                 None => "Claude",
             }
         };
@@ -3194,13 +3225,20 @@ impl std::fmt::Display for SelectedAgent {
     }
 }
 
+/// Which pi-family agent a spawn installs and an attach runs. Selected
+/// explicitly per invocation: `--pi` (upstream pi) or `--omp` (oh-my-pi).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PiImplementation {
+    Omp,
+    Pi,
+}
+
 /// Determine which agent to attach to, and validate flag combinations.
 ///
 /// Rules:
 /// - Plain sandboxes (non-hermes) default to Claude; hermes sandboxes default to hermes.
-/// - `--pi` selects the pi-family agent; the implementation (upstream pi vs omp)
-///   comes from [pi].implementation in ~/.nibble/config.toml (default: omp).
-/// - `--omp` always selects omp regardless of the configured implementation.
+/// - `--pi` selects upstream pi; `--omp` selects omp (oh-my-pi). The two flags
+///   are explicit and independent — no config indirection.
 /// - `--hermes` is only valid on hermes sandboxes (different image/binary).
 /// - Claude-only option (`--btw`) is rejected for other agents.
 /// - At most one agent flag can be specified per invocation.
@@ -3244,10 +3282,7 @@ fn resolve_attach_agent(
         if is_hermes_sandbox {
             anyhow::bail!("--pi is not supported on hermes sandboxes (pi is not installed)");
         }
-        match config::load().unwrap_or_default().pi.implementation {
-            config::PiImplementation::Omp => SelectedAgent::Omp,
-            config::PiImplementation::Pi => SelectedAgent::Pi,
-        }
+        SelectedAgent::Pi
     } else if is_hermes_sandbox {
         SelectedAgent::Hermes
     } else {
@@ -3471,7 +3506,7 @@ fn cmd_sandbox_attach(
                         sesh.agent,
                         cp.display()
                     );
-                    format!("{install}; {bin} {resume_flag} '{cp}'", cp = cp.display())
+                    pi_resume_command(install, bin, resume_flag, &cp)
                 } else {
                     eprintln!(
                         "  Warning:   requested session is for {}, not {bin}",
@@ -3522,7 +3557,7 @@ fn cmd_sandbox_attach(
                         );
                     }
                     let _ = db.update_task(&updated_task);
-                    format!("{install}; {bin} {resume_flag} '{cp}'", cp = cp.display())
+                    pi_resume_command(install, bin, resume_flag, &cp)
                 } else {
                     // No stored mapping (or it vanished): enumerate every session
                     // for this repo across the implementation's config roots
@@ -3566,7 +3601,7 @@ fn cmd_sandbox_attach(
                             );
                         }
                         let _ = db.update_task(&updated_task);
-                        format!("{install}; {bin} {resume_flag} '{cp}'", cp = cp.display())
+                        pi_resume_command(install, bin, resume_flag, &cp)
                     } else if user_chose_fresh {
                         eprintln!("  Session:   starting a fresh {bin} session");
                         format!("{install}; {bin}")
