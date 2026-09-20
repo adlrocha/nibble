@@ -355,6 +355,17 @@ for ext_file in "$REPO_DIR/pi-extensions/"*.ts; do
         cp "$ext_file" "$PI_EXT_DIR/$ext_name"
         ok "pi extension: $ext_name → ~/.pi/agent/extensions/ (copy)"
     fi
+    # omp (oh-my-pi) reads extensions from its own config root; mirror them
+    # there so omp sandboxes get the same nibble integration.
+    OMP_EXT_DIR="$HOME/.omp/agent/extensions"
+    if [ -d "$OMP_EXT_DIR" ] || [ -d "$HOME/.omp" ]; then
+        mkdir -p "$OMP_EXT_DIR"
+        if [ -L "$OMP_EXT_DIR/$ext_name" ]; then
+            rm -f "$OMP_EXT_DIR/$ext_name"
+        fi
+        cp "$ext_file" "$OMP_EXT_DIR/$ext_name"
+        ok "pi extension: $ext_name → ~/.omp/agent/extensions/ (copy)"
+    fi
 done
 if [ ! -d "$HOME/.pi" ]; then
     warn "~/.pi/ not found — extensions staged in ~/.nibble/extensions/ only"

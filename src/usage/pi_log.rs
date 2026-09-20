@@ -64,23 +64,33 @@ pub struct UsageRecord {
     pub reported_cost_usd: f64,
 }
 
-pub fn sessions_root() -> PathBuf {
+/// All pi-family session roots (pi + omp, a fork with an identical layout).
+pub fn sessions_roots() -> Vec<PathBuf> {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home)
-        .join(".pi")
-        .join("agent")
-        .join("sessions")
+    [".pi", ".omp"]
+        .iter()
+        .map(|d| PathBuf::from(&home).join(d).join("agent").join("sessions"))
+        .collect()
 }
 
 pub fn iter_records<F>(mut sink: F) -> Result<()>
 where
     F: FnMut(UsageRecord),
 {
-    let root = sessions_root();
+    for root in sessions_roots() {
+        iter_records_in(&root, &mut sink)?;
+    }
+    Ok(())
+}
+
+fn iter_records_in<F>(root: &std::path::Path, sink: &mut F) -> Result<()>
+where
+    F: FnMut(UsageRecord),
+{
     if !root.exists() {
         return Ok(());
     }
-    for entry in walkdir::WalkDir::new(&root)
+    for entry in walkdir::WalkDir::new(root)
         .into_iter()
         .filter_map(|e| e.ok())
     {

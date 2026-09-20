@@ -28,7 +28,7 @@ pub struct WebConfig {
     pub host: String,
     pub port: u16,
     pub token: Option<String>,
-    pub sessions_root: PathBuf,
+    pub sessions_roots: Vec<PathBuf>,
     pub db_path: PathBuf,
 }
 
@@ -41,7 +41,10 @@ impl Default for WebConfig {
             token: std::env::var("NIBBLE_WEB_TOKEN")
                 .ok()
                 .filter(|t| !t.is_empty()),
-            sessions_root: PathBuf::from(&home).join(".pi/agent/sessions"),
+            sessions_roots: [".pi", ".omp"]
+                .iter()
+                .map(|d| PathBuf::from(&home).join(d).join("agent").join("sessions"))
+                .collect(),
             db_path: PathBuf::from(&home).join(".nibble/tasks.db"),
         }
     }
@@ -65,10 +68,11 @@ struct IndexCache {
 }
 
 impl IndexCache {
-    fn rebuild(&mut self, root: &std::path::Path) {
+    fn rebuild(&mut self, roots: &[PathBuf]) {
         let mut summaries = Vec::new();
         let mut live_paths = std::collections::HashSet::new();
-        for path in sessions::find_session_files(root) {
+        for root in roots {
+            for path in sessions::find_session_files(root) {
             live_paths.insert(path.clone());
             let meta = std::fs::metadata(&path).ok();
             let (mtime, len) = meta
@@ -96,6 +100,7 @@ impl IndexCache {
                     }
                 }
             }
+        }
         }
         self.files.retain(|p, _| live_paths.contains(p));
         // INV-6: keep first occurrence on id collision.
@@ -125,7 +130,7 @@ impl App {
             .map(|t| t.elapsed() > INDEX_TTL)
             .unwrap_or(true);
         if stale {
-            guard.rebuild(&self.cfg.sessions_root);
+            guard.rebuild(&self.cfg.sessions_roots);
         }
         f(&guard)
     }
@@ -341,7 +346,9 @@ fn run(server: Server, cfg: WebConfig) -> Result<()> {
 
     {
         let c = &app.cfg;
-        eprintln!("  sessions: {}", c.sessions_root.display());
+        for root in &c.sessions_roots {
+            eprintln!("  sessions: {}", root.display());
+        }
         eprintln!(
             "  auth: {}",
             if c.token.is_some() {
@@ -561,7 +568,7 @@ mod tests {
             host: "127.0.0.1".into(),
             port: 0,
             token: token.map(str::to_string),
-            sessions_root: root.path().to_path_buf(),
+            sessions_roots: vec![root.path().to_path_buf()],
             db_path: root.path().join("nonexistent.db"),
         };
         std::thread::spawn(move || {
