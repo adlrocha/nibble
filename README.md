@@ -33,6 +33,7 @@ This section lists every feature area in the project. Use it to audit what's wor
 | 19 | **Auto-resume on reboot** | ops | systemd user service (`nibble-resume.service`) restarts containers after host reboot |
 | 20 | **Inject** | ops | `nibble inject <id> <msg>` — send a message directly to any sandbox agent, bypassing Telegram |
 | 21 | **Web session inspector** | dx | `nibble web` — dark-mode browser UI (port 7878) for browsing/searching pi sessions, usage dashboard, conversation viewer; runs as `nibble-web.service`, Tailscale-reachable with token auth. See [docs/web.md](docs/web.md) |
+| 22 | **Session recovery** | core | Eager task→session mapping via extension-reported `session-path`; interactive picker when attach finds multiple sessions for a repo; `session list` shows task links; runbook in [docs/session-recovery.md](docs/session-recovery.md) |
 
 ---
 
