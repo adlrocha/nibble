@@ -88,7 +88,7 @@ fn generate_title(session: &SessionInfo) -> String {
     let first_lines: Vec<&str> = content.lines().take(20).collect();
 
     match session.agent.as_str() {
-        "pi" => extract_pi_title(&first_lines),
+        "pi" | "omp" => extract_pi_title(&first_lines),
         "claude" => extract_claude_title(&first_lines),
         _ => "Untitled session".to_string(),
     }
@@ -269,7 +269,8 @@ pub fn list_all_sessions() -> Result<Vec<SessionInfo>> {
 
 fn list_all_sessions_with_home(home: &std::path::Path) -> Result<Vec<SessionInfo>> {
     let mut sessions = Vec::new();
-    sessions.extend(list_pi_sessions_with_home(home)?);
+    sessions.extend(list_pi_family_sessions_with_home(home, ".pi", "pi")?);
+    sessions.extend(list_pi_family_sessions_with_home(home, ".omp", "omp")?);
     sessions.extend(list_claude_sessions_with_home(home)?);
 
     // Sort by modified time descending (most recent first)
@@ -316,7 +317,7 @@ fn read_session_with_home(id: &str, home: &std::path::Path) -> Result<String> {
         .with_context(|| format!("Failed to read session file: {}", session.path.display()))?;
 
     let formatted = match session.agent.as_str() {
-        "pi" => format_pi_session(&content)?,
+        "pi" | "omp" => format_pi_session(&content)?,
         "claude" => format_claude_session(&content)?,
         _ => content,
     };
@@ -368,9 +369,16 @@ struct PiSessionHeader {
     cwd: String,
 }
 
-fn list_pi_sessions_with_home(home: &std::path::Path) -> Result<Vec<SessionInfo>> {
+/// List sessions for a pi-family agent (`config_dir` = ".pi" or ".omp").
+/// omp (oh-my-pi) is a fork of pi and uses the identical session layout and
+/// JSONL schema under `~/.omp/agent/sessions/`, so one scanner serves both.
+fn list_pi_family_sessions_with_home(
+    home: &std::path::Path,
+    config_dir: &str,
+    agent: &str,
+) -> Result<Vec<SessionInfo>> {
     let mut sessions = Vec::new();
-    let pi_sessions = home.join(".pi").join("agent").join("sessions");
+    let pi_sessions = home.join(config_dir).join("agent").join("sessions");
 
     if !pi_sessions.exists() {
         return Ok(sessions);
@@ -396,7 +404,7 @@ fn list_pi_sessions_with_home(home: &std::path::Path) -> Result<Vec<SessionInfo>
             let (session_id, workspace) = extract_pi_header(&path);
 
             sessions.push(SessionInfo {
-                agent: "pi".to_string(),
+                agent: agent.to_string(),
                 session_id,
                 workspace,
                 path,
@@ -724,22 +732,36 @@ pub fn format_size(bytes: u64) -> String {
     format!("{:.1} {}", size, UNITS[unit_idx])
 }
 
+/// Flags derived from a discovered session's agent.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DerivedAgentFlags {
+    pub hermes: bool,
+    pub pi: bool,
+    pub omp: bool,
+    /// true when the session's agent overrode an explicit flag or was auto-detected.
+    pub overridden: bool,
+}
+
 /// Given explicit agent flags and a discovered session, derive the correct
 /// agent flags to use for attach.
-///
-/// Returns `(hermes, pi, agent_override)` where `agent_override` is
-/// true when the session's agent overrode an explicit flag or was auto-detected.
 pub fn derive_agent_flags_from_session(
     _hermes: bool,
     _pi: bool,
+    _omp: bool,
     session: &SessionInfo,
-) -> (bool, bool, bool) {
-    let (derived_h, derived_pi) = match session.agent.as_str() {
-        "hermes" => (true, false),
-        "pi" => (false, true),
-        _ => (false, false),
+) -> DerivedAgentFlags {
+    let (hermes, pi, omp) = match session.agent.as_str() {
+        "hermes" => (true, false, false),
+        "pi" => (false, true, false),
+        "omp" => (false, false, true),
+        _ => (false, false, false),
     };
-    (derived_h, derived_pi, true)
+    DerivedAgentFlags {
+        hermes,
+        pi,
+        omp,
+        overridden: true,
+    }
 }
 
 /// Format workspace path for display: extract basename or show "—".

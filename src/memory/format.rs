@@ -52,6 +52,7 @@ pub fn agent_short_name(agent: &str) -> &'static str {
     match agent {
         "claude" => "c",
         "pi" => "π",
+        "omp" => "⌥",
         "hermes" => "h",
         "manual" => "✋",
         _ => "?",
