@@ -8,6 +8,9 @@
  *   - tool_call:     records tool inputs (paired with tool_execution_end)
  *   - tool_execution_end: records tool outputs
  *   - session_shutdown: triggers async session summarization
+ *   - session_start:   reports the session file path to nibble (eager
+ *                      task→session mapping so attach never has to guess
+ *                      which session belongs to this task after a reboot)
  *
  * Events are written to ~/.nibble/memory/capture/<project>/<task-id>.jsonl
  * and later processed by `nibble memory summarize <task-id>`.
@@ -54,6 +57,19 @@ const summarize = (taskId: string): void => {
 		});
 	} catch {
 		// Non-fatal: summarization may fail if LLM is down
+	}
+};
+
+const reportSessionPath = (taskId: string, path: string): void => {
+	if (!taskId || !path) return;
+
+	try {
+		execSync(
+			`nibble report session-path '${taskId.replace(/'/g, "'\\''")}' '${path.replace(/'/g, "'\\''")}'`,
+			{ timeout: 5000, stdio: "pipe" },
+		);
+	} catch {
+		// Non-fatal: session-path reporting is best-effort
 	}
 };
 
@@ -129,6 +145,24 @@ export default function (pi: ExtensionAPI) {
 
 		toolInputs.delete(event.toolCallId);
 	});
+
+	// ── session_start: report the session file path to nibble ────────────
+	// Fires on both fresh and resumed sessions (also when the user switches
+	// sessions mid-run via /resume), so the DB mapping always tracks the
+	// session this task is actually in. --btw side sessions have no
+	// AGENT_TASK_ID and correctly no-op here.
+	const reportCurrentSession = (ctx: unknown): void => {
+		const taskId = getTaskId();
+		if (!taskId) return;
+		const file = (ctx as any)?.sessionManager?.getSessionFile?.();
+		if (typeof file === "string" && file) {
+			reportSessionPath(taskId, file);
+		}
+	};
+	pi.on("session_start", async (_event, ctx) => reportCurrentSession(ctx));
+	// Fallback for agents whose session_start fires before the session file
+	// path is known: retry on the first agent turn.
+	pi.on("agent_start", async (_event, ctx) => reportCurrentSession(ctx));
 
 	// ── session_shutdown: trigger summarization ────────────────────────────
 	pi.on("session_shutdown", async (_event, _ctx) => {
