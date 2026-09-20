@@ -34,3 +34,4 @@ walkdir = "2.5"
 tiny_http = { version = "0.12", default-features = false }
 
 [dev-dependencies]
+filetime = "0.2.29"

@@ -198,6 +198,20 @@ pub enum ReportAction {
         /// Agent session ID (Claude UUID)
         session_id: String,
     },
+
+    /// Store the pi-family session file path so the next attach can resume it
+    ///
+    /// Called by the pi/omp nibble-memory extension at session start. This is
+    /// the authoritative task→session mapping: without it, attach falls back
+    /// to guessing the newest session file for the repo, which is ambiguous
+    /// once more than one session exists (main + --btw + injected turns).
+    #[command(name = "session-path")]
+    SessionPath {
+        /// Task ID
+        task_id: String,
+        /// Absolute path to the session JSONL file (container or host path)
+        path: String,
+    },
 }
 
 #[derive(Subcommand)]
