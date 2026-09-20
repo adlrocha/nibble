@@ -102,7 +102,7 @@ pub fn find_session_files(root: &Path) -> Vec<PathBuf> {
         .filter_map(|e| e.ok())
     {
         let p = entry.path();
-        if p.extension().is_some_and(|e| e == "jsonl") {
+        if crate::session::is_session_file(p) {
             out.push(p.to_path_buf());
         }
     }
@@ -147,8 +147,7 @@ fn text_of(content: &Value) -> String {
 /// recognizable session header or no messages at all.
 pub fn summarize_file(path: &Path) -> Option<SessionSummary> {
     let meta = fs::metadata(path).ok()?;
-    let file = fs::File::open(path).ok()?;
-    let reader = BufReader::new(file);
+    let reader = crate::session::open_session_reader(path)?;
 
     let mut id = String::new();
     let mut cwd = String::new();
@@ -322,10 +321,10 @@ pub fn file_matches(path: &Path, title: &str, needle: &str) -> bool {
     if title.to_lowercase().contains(&needle) {
         return true;
     }
-    let Ok(file) = fs::File::open(path) else {
+    let Some(reader) = crate::session::open_session_reader(path) else {
         return false;
     };
-    for line in BufReader::new(file).lines() {
+    for line in reader.lines() {
         let Ok(line) = line else { continue };
         // Cheap pre-filter before paying for JSON parsing.
         if !line.to_lowercase().contains(&needle) {

@@ -79,6 +79,11 @@ pub enum Commands {
         /// Output path for the zip file (defaults to nibble-backup-<timestamp>.zip)
         #[arg(short, long)]
         output: Option<String>,
+        /// Also include agent session transcripts (~/.pi, ~/.omp and ~/.claude
+        /// session dirs). These are kept forever so you can resume any
+        /// conversation after a restore; can make the zip large.
+        #[arg(long)]
+        sessions: bool,
     },
 
     /// Import nibble state from a backup zip file
@@ -245,15 +250,13 @@ pub enum SandboxAction {
         /// Spawns a dedicated Hermes container with gateway support.
         #[arg(long)]
         hermes: bool,
-        /// Use a pi-family coding agent instead of Claude Code.
-        /// The implementation is chosen by [pi].implementation in ~/.nibble/config.toml
-        /// (default: omp). Installs the agent at spawn time, plus any
-        /// [pi].extensions (e.g. pi-dynamic-workflows).
+        /// Use the upstream pi coding agent (@earendil-works/pi-coding-agent)
+        /// instead of Claude Code. Installs pi plus any [pi].extensions
+        /// (e.g. pi-dynamic-workflows) at spawn time.
         #[arg(long, conflicts_with = "omp")]
         pi: bool,
-        /// Use omp (oh-my-pi) coding agent instead of Claude Code.
-        /// Like --pi, but forces the omp implementation regardless of
-        /// [pi].implementation in ~/.nibble/config.toml.
+        /// Use the omp (oh-my-pi) coding agent instead of Claude Code.
+        /// Installs the standalone omp binary plus any [pi].extensions at spawn time.
         #[arg(long)]
         omp: bool,
     },
@@ -282,14 +285,11 @@ pub enum SandboxAction {
         /// Use Hermes Agent instead of Claude Code
         #[arg(long)]
         hermes: bool,
-        /// Use a pi-family coding agent instead of Claude Code.
-        /// The implementation is chosen by [pi].implementation in ~/.nibble/config.toml
-        /// (default: omp).
+        /// Use the upstream pi coding agent (@earendil-works/pi-coding-agent)
+        /// instead of Claude Code.
         #[arg(long, conflicts_with = "omp")]
         pi: bool,
-        /// Use omp (oh-my-pi) coding agent instead of Claude Code.
-        /// Like --pi, but forces the omp implementation regardless of
-        /// [pi].implementation in ~/.nibble/config.toml.
+        /// Use the omp (oh-my-pi) coding agent instead of Claude Code.
         #[arg(long)]
         omp: bool,
         /// Resume a specific session by ID (from `nibble session list`).

@@ -1,0 +1,33 @@
+providers:
+  spark-vllm:
+    baseUrl: http://spark.tailce030d.ts.net:8080/v1
+    api: openai-completions
+    apiKey: dummy
+    compat:
+      supportsDeveloperRole: false
+      supportsReasoningEffort: false
+    models:
+      - id: deepseek-v4-flash-0731-spark
+        name: "DeepSeek V4 Flash (Spark, local)"
+        reasoning: true
+        input:
+          - text
+        contextWindow: 262144
+        maxTokens: 32768
+        cost:
+          input: 0
+          output: 0
+          cacheRead: 0
+          cacheWrite: 0
+      - id: qwen3.8-flash-next
+        name: Qwen3.8-Flash-Next
+        reasoning: true
+        input:
+          - text
+        contextWindow: 262144
+        maxTokens: 32768
+        cost:
+          input: 0
+          output: 0
+          cacheRead: 0
+          cacheWrite: 0

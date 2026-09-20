@@ -7,7 +7,54 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
+use std::io::BufRead;
 use std::path::PathBuf;
+
+/// True for pi-family session transcripts, including omp's gzipped archives
+/// (`.jsonl.gz`, produced by `omp gc --apply` — archived, never deleted).
+pub fn is_session_file(path: &std::path::Path) -> bool {
+    if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+        return true;
+    }
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.ends_with(".jsonl.gz"))
+}
+
+/// Session ID from a transcript filename (`<timestamp>_<id>.jsonl[.gz]`).
+pub fn session_id_from_filename(path: &std::path::Path) -> String {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
+    let stem = name
+        .strip_suffix(".jsonl.gz")
+        .or_else(|| name.strip_suffix(".jsonl"))
+        .unwrap_or(name);
+    stem.split('_').nth(1).unwrap_or(stem).to_string()
+}
+
+/// Open a session transcript for reading, transparently decompressing
+/// `.jsonl.gz` archives.
+pub fn open_session_reader(path: &std::path::Path) -> Option<Box<dyn BufRead>> {
+    let file = fs::File::open(path).ok()?;
+    if path.extension().and_then(|e| e.to_str()) == Some("gz") {
+        Some(Box::new(std::io::BufReader::new(
+            flate2::read::GzDecoder::new(file),
+        )))
+    } else {
+        Some(Box::new(std::io::BufReader::new(file)))
+    }
+}
+
+/// Read an entire session transcript to a string (gz-aware).
+pub fn read_session_text(path: &std::path::Path) -> Option<String> {
+    use std::io::Read;
+    let mut reader = open_session_reader(path)?;
+    let mut s = String::new();
+    reader.read_to_string(&mut s).ok()?;
+    Some(s)
+}
 
 /// Information about a discovered session.
 #[derive(Debug, Clone)]
@@ -83,9 +130,11 @@ pub fn get_session_title(session: &SessionInfo) -> String {
 }
 
 fn generate_title(session: &SessionInfo) -> String {
-    // Try to extract first meaningful user message
-    let content = fs::read_to_string(&session.path).ok().unwrap_or_default();
-    let first_lines: Vec<&str> = content.lines().take(20).collect();
+    // Read the first lines only (gz-aware); transcripts can be many MB.
+    let first_lines: Vec<String> = open_session_reader(&session.path)
+        .map(|r| r.lines().map_while(Result::ok).take(30).collect())
+        .unwrap_or_default();
+    let first_lines: Vec<&str> = first_lines.iter().map(|s| s.as_str()).collect();
 
     match session.agent.as_str() {
         "pi" | "omp" => extract_pi_title(&first_lines),
@@ -95,6 +144,18 @@ fn generate_title(session: &SessionInfo) -> String {
 }
 
 fn extract_pi_title(lines: &[&str]) -> String {
+    // omp/pi write an auto-generated {"type":"title"} record — prefer it.
+    for line in lines {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
+            if val.get("type").and_then(|v| v.as_str()) == Some("title") {
+                if let Some(title) = val.get("title").and_then(|v| v.as_str()) {
+                    if !title.trim().is_empty() {
+                        return truncate_title(title);
+                    }
+                }
+            }
+        }
+    }
     for line in lines {
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
             if val.get("type").and_then(|v| v.as_str()) == Some("message") {
@@ -313,7 +374,7 @@ fn read_session_with_home(id: &str, home: &std::path::Path) -> Result<String> {
     let session = find_session_by_id_with_home(id, home)
         .ok_or_else(|| anyhow::anyhow!("Session not found: {}", id))?;
 
-    let content = fs::read_to_string(&session.path)
+    let content = read_session_text(&session.path)
         .with_context(|| format!("Failed to read session file: {}", session.path.display()))?;
 
     let formatted = match session.agent.as_str() {
@@ -334,7 +395,7 @@ fn read_session_raw_with_home(id: &str, home: &std::path::Path) -> Result<String
     let session = find_session_by_id_with_home(id, home)
         .ok_or_else(|| anyhow::anyhow!("Session not found: {}", id))?;
 
-    fs::read_to_string(&session.path)
+    read_session_text(&session.path)
         .with_context(|| format!("Failed to read session file: {}", session.path.display()))
 }
 
@@ -393,7 +454,7 @@ fn list_pi_family_sessions_with_home(
         for file in fs::read_dir(&hash_dir)? {
             let file = file?;
             let path = file.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            if !is_session_file(&path) {
                 continue;
             }
 
@@ -418,9 +479,11 @@ fn list_pi_family_sessions_with_home(
 }
 
 fn extract_pi_header(path: &PathBuf) -> (String, Option<String>) {
-    if let Ok(content) = fs::read_to_string(path) {
-        if let Some(first) = content.lines().next() {
-            if let Ok(header) = serde_json::from_str::<PiSessionHeader>(first) {
+    // omp writes a {"type":"title"} record before the session header, so scan
+    // the first few lines rather than only the first (gz-aware).
+    if let Some(reader) = open_session_reader(path) {
+        for line in reader.lines().map_while(Result::ok).take(10) {
+            if let Ok(header) = serde_json::from_str::<PiSessionHeader>(&line) {
                 if header.record_type == "session" && !header.cwd.is_empty() {
                     return (header.id, Some(header.cwd));
                 }
@@ -431,12 +494,7 @@ fn extract_pi_header(path: &PathBuf) -> (String, Option<String>) {
     // Pi filenames are like: 2026-05-08T10-01-45-668Z_<uuid>.jsonl
     // The parent directory encodes the cwd as a slug: --workspace-- → /workspace,
     // --home-adlrocha-workspace-personal-nibble-- → /home/adlrocha/workspace/personal/nibble
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("unknown");
-    // Pi filenames: 2026-05-08T10-01-45-668Z_<uuid>.jsonl — take the part after `_`
-    let session_id = stem.split('_').nth(1).unwrap_or(stem).to_string();
+    let session_id = session_id_from_filename(path);
 
     let workspace = path
         .parent()
@@ -821,7 +879,7 @@ pub fn last_assistant_message_for_task(task: &crate::models::Task) -> Option<Str
             if !host_path.exists() {
                 return None;
             }
-            let content = fs::read_to_string(&host_path).ok()?;
+            let content = read_session_text(&host_path)?;
             extract_last_assistant_from_pi_content(&content)
         }
         _ => None,
@@ -1072,5 +1130,80 @@ mod tests {
             r#"{"type":"user","message":{"role":"user","content":"Actually do something useful"},"userType":"external"}"#,
         ];
         assert_eq!(extract_claude_title(&lines), "Actually do something useful");
+    }
+}
+
+#[cfg(test)]
+mod gz_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write_gz(path: &std::path::Path, content: &str) {
+        let f = std::fs::File::create(path).unwrap();
+        let mut enc = flate2::write::GzEncoder::new(f, flate2::Compression::fast());
+        enc.write_all(content.as_bytes()).unwrap();
+        enc.finish().unwrap();
+    }
+
+    #[test]
+    fn is_session_file_accepts_jsonl_and_gz() {
+        assert!(is_session_file(std::path::Path::new("a.jsonl")));
+        assert!(is_session_file(std::path::Path::new("a.jsonl.gz")));
+        assert!(!is_session_file(std::path::Path::new("a.txt")));
+        assert!(!is_session_file(std::path::Path::new("a.gz")));
+    }
+
+    #[test]
+    fn session_id_from_filename_handles_gz() {
+        let p = std::path::Path::new("2026-09-20T10-00-00-000Z_019abcde-1234.jsonl.gz");
+        assert_eq!(session_id_from_filename(p), "019abcde-1234");
+        let p = std::path::Path::new("2026-09-20T10-00-00-000Z_019abcde-1234.jsonl");
+        assert_eq!(session_id_from_filename(p), "019abcde-1234");
+    }
+
+    #[test]
+    fn extract_pi_header_skips_title_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("t.jsonl");
+        std::fs::write(
+            &path,
+            "{\"type\":\"title\",\"v\":1,\"title\":\"My session\"}\n{\"type\":\"session\",\"version\":3,\"id\":\"abc-123\",\"cwd\":\"/nibble\"}\n",
+        )
+        .unwrap();
+        let (id, ws) = extract_pi_header(&path);
+        assert_eq!(id, "abc-123");
+        assert_eq!(ws, Some("/nibble".to_string()));
+    }
+
+    #[test]
+    fn extract_pi_header_reads_gz() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("t.jsonl.gz");
+        write_gz(
+            &path,
+            "{\"type\":\"title\",\"v\":1,\"title\":\"Archived\"}\n{\"type\":\"session\",\"version\":3,\"id\":\"gz-1\",\"cwd\":\"/nibble\"}\n",
+        );
+        let (id, ws) = extract_pi_header(&path);
+        assert_eq!(id, "gz-1");
+        assert_eq!(ws, Some("/nibble".to_string()));
+    }
+
+    #[test]
+    fn extract_pi_title_prefers_title_record() {
+        let lines = vec![
+            r#"{"type":"title","v":1,"title":"Auto-generated title"}"#,
+            r#"{"type":"session","id":"s1","cwd":"/workspace"}"#,
+            r#"{"type":"message","message":{"role":"user","content":[{"type":"text","text":"some user message"}]}}"#,
+        ];
+        assert_eq!(extract_pi_title(&lines), "Auto-generated title");
+    }
+
+    #[test]
+    fn read_session_text_decompresses_gz() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("t.jsonl.gz");
+        write_gz(&path, "{\"type\":\"session\"}\n");
+        let text = read_session_text(&path).unwrap();
+        assert_eq!(text, "{\"type\":\"session\"}\n");
     }
 }

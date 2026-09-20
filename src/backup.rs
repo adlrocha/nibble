@@ -1,7 +1,11 @@
 //! Backup and restore nibble state.
 //!
 //! `nibble backup` creates a zip of `~/.nibble/` plus a manifest.
-//! `nibble import <zip>` restores `~/.nibble/` from a zip.
+//! `nibble backup --sessions` additionally archives agent session transcripts
+//! (~/.pi, ~/.omp, ~/.claude session dirs) so every conversation stays
+//! resumable after a restore.
+//! `nibble import <zip>` restores `~/.nibble/` from a zip (sessions merge back
+//! into the home dir without touching existing ones).
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -24,10 +28,13 @@ pub struct BackupManifest {
     pub hostname: String,
     pub nibble_version: String,
     pub source_dir: String,
+    /// Whether agent session transcripts (~/.pi, ~/.omp, ~/.claude) are included.
+    #[serde(default)]
+    pub includes_sessions: bool,
 }
 
 impl BackupManifest {
-    pub fn new(source_dir: PathBuf) -> Self {
+    pub fn with_sessions(source_dir: PathBuf, includes_sessions: bool) -> Self {
         let hostname = std::process::Command::new("hostname")
             .output()
             .ok()
@@ -46,6 +53,7 @@ impl BackupManifest {
             hostname,
             nibble_version: env!("CARGO_PKG_VERSION").to_string(),
             source_dir: source_dir.to_string_lossy().to_string(),
+            includes_sessions,
         }
     }
 }
@@ -111,7 +119,11 @@ fn clear_dir_contents(dir: &Path) -> Result<()> {
 ///
 /// If `output` is `Some`, use that exact path. Otherwise generate
 /// `nibble-backup-<timestamp>.zip` in the current directory.
-pub fn create_backup(output: Option<PathBuf>) -> Result<PathBuf> {
+///
+/// With `include_sessions`, agent session transcripts (~/.pi/agent/sessions,
+/// ~/.omp/agent/sessions, ~/.claude/projects) are archived too — sessions are
+/// meant to be kept forever so any conversation can be resumed after a restore.
+pub fn create_backup(output: Option<PathBuf>, include_sessions: bool) -> Result<PathBuf> {
     let source = nibble_dir()?;
 
     if !source.exists() {
@@ -141,7 +153,7 @@ pub fn create_backup(output: Option<PathBuf>) -> Result<PathBuf> {
         .unix_permissions(0o755);
 
     // Write manifest first.
-    let manifest = BackupManifest::new(source.clone());
+    let manifest = BackupManifest::with_sessions(source.clone(), include_sessions);
     let manifest_json = serde_json::to_string_pretty(&manifest)?;
     zip.start_file(MANIFEST_NAME, options)?;
     zip.write_all(manifest_json.as_bytes())?;
@@ -149,59 +161,76 @@ pub fn create_backup(output: Option<PathBuf>) -> Result<PathBuf> {
     let mut file_count: usize = 0;
     let mut byte_count: u64 = 0;
 
-    println!("Backing up {} ...", source.display());
-
-    // Walk ~/.nibble and add every file / empty directory.
-    // Use into_iter() so we can skip whole subtrees (e.g. cache/).
-    let mut walker = WalkDir::new(&source).follow_links(false).into_iter();
-    while let Some(entry) = walker.next() {
-        let entry = entry?;
-        let path = entry.path();
-        let rel = path.strip_prefix(&source).with_context(|| {
-            format!(
-                "Failed to strip prefix {} from {}",
-                source.display(),
-                path.display()
-            )
-        })?;
-
-        if should_skip(rel) {
-            if path.is_dir() {
-                walker.skip_current_dir();
+    // Source subtrees: (absolute dir, zip prefix, apply ~/.nibble skip-rules).
+    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Cannot find home directory"))?;
+    let mut sources: Vec<(PathBuf, PathBuf, bool)> =
+        vec![(source.clone(), PathBuf::from(".nibble"), true)];
+    if include_sessions {
+        for rel in [".pi/agent/sessions", ".omp/agent/sessions", ".claude/projects"] {
+            let dir = home.join(rel);
+            if dir.exists() {
+                sources.push((dir, PathBuf::from(rel), false));
+            } else {
+                eprintln!("  (no {} — skipped)", rel);
             }
-            continue;
         }
+    }
 
-        let name_in_zip = Path::new(".nibble").join(rel);
-        let name_str = name_in_zip.to_string_lossy();
+    for (src, zip_prefix, apply_skip) in &sources {
+        println!("Backing up {} ...", src.display());
 
-        if path.is_file() {
-            let meta = entry.metadata()?;
-            let mut perms = options;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                perms = perms.unix_permissions(meta.permissions().mode());
+        // Walk the subtree and add every file / empty directory.
+        // Use into_iter() so we can skip whole subtrees (e.g. cache/).
+        let mut walker = WalkDir::new(src).follow_links(false).into_iter();
+        while let Some(entry) = walker.next() {
+            let entry = entry?;
+            let path = entry.path();
+            let rel = path.strip_prefix(src).with_context(|| {
+                format!(
+                    "Failed to strip prefix {} from {}",
+                    src.display(),
+                    path.display()
+                )
+            })?;
+
+            if *apply_skip && should_skip(rel) {
+                if path.is_dir() {
+                    walker.skip_current_dir();
+                }
+                continue;
             }
-            zip.start_file(&name_str, perms)?;
-            let mut f = fs::File::open(path)?;
-            let mut buf = Vec::new();
-            f.read_to_end(&mut buf)?;
-            zip.write_all(&buf)?;
 
-            file_count += 1;
-            byte_count += buf.len() as u64;
-            eprint!(
-                "  + {} ({} files, {} bytes)\r",
-                name_str, file_count, byte_count
-            );
-        } else if path.is_dir() {
-            // zip directories by adding a trailing-slash entry so empty dirs are preserved.
-            let mut dir_name = name_str.to_string();
-            if !dir_name.ends_with('/') {
-                dir_name.push('/');
+            let name_in_zip = zip_prefix.join(rel);
+            let name_str = name_in_zip.to_string_lossy();
+
+            if path.is_file() {
+                let meta = entry.metadata()?;
+                let mut perms = options;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    perms = perms.unix_permissions(meta.permissions().mode());
+                }
+                zip.start_file(&name_str, perms)?;
+                let mut f = fs::File::open(path)?;
+                let mut buf = Vec::new();
+                f.read_to_end(&mut buf)?;
+                zip.write_all(&buf)?;
+
+                file_count += 1;
+                byte_count += buf.len() as u64;
+                eprint!(
+                    "  + {} ({} files, {} bytes)\r",
+                    name_str, file_count, byte_count
+                );
+            } else if path.is_dir() {
+                // zip directories by adding a trailing-slash entry so empty dirs are preserved.
+                let mut dir_name = name_str.to_string();
+                if !dir_name.ends_with('/') {
+                    dir_name.push('/');
+                }
+                zip.add_directory(&dir_name, dir_options)?;
             }
-            zip.add_directory(&dir_name, dir_options)?;
         }
     }
 
@@ -273,7 +302,13 @@ pub fn import_backup(zip_path: &Path) -> Result<()> {
         fs::create_dir_all(&target)?;
     }
 
-    // Extract files.
+    // Extract files. `.nibble/...` entries restore into ~/.nibble (which was
+    // moved aside above). Session transcripts (.pi/.omp/.claude) are MERGED
+    // into the home dir instead: session files are immutable, so restoring
+    // never deletes or moves existing sessions — every conversation stays
+    // resumable.
+    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Cannot find home directory"))?;
+    let mut session_files: usize = 0;
     for i in 0..archive.len() {
         let mut file = archive.by_index(i)?;
         let outpath = match file.enclosed_name() {
@@ -286,9 +321,15 @@ pub fn import_backup(zip_path: &Path) -> Result<()> {
             continue;
         }
 
-        // Strip the leading ".nibble/" prefix so we extract into ~/.nibble/ directly.
-        let rel = outpath.strip_prefix(".nibble").unwrap_or(&outpath);
-        let dest_path = target.join(rel);
+        let dest_path = if let Ok(rel) = outpath.strip_prefix(".nibble") {
+            // Strip the leading ".nibble/" prefix so we extract into ~/.nibble/ directly.
+            target.join(rel)
+        } else {
+            if !file.name().ends_with('/') {
+                session_files += 1;
+            }
+            home.join(&outpath)
+        };
 
         if file.name().ends_with('/') {
             fs::create_dir_all(&dest_path)?;
@@ -312,6 +353,12 @@ pub fn import_backup(zip_path: &Path) -> Result<()> {
     }
 
     println!("Nibble state restored to: {}", target.display());
+    if session_files > 0 {
+        println!(
+            "Restored {} session transcript(s) into ~/.pi, ~/.omp and ~/.claude (merged — existing sessions kept).",
+            session_files
+        );
+    }
     println!("Run `./install.sh` to reinstall wrappers, hooks and sandbox images if needed.");
     Ok(())
 }

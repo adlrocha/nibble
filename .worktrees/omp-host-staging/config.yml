@@ -1,0 +1,15 @@
+defaultProvider: kimi-coding
+defaultModel: k3
+defaultThinkingLevel: high
+packages:
+  - npm:@quintinshaw/pi-dynamic-workflows
+  - npm:@juicesharp/rpiv-ask-user-question
+modelRoles:
+  default: moonshot/kimi-k3:high
+symbolPreset: nerd
+composer:
+  shape: band
+theme:
+  dark: titanium
+  light: light
+setupVersion: 2

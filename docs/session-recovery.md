@@ -18,7 +18,10 @@ every sandbox, so they survive container stops, host reboots, and crashes:
 wrapped in dashes (e.g. `/nibble` → `--nibble--`).
 
 **Nothing is ever deleted.** `--fresh` renames Claude's current transcript to
-`.jsonl.bak`; pi/omp sessions simply stay on disk next to newer ones.
+`.jsonl.bak`; pi/omp sessions simply stay on disk next to newer ones. omp's
+storage maintenance (`omp gc`) is manual-only (dry-run unless `--apply`) and
+*archives* cold sessions to `.jsonl.gz` instead of deleting them — nibble
+reads those archives transparently, and resumes them by session ID.
 
 ## How nibble knows which session belongs to a sandbox
 
@@ -52,7 +55,8 @@ any other session.
 
    ```bash
    nibble sandbox attach <repo>            # or by task id
-   nibble sandbox attach <repo> --pi       # pi-family agent (omp by default)
+   nibble sandbox attach <repo> --omp      # omp (oh-my-pi) agent
+   nibble sandbox attach <repo> --pi       # upstream pi agent
    ```
 
    Attach resumes the stored session for that task. If there is no stored
@@ -84,6 +88,21 @@ session from before the crash instead of your main conversation.
    ```bash
    nibble sandbox attach <repo> --session <session-id>
    ```
+
+## Backing sessions up
+
+`nibble backup` archives nibble's own state (`~/.nibble`: task DB, memory,
+cron jobs). Add `--sessions` to also archive every agent transcript
+(`~/.pi/agent/sessions`, `~/.omp/agent/sessions`, `~/.claude/projects`) —
+can be large:
+
+```bash
+nibble backup --sessions
+```
+
+`nibble import <zip>` restores `~/.nibble` (moving the current one aside) and
+*merges* session transcripts back into `~/.pi`, `~/.omp` and `~/.claude` —
+session files are immutable, so nothing existing is overwritten or deleted.
 
 ## Inspecting sessions without attaching
 
