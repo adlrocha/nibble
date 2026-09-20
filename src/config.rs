@@ -128,6 +128,25 @@ pub fn resolve_repo_mounts(
     mounts
 }
 
+/// Which pi-family agent `--pi` selects inside sandboxes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PiImplementation {
+    /// oh-my-pi (omp) — fork of pi with IDE tooling wired in. Default.
+    Omp,
+    /// Upstream pi (@earendil-works/pi-coding-agent).
+    Pi,
+}
+
+impl std::fmt::Display for PiImplementation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PiImplementation::Omp => write!(f, "omp"),
+            PiImplementation::Pi => write!(f, "pi"),
+        }
+    }
+}
+
 /// Pi Agent sandbox configuration.
 ///
 /// Controls how the Pi coding agent is installed inside a nibble sandbox.
@@ -141,6 +160,17 @@ pub struct PiConfig {
     /// at spawn time, so they are available like any other extension.
     #[serde(default = "default_pi_extensions")]
     pub extensions: Vec<String>,
+
+    /// Which pi-family implementation `--pi` selects: "omp" (default) or "pi".
+    /// `--omp` on spawn/attach always forces omp regardless of this setting.
+    #[serde(default)]
+    pub implementation: PiImplementation,
+}
+
+impl Default for PiImplementation {
+    fn default() -> Self {
+        PiImplementation::Omp
+    }
 }
 
 fn default_pi_extensions() -> Vec<String> {
@@ -166,6 +196,7 @@ impl Default for PiConfig {
         Self {
             install_on_spawn: default_pi_install_on_spawn(),
             extensions: default_pi_extensions(),
+            implementation: PiImplementation::default(),
         }
     }
 }
@@ -618,6 +649,21 @@ chat_id = "456789"
             assert!(!e.is_empty(), "no empty entries: {ext:?}");
             assert!(!e.starts_with('#'), "no comment entries: {ext:?}");
         }
+    }
+
+    #[test]
+    fn test_pi_implementation_defaults_to_omp() {
+        let config = Config::default();
+        assert_eq!(config.pi.implementation, PiImplementation::Omp);
+        // Missing key in TOML also defaults to omp.
+        let config: Config = toml::from_str("[pi]\ninstall_on_spawn = true\n").unwrap();
+        assert_eq!(config.pi.implementation, PiImplementation::Omp);
+    }
+
+    #[test]
+    fn test_pi_implementation_parse_upstream_pi() {
+        let config: Config = toml::from_str("[pi]\nimplementation = \"pi\"\n").unwrap();
+        assert_eq!(config.pi.implementation, PiImplementation::Pi);
     }
 
     #[test]
