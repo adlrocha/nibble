@@ -445,7 +445,7 @@ fn main() -> Result<()> {
                         group.sessions.retain(|s| {
                             let resolved_repo = match s.agent.as_str() {
                                 "claude" => claude_task_repo.get(&s.session_id).cloned(),
-                                "pi" => pi_task_repo
+                                "pi" | "omp" => pi_task_repo
                                     .get(&s.path.to_string_lossy().to_string())
                                     .cloned(),
                                 _ => None,
@@ -480,7 +480,7 @@ fn main() -> Result<()> {
                         // Resolve workspace: prefer task project_path for sandbox sessions
                         let resolved_ws = match s.agent.as_str() {
                             "claude" => claude_task_repo.get(&s.session_id).cloned(),
-                            "pi" => pi_task_repo
+                            "pi" | "omp" => pi_task_repo
                                 .get(&s.path.to_string_lossy().to_string())
                                 .cloned(),
                             _ => None,
@@ -493,7 +493,7 @@ fn main() -> Result<()> {
                         // Resolve task_id for memory badge lookup
                         let task_id_for_mem = match s.agent.as_str() {
                             "claude" => claude_session_to_task.get(&s.session_id).cloned(),
-                            "pi" => pi_path_to_task
+                            "pi" | "omp" => pi_path_to_task
                                 .get(&s.path.to_string_lossy().to_string())
                                 .cloned(),
                             _ => None,
@@ -630,6 +630,7 @@ fn main() -> Result<()> {
                 factory,
                 hermes,
                 pi,
+                omp,
             } => {
                 let effective_repo_path = if let Some(ref branch_name) = branch {
                     let worktree = create_worktree(std::path::Path::new(&repo_path), branch_name)?;
@@ -650,6 +651,7 @@ fn main() -> Result<()> {
                     factory_enabled,
                     hermes,
                     pi,
+                    omp,
                 )?;
             }
             SandboxAction::List => {
@@ -665,6 +667,7 @@ fn main() -> Result<()> {
                 btw,
                 hermes,
                 pi,
+                omp,
                 session,
                 branch,
             } => {
@@ -717,6 +720,7 @@ fn main() -> Result<()> {
                                 btw,
                                 hermes,
                                 pi,
+                                omp,
                                 session.clone(),
                             )?;
                             return Ok(());
@@ -750,11 +754,12 @@ fn main() -> Result<()> {
                             cfg.factory.enabled,
                             hermes,
                             pi,
+                            omp,
                         )?
                     }
                 };
 
-                cmd_sandbox_attach(&db, task_id, fresh, btw, hermes, pi, session.clone())?;
+                cmd_sandbox_attach(&db, task_id, fresh, btw, hermes, pi, omp, session.clone())?;
             }
             SandboxAction::Kill {
                 container_or_path,
@@ -1229,12 +1234,61 @@ fn backup_session_file(session_id: &str) {
 
 // ── Pi helper functions ────────────────────────────────────────────────────────
 
-/// Ensure `~/.pi/agent/skills` is a symlink pointing to `~/.claude/skills/`.
+/// Mount a pi-family config dir (`~/.pi` or `~/.omp`) into the sandbox.
 ///
-/// Called at spawn time so the AI Factory pipeline skills are available to pi
-/// without duplicating files.  Non-fatal on failure — logs a warning and continues.
-fn ensure_pi_skills_symlink(home_dir: &std::path::Path) {
-    let pi_skills = home_dir.join(".pi").join("agent").join("skills");
+/// Handles the case where `~/<dir>/agent` is a symlink (e.g. into a dotfiles
+/// repo managed with stow): the symlink target is mounted over the agent path
+/// so the container sees the real contents. Creates the standard subdirs
+/// (skills/sessions/extensions) on the host first so rootless podman never
+/// creates root-owned dirs.
+fn mount_agent_config_dir(
+    home_dir: &std::path::Path,
+    dir_name: &str,
+    extra_volumes: &mut Vec<String>,
+) -> Result<()> {
+    let pi_dir = home_dir.join(dir_name);
+    let agent_dir = pi_dir.join("agent");
+
+    if agent_dir.is_symlink() {
+        let resolved = agent_dir
+            .canonicalize()
+            .with_context(|| format!("Failed to resolve ~/{dir_name}/agent symlink"))?;
+        std::fs::create_dir_all(&resolved)
+            .with_context(|| format!("Failed to create resolved ~/{dir_name}/agent target"))?;
+        std::fs::create_dir_all(resolved.join("skills"))
+            .with_context(|| format!("Failed to create ~/{dir_name}/agent/skills"))?;
+        std::fs::create_dir_all(resolved.join("sessions"))
+            .with_context(|| format!("Failed to create ~/{dir_name}/agent/sessions"))?;
+        std::fs::create_dir_all(resolved.join("extensions"))
+            .with_context(|| format!("Failed to create ~/{dir_name}/agent/extensions"))?;
+        extra_volumes.push(format!("{}:/home/node/{dir_name}:rw", pi_dir.display()));
+        extra_volumes.push(format!(
+            "{}:/home/node/{dir_name}/agent:rw",
+            resolved.display()
+        ));
+    } else {
+        if !agent_dir.exists() {
+            std::fs::create_dir_all(&agent_dir)
+                .with_context(|| format!("Failed to create ~/{dir_name}/agent"))?;
+        }
+        std::fs::create_dir_all(agent_dir.join("skills"))
+            .with_context(|| format!("Failed to create ~/{dir_name}/agent/skills"))?;
+        std::fs::create_dir_all(agent_dir.join("sessions"))
+            .with_context(|| format!("Failed to create ~/{dir_name}/agent/sessions"))?;
+        std::fs::create_dir_all(agent_dir.join("extensions"))
+            .with_context(|| format!("Failed to create ~/{dir_name}/agent/extensions"))?;
+        extra_volumes.push(format!("{}:/home/node/{dir_name}:rw", pi_dir.display()));
+    }
+    Ok(())
+}
+
+/// Ensure `~/<dir>/agent/skills` is a symlink pointing to `~/.claude/skills/`.
+///
+/// Called at spawn time so the AI Factory pipeline skills are available to
+/// pi-family agents without duplicating files. Non-fatal on failure — logs a
+/// warning and continues.
+fn ensure_agent_skills_symlink(home_dir: &std::path::Path, dir_name: &str) {
+    let pi_skills = home_dir.join(dir_name).join("agent").join("skills");
     let claude_skills = home_dir.join(".claude").join("skills");
 
     // Already a symlink — no-op
@@ -1261,18 +1315,19 @@ fn ensure_pi_skills_symlink(home_dir: &std::path::Path) {
     }
 }
 
-/// Discover the most recent Pi session file inside a specific running container.
+/// Discover the most recent pi-family session file inside a specific running
+/// container. `dir_name` is the config root (".pi" or ".omp").
 ///
-/// This is more reliable than `find_pi_session_for_cwd` when multiple Pi sandboxes
-/// are active, because it looks at the session files *inside the container* rather
-/// than scanning the host's ~/.pi which is shared across all sandboxes.
+/// This is more reliable than `find_pi_session_for_cwd` when multiple sandboxes
+/// are active, because it looks at the session files *inside the container*
+/// rather than scanning the host's config dir which is shared across sandboxes.
 fn discover_pi_session_in_container(
     container_id: &str,
     pi_slug: &str,
+    dir_name: &str,
 ) -> Option<std::path::PathBuf> {
     let cmd = format!(
-        "ls -t /home/node/.pi/agent/sessions/{}/{{*.jsonl,**/*.jsonl}} 2>/dev/null | head -1",
-        pi_slug
+        "ls -t /home/node/{dir_name}/agent/sessions/{pi_slug}/{{*.jsonl,**/*.jsonl}} 2>/dev/null | head -1",
     );
     let output = std::process::Command::new("podman")
         .args(["exec", container_id, "sh", "-c", &cmd])
@@ -1307,10 +1362,10 @@ fn discover_pi_session_in_container(
 ///
 /// Falls back to the legacy `--workspace--` directory so old sessions are still
 /// discoverable.
-fn find_pi_session_for_cwd(container_dir: &str) -> Option<std::path::PathBuf> {
+fn find_pi_session_for_cwd(container_dir: &str, dir_name: &str) -> Option<std::path::PathBuf> {
     let home = dirs::home_dir()?;
     let slug = pi_session_dir_name(container_dir);
-    let sessions_dir = home.join(".pi").join("agent").join("sessions");
+    let sessions_dir = home.join(dir_name).join("agent").join("sessions");
 
     // Helper: find newest .jsonl in a specific slug directory.
     let find_newest = |slug_name: &str| -> Option<(std::path::PathBuf, std::time::SystemTime)> {
@@ -1340,6 +1395,44 @@ fn find_pi_session_for_cwd(container_dir: &str) -> Option<std::path::PathBuf> {
 }
 
 // ── Hermes command handlers ──────────────────────────────────────────────────
+
+/// Expand a stored pi-family session path into candidate container paths,
+/// ordered by the implementation's config roots.
+///
+/// The stored path may be a container path (`/home/node/...`) or a host path
+/// (`~/.pi/...` / `~/.omp/...`). For omp (`roots = [".omp", ".pi"]`) a stored
+/// `.pi` session also yields its `.omp` twin first so post-migration sessions
+/// win; for upstream pi only `.pi` is tried.
+fn pi_session_path_candidates(stored: &str, roots: &[&str]) -> Vec<std::path::PathBuf> {
+    let home = dirs::home_dir().unwrap_or_default();
+    let stored_path = std::path::Path::new(stored);
+    // Normalize to a path relative to the config home (as seen in the container).
+    let rel: &std::path::Path = if let Ok(r) = stored_path.strip_prefix("/home/node/") {
+        r
+    } else if let Ok(r) = stored_path.strip_prefix(&home) {
+        r
+    } else {
+        return vec![stored_path.to_path_buf()];
+    };
+    let first = rel.components().next().and_then(|c| match c {
+        std::path::Component::Normal(s) => s.to_str().map(|s| s.to_string()),
+        _ => None,
+    });
+    let container_home = std::path::Path::new("/home/node");
+    match first.as_deref() {
+        Some(".pi") | Some(".omp") => roots
+            .iter()
+            .map(|root| {
+                container_home.join(root).join(
+                    rel.components()
+                        .skip(1)
+                        .collect::<std::path::PathBuf>(),
+                )
+            })
+            .collect(),
+        _ => vec![container_home.join(rel)],
+    }
+}
 
 /// Sentinel repo_path for the hermes sandbox.
 const HERMES_REPO_PATH: &str = "__hermes__";
@@ -1388,6 +1481,14 @@ fn cmd_hermes_spawn_internal(db: &Database) -> Result<String> {
         "CLAUDE_CONFIG_DIR",
         "KIMI_API_KEY",
         "ZAI_API_KEY",
+        // Additional providers understood by omp (oh-my-pi); harmless for
+        // other agents since they are only set when present on the host.
+        "GEMINI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "XAI_API_KEY",
+        "MISTRAL_API_KEY",
+        "GROQ_API_KEY",
+        "DEEPSEEK_API_KEY",
     ] {
         if let Ok(val) = std::env::var(key) {
             env_vars.insert(key.to_string(), val);
@@ -1863,6 +1964,7 @@ pub(crate) fn cmd_sandbox_spawn(
     factory_enabled: bool,
     hermes: bool,
     pi: bool,
+    omp: bool,
 ) -> Result<String> {
     let repo = PathBuf::from(&repo_path);
     if !repo.exists() {
@@ -1874,6 +1976,17 @@ pub(crate) fn cmd_sandbox_spawn(
         anyhow::bail!("Podman is not installed. Run ./install.sh to set it up.");
     }
 
+    // Resolve the pi-family implementation for this spawn: --omp forces omp;
+    // --pi uses the configured implementation (default: omp). None = no pi-family
+    // agent was requested.
+    let pi_impl: Option<config::PiImplementation> = if omp {
+        Some(config::PiImplementation::Omp)
+    } else if pi {
+        Some(config::load().unwrap_or_default().pi.implementation)
+    } else {
+        None
+    };
+    let pi_family = pi_impl.is_some();
     // Check if a sandbox already exists for this repo and re-use it.
     let abs_repo_path_early = repo
         .canonicalize()
@@ -1901,6 +2014,7 @@ pub(crate) fn cmd_sandbox_spawn(
                         false,
                         hermes,
                         pi,
+                        omp,
                         None,
                     )?;
                 }
@@ -1927,7 +2041,7 @@ pub(crate) fn cmd_sandbox_spawn(
                             eprintln!("Attach with:");
                             eprintln!("  nibble sandbox attach {}", tid);
                         } else {
-                            cmd_sandbox_attach(db, tid.clone(), fresh, false, hermes, pi, None)?;
+                            cmd_sandbox_attach(db, tid.clone(), fresh, false, hermes, pi, omp, None)?;
                         }
                         return Ok(tid.clone());
                     }
@@ -1956,6 +2070,14 @@ pub(crate) fn cmd_sandbox_spawn(
         "CLAUDE_CONFIG_DIR",
         "KIMI_API_KEY",
         "ZAI_API_KEY",
+        // Additional providers understood by omp (oh-my-pi); harmless for
+        // other agents since they are only set when present on the host.
+        "GEMINI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "XAI_API_KEY",
+        "MISTRAL_API_KEY",
+        "GROQ_API_KEY",
+        "DEEPSEEK_API_KEY",
     ] {
         if let Ok(val) = std::env::var(key) {
             env_vars.insert(key.to_string(), val);
@@ -2022,42 +2144,15 @@ pub(crate) fn cmd_sandbox_spawn(
         vec![]
     };
 
-    // Mount ~/.pi config dir (always — skills/extensions/sessions are needed
-    // regardless of the agent type; sandboxes created without --pi would
-    // otherwise miss the .pi mount and Pi sessions would have no config).
+    // Mount pi-family config dirs (always — skills/extensions/sessions are
+    // needed regardless of the agent type; sandboxes created without --pi/--omp
+    // would otherwise miss the mounts and pi/omp sessions would have no config).
     {
         let home_dir = dirs::home_dir().context("Failed to get home directory")?;
-        let pi_dir = home_dir.join(".pi");
-        let agent_dir = pi_dir.join("agent");
-
-        if agent_dir.is_symlink() {
-            let resolved = agent_dir
-                .canonicalize()
-                .with_context(|| "Failed to resolve ~/.pi/agent symlink".to_string())?;
-            std::fs::create_dir_all(&resolved)
-                .with_context(|| "Failed to create resolved ~/.pi/agent target")?;
-            std::fs::create_dir_all(resolved.join("skills"))
-                .with_context(|| "Failed to create ~/.pi/agent/skills")?;
-            std::fs::create_dir_all(resolved.join("sessions"))
-                .with_context(|| "Failed to create ~/.pi/agent/sessions")?;
-            std::fs::create_dir_all(resolved.join("extensions"))
-                .with_context(|| "Failed to create ~/.pi/agent/extensions")?;
-            extra_volumes.push(format!("{}:/home/node/.pi:rw", pi_dir.display()));
-            extra_volumes.push(format!("{}:/home/node/.pi/agent:rw", resolved.display()));
-        } else {
-            if !agent_dir.exists() {
-                std::fs::create_dir_all(&agent_dir)
-                    .with_context(|| "Failed to create ~/.pi/agent")?;
-            }
-            std::fs::create_dir_all(agent_dir.join("skills"))
-                .with_context(|| "Failed to create ~/.pi/agent/skills")?;
-            std::fs::create_dir_all(agent_dir.join("sessions"))
-                .with_context(|| "Failed to create ~/.pi/agent/sessions")?;
-            std::fs::create_dir_all(agent_dir.join("extensions"))
-                .with_context(|| "Failed to create ~/.pi/agent/extensions")?;
-            extra_volumes.push(format!("{}:/home/node/.pi:rw", pi_dir.display()));
+        for dir_name in [".pi", ".omp"] {
+            mount_agent_config_dir(&home_dir, dir_name, &mut extra_volumes)?;
+            ensure_agent_skills_symlink(&home_dir, dir_name);
         }
-        ensure_pi_skills_symlink(&home_dir);
     }
 
     let config = SandboxConfig {
@@ -2098,38 +2193,76 @@ pub(crate) fn cmd_sandbox_spawn(
         .unwrap_or_else(|| repo_path.clone());
 
     // Post-spawn setup (skip for Hermes)
-    // Pi-specific setup: install pi via npm, run setup.sh, inject AGENTS.md
+    // Pi-family setup: install the agent, run setup.sh, inject AGENTS.md
     if !hermes {
-        // Pi install: npm install @earendil-works/pi-coding-agent (non-fatal)
-        if pi {
+        // Pi-family install (non-fatal). omp is installed via its standalone
+        // installer (a self-contained binary — the omp npm package requires bun,
+        // which the sandbox image does not ship); upstream pi via npm.
+        if let Some(implementation) = pi_impl {
             let pi_cfg = config::load().unwrap_or_default().pi;
             if pi_cfg.install_on_spawn {
-                let status = std::process::Command::new("podman")
-                    .args([
-                        "exec",
-                        &info.id,
-                        "sudo",
-                        "npm",
-                        "install",
-                        "-g",
-                        "@earendil-works/pi-coding-agent",
-                    ])
-                    .status();
-                let pi_core_ok = matches!(status, Ok(s) if s.success());
-                match &status {
-                    Ok(s) if s.success() => {
-                        println!("  Tools:     @earendil-works/pi-coding-agent installed")
+                let core_ok = match implementation {
+                    config::PiImplementation::Omp => {
+                        let status = std::process::Command::new("podman")
+                            .args([
+                                "exec",
+                                "--user",
+                                "node",
+                                &info.id,
+                                "/bin/bash",
+                                "-lc",
+                                "command -v omp >/dev/null 2>&1 || curl -fsSL https://omp.sh/install | sh",
+                            ])
+                            .status();
+                        match &status {
+                            Ok(s) if s.success() => {
+                                println!("  Tools:     omp (oh-my-pi) installed")
+                            }
+                            Ok(_) => eprintln!(
+                                "  Tools:     ⚠️  omp installer exited non-zero (install manually inside)"
+                            ),
+                            Err(e) => {
+                                eprintln!("  Tools:     ⚠️  omp install failed to run: {e}")
+                            }
+                        }
+                        matches!(status, Ok(s) if s.success())
                     }
-                    Ok(_) => eprintln!(
-                        "  Tools:     ⚠️  pi npm install exited non-zero (install manually inside)"
-                    ),
-                    Err(e) => eprintln!("  Tools:     ⚠️  pi npm install failed to run: {e}"),
-                }
+                    config::PiImplementation::Pi => {
+                        let status = std::process::Command::new("podman")
+                            .args([
+                                "exec",
+                                &info.id,
+                                "sudo",
+                                "npm",
+                                "install",
+                                "-g",
+                                "@earendil-works/pi-coding-agent",
+                            ])
+                            .status();
+                        match &status {
+                            Ok(s) if s.success() => {
+                                println!("  Tools:     @earendil-works/pi-coding-agent installed")
+                            }
+                            Ok(_) => eprintln!(
+                                "  Tools:     ⚠️  pi npm install exited non-zero (install manually inside)"
+                            ),
+                            Err(e) => {
+                                eprintln!("  Tools:     ⚠️  pi npm install failed to run: {e}")
+                            }
+                        }
+                        matches!(status, Ok(s) if s.success())
+                    }
+                };
 
                 // Install configured pi extensions (e.g. pi-dynamic-workflows) so
-                // they are available in every Pi sandbox like any other extension.
-                // Non-fatal — runs as the `node` user that owns ~/.pi.
-                if pi_core_ok {
+                // they are available in every pi-family sandbox like any other
+                // extension. Non-fatal — runs as the `node` user that owns the
+                // mounted config dir.
+                if core_ok {
+                    let ext_cmd = match implementation {
+                        config::PiImplementation::Omp => "omp",
+                        config::PiImplementation::Pi => "pi",
+                    };
                     for ext in &pi_cfg.extensions {
                         let ext_status = std::process::Command::new("podman")
                             .args([
@@ -2139,18 +2272,26 @@ pub(crate) fn cmd_sandbox_spawn(
                                 &info.id,
                                 "/bin/bash",
                                 "-lc",
-                                &format!("pi install {ext}"),
+                                &format!("{ext_cmd} install {ext}"),
                             ])
                             .status();
                         match ext_status {
                             Ok(s) if s.success() => {
-                                println!("  Tools:     pi extension installed: {ext}")
+                                println!("  Tools:     {ext_cmd} extension installed: {ext}")
                             }
                             Ok(_) => {
-                                eprintln!("  Tools:     ⚠️  pi install {ext} exited non-zero")
+                                if implementation == config::PiImplementation::Omp {
+                                    // `omp install npm:…` shells out to bun, which the
+                                    // sandbox image does not ship. After a host-side
+                                    // pi→omp migration the extension is already in the
+                                    // mounted ~/.omp/agent/extensions, so this is benign.
+                                    eprintln!("  Tools:     ⚠️  omp install {ext} exited non-zero (needs bun in the sandbox; extensions already in ~/.omp/agent/extensions on the host are available via the mount)");
+                                } else {
+                                    eprintln!("  Tools:     ⚠️  {ext_cmd} install {ext} exited non-zero");
+                                }
                             }
                             Err(e) => eprintln!(
-                                "  Tools:     ⚠️  pi install {ext} failed to run: {e}"
+                                "  Tools:     ⚠️  {ext_cmd} install {ext} failed to run: {e}"
                             ),
                         }
                     }
@@ -2253,7 +2394,7 @@ pub(crate) fn cmd_sandbox_spawn(
 
     let agent_type = if hermes {
         AgentType::Hermes
-    } else if pi {
+    } else if pi_family {
         AgentType::Pi
     } else {
         AgentType::ClaudeCode
@@ -2333,14 +2474,18 @@ pub(crate) fn cmd_sandbox_spawn(
     if no_attach {
         let agent_name = if hermes {
             "Hermes"
-        } else if pi {
-            "Pi"
         } else {
-            "Claude"
+            match pi_impl {
+                Some(config::PiImplementation::Omp) => "omp",
+                Some(config::PiImplementation::Pi) => "Pi",
+                None => "Claude",
+            }
         };
         let agent_flag = if hermes {
             " --hermes"
-        } else if pi {
+        } else if omp {
+            " --omp"
+        } else if pi_family {
             " --pi"
         } else {
             ""
@@ -2364,17 +2509,21 @@ pub(crate) fn cmd_sandbox_spawn(
         println!("After a system reboot, restart stopped containers with:");
         println!("  nibble sandbox resume --all");
 
-        // For Pi sandboxes spawned without attach, run a background discovery so
+        // For pi-family sandboxes spawned without attach, run a background discovery so
         // the session is linked for `nibble session list --sandbox` even before the
         // first attach.
-        if pi {
+        if let Some(implementation) = pi_impl {
+            let dir_name = match implementation {
+                config::PiImplementation::Omp => ".omp",
+                config::PiImplementation::Pi => ".pi",
+            };
             let cid = info.id.clone();
             let tid = task_id.clone();
             let db_path = db::default_db_path();
             let pi_slug = pi_session_dir_name(&container_working_dir(&repo));
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_secs(5));
-                if let Some(host_path) = discover_pi_session_in_container(&cid, &pi_slug) {
+                if let Some(host_path) = discover_pi_session_in_container(&cid, &pi_slug, dir_name) {
                     let home = dirs::home_dir().unwrap_or_default();
                     let cp = if host_path.starts_with(&home) {
                         std::path::PathBuf::from("/home/node")
@@ -2399,10 +2548,12 @@ pub(crate) fn cmd_sandbox_spawn(
     } else {
         let agent_label = if hermes {
             "Hermes"
-        } else if pi {
-            "Pi"
         } else {
-            "Claude"
+            match pi_impl {
+                Some(config::PiImplementation::Omp) => "omp",
+                Some(config::PiImplementation::Pi) => "Pi",
+                None => "Claude",
+            }
         };
         println!(
             "Attaching to {} session (exit to detach — container keeps running)…",
@@ -2413,7 +2564,7 @@ pub(crate) fn cmd_sandbox_spawn(
             short_id, abs_repo_path
         );
         println!();
-        cmd_sandbox_attach(db, task_id.clone(), fresh, false, hermes, pi, None)?;
+        cmd_sandbox_attach(db, task_id.clone(), fresh, false, hermes, pi, omp, None)?;
     }
 
     Ok(task_id)
@@ -2935,6 +3086,7 @@ fn resolve_cron_id(db: &Database, id_or_label: &str) -> Result<i64> {
 enum SelectedAgent {
     Claude,
     Pi,
+    Omp,
     Hermes,
 }
 
@@ -2943,6 +3095,7 @@ impl std::fmt::Display for SelectedAgent {
         match self {
             SelectedAgent::Claude => write!(f, "Claude Code"),
             SelectedAgent::Pi => write!(f, "pi"),
+            SelectedAgent::Omp => write!(f, "omp"),
             SelectedAgent::Hermes => write!(f, "hermes"),
         }
     }
@@ -2952,7 +3105,9 @@ impl std::fmt::Display for SelectedAgent {
 ///
 /// Rules:
 /// - Plain sandboxes (non-hermes) default to Claude; hermes sandboxes default to hermes.
-/// - Any agent can be explicitly selected with `--pi` or `--hermes`.
+/// - `--pi` selects the pi-family agent; the implementation (upstream pi vs omp)
+///   comes from [pi].implementation in ~/.nibble/config.toml (default: omp).
+/// - `--omp` always selects omp regardless of the configured implementation.
 /// - `--hermes` is only valid on hermes sandboxes (different image/binary).
 /// - Claude-only option (`--btw`) is rejected for other agents.
 /// - At most one agent flag can be specified per invocation.
@@ -2960,9 +3115,10 @@ fn resolve_attach_agent(
     stored_type: &AgentType,
     hermes: bool,
     pi: bool,
+    omp: bool,
     btw: bool,
 ) -> Result<SelectedAgent> {
-    let explicit_count = [hermes, pi].iter().filter(|&&f| f).count();
+    let explicit_count = [hermes, pi, omp].iter().filter(|&&f| f).count();
     if explicit_count > 1 {
         let mut flags = Vec::new();
         if hermes {
@@ -2970,6 +3126,9 @@ fn resolve_attach_agent(
         }
         if pi {
             flags.push("--pi");
+        }
+        if omp {
+            flags.push("--omp");
         }
         anyhow::bail!("{} are mutually exclusive", flags.join(" and "));
     }
@@ -2983,20 +3142,32 @@ fn resolve_attach_agent(
             );
         }
         SelectedAgent::Hermes
+    } else if omp {
+        if is_hermes_sandbox {
+            anyhow::bail!("--omp is not supported on hermes sandboxes (omp is not installed)");
+        }
+        SelectedAgent::Omp
     } else if pi {
         if is_hermes_sandbox {
             anyhow::bail!("--pi is not supported on hermes sandboxes (pi is not installed)");
         }
-        SelectedAgent::Pi
+        match config::load().unwrap_or_default().pi.implementation {
+            config::PiImplementation::Omp => SelectedAgent::Omp,
+            config::PiImplementation::Pi => SelectedAgent::Pi,
+        }
     } else if is_hermes_sandbox {
         SelectedAgent::Hermes
     } else {
         SelectedAgent::Claude
     };
 
-    if btw && agent != SelectedAgent::Claude && agent != SelectedAgent::Pi {
+    if btw
+        && agent != SelectedAgent::Claude
+        && agent != SelectedAgent::Pi
+        && agent != SelectedAgent::Omp
+    {
         anyhow::bail!(
-            "--btw is not supported with {} (side sessions require Claude Code or pi)",
+            "--btw is not supported with {} (side sessions require Claude Code or a pi-family agent)",
             agent
         );
     }
@@ -3069,6 +3240,7 @@ fn cmd_sandbox_attach(
     btw: bool,
     hermes: bool,
     pi: bool,
+    omp: bool,
     session_id: Option<String>,
 ) -> Result<()> {
     let task = db
@@ -3110,10 +3282,9 @@ fn cmd_sandbox_attach(
     // Auto-derive agent flags from the requested session when the user didn't
     // explicitly specify an agent. If they did specify one but it conflicts,
     // warn and let the session's agent win.
-    let (hermes, pi, agent_override) = if let Some(ref sesh) = override_session {
-        let (h, pi_flag, overridden) =
-            crate::session::derive_agent_flags_from_session(hermes, pi, sesh);
-        if [hermes, pi].iter().filter(|&&f| f).count() > 0 {
+    let (hermes, pi, omp, agent_override) = if let Some(ref sesh) = override_session {
+        let derived = crate::session::derive_agent_flags_from_session(hermes, pi, omp, sesh);
+        if [hermes, pi, omp].iter().filter(|&&f| f).count() > 0 {
             eprintln!(
                 "  Session:   {} session {} — overriding explicit agent flag",
                 sesh.agent,
@@ -3126,12 +3297,12 @@ fn cmd_sandbox_attach(
                 &sesh.session_id[..sesh.session_id.len().min(8)]
             );
         }
-        (h, pi_flag, overridden)
+        (derived.hermes, derived.pi, derived.omp, derived.overridden)
     } else {
-        (hermes, pi, false)
+        (hermes, pi, omp, false)
     };
 
-    let agent = resolve_attach_agent(&task.agent_type, hermes, pi, btw)?;
+    let agent = resolve_attach_agent(&task.agent_type, hermes, pi, omp, btw)?;
 
     // Resolve the per-agent session IDs stored for this task.
     // Each agent writes its own field so they never clobber each other.
@@ -3174,16 +3345,26 @@ fn cmd_sandbox_attach(
                 "hermes --continue".to_string()
             }
         }
-        SelectedAgent::Pi => {
-            let pi_install =
-                "command -v pi >/dev/null 2>&1 || sudo npm install -g @earendil-works/pi-coding-agent";
+        SelectedAgent::Pi | SelectedAgent::Omp => {
+            let is_omp = agent == SelectedAgent::Omp;
+            let bin = if is_omp { "omp" } else { "pi" };
+            let install = if is_omp {
+                "command -v omp >/dev/null 2>&1 || curl -fsSL https://omp.sh/install | sh"
+            } else {
+                "command -v pi >/dev/null 2>&1 || sudo npm install -g @earendil-works/pi-coding-agent"
+            };
+            // omp is a fork of pi with an identical session format. `omp --resume`
+            // accepts a session ID or file path, so ~/.pi sessions (also mounted)
+            // stay resumable for continuity after migrating from pi to omp.
+            let resume_flag = if is_omp { "--resume" } else { "--session" };
+            let roots: &[&str] = if is_omp { &[".omp", ".pi"] } else { &[".pi"] };
             if fresh || btw {
-                // Plain `pi` always starts a brand-new session. Previous sessions are
+                // Plain invocation always starts a brand-new session. Previous sessions are
                 // never deleted — they stay on disk and remain resumable via --session.
-                format!("{pi_install}; pi")
+                format!("{install}; {bin}")
             } else if let Some(ref sesh) = override_session {
                 // --session override: look up the session path from the session ID
-                if sesh.agent == "pi" {
+                if sesh.agent == "pi" || sesh.agent == "omp" {
                     let host_path = sesh.path.clone();
                     let home = dirs::home_dir().unwrap_or_default();
                     let cp = if host_path.starts_with(&home) {
@@ -3193,51 +3374,53 @@ fn cmd_sandbox_attach(
                         host_path
                     };
                     eprintln!(
-                        "  Session:   resuming pi session {} (override)",
+                        "  Session:   resuming {} session {} (override)",
+                        sesh.agent,
                         cp.display()
                     );
-                    format!("{pi_install}; pi --session '{cp}'", cp = cp.display())
+                    format!("{install}; {bin} {resume_flag} '{cp}'", cp = cp.display())
                 } else {
                     eprintln!(
-                        "  Warning:   requested session is for {}, not pi",
+                        "  Warning:   requested session is for {}, not {bin}",
                         sesh.agent
                     );
-                    format!("{pi_install}; pi")
+                    format!("{install}; {bin}")
                 }
             } else {
                 // Prefer a stored session path from a previous attach, otherwise discover
                 // the most recent session inside this specific container.
                 // Using container-specific discovery avoids grabbing a session from a
-                // different sandbox when multiple Pi sandboxes are active.
+                // different sandbox when multiple pi-family sandboxes are active.
                 let stored_path = task
                     .context
                     .as_ref()
                     .and_then(|c| c.extra.get("pi_session_path").and_then(|v| v.as_str()));
 
-                let maybe_host_path = if let Some(path_str) = stored_path {
-                    let cp = std::path::PathBuf::from(path_str);
-                    // The stored path may be a container path (/home/node/...) or a host path.
-                    // Always convert to host path before calling .exists().
-                    let home = dirs::home_dir().unwrap_or_default();
+                // Candidate container paths for the stored session, ordered by the
+                // implementation's config roots (omp prefers its ~/.omp twin of a
+                // stored ~/.pi session, falling back to the original path).
+                let candidates: Vec<std::path::PathBuf> = stored_path
+                    .map(|p| pi_session_path_candidates(p, roots))
+                    .unwrap_or_default();
+
+                let home = dirs::home_dir().unwrap_or_default();
+                let maybe_cp = candidates.into_iter().find(|cp| {
                     let host_path = if cp.starts_with("/home/node/") {
                         home.join(cp.strip_prefix("/home/node/").unwrap_or(cp.as_path()))
                     } else {
                         cp.clone()
                     };
-                    if host_path.exists() {
-                        Some((host_path, cp))
-                    } else {
-                        eprintln!("  Session:   stored pi session gone, re-discovering...");
-                        None
-                    }
-                } else {
-                    None
-                };
+                    host_path.exists()
+                });
 
-                let pi_cmd = if let Some((_host_path, cp)) = maybe_host_path {
+                if stored_path.is_some() && maybe_cp.is_none() {
+                    eprintln!("  Session:   stored {bin} session gone, re-discovering...");
+                }
+
+                let pi_cmd = if let Some(cp) = maybe_cp {
                     // Stored path exists — use it, but still refresh the DB record
                     // so the link survives if the user switched sessions.
-                    eprintln!("  Session:   resuming stored pi session {}", cp.display());
+                    eprintln!("  Session:   resuming stored {bin} session {}", cp.display());
                     let mut updated_task = task.clone();
                     if let Some(ref mut ctx) = updated_task.context {
                         ctx.extra.insert(
@@ -3246,30 +3429,33 @@ fn cmd_sandbox_attach(
                         );
                     }
                     let _ = db.update_task(&updated_task);
-                    format!("{pi_install}; pi --session '{cp}'", cp = cp.display())
+                    format!("{install}; {bin} {resume_flag} '{cp}'", cp = cp.display())
                 } else {
-                    // Try container-specific discovery first, then fall back to global scan
+                    // Try container-specific discovery first, then fall back to a host
+                    // scan — walking the implementation's config roots in order
+                    // (omp: ~/.omp first, then ~/.pi for pre-migration sessions).
                     let cid = task.container_id.as_deref().unwrap_or("");
                     let pi_slug = pi_session_dir_name(&container_dir);
-                    let discovered = if !cid.is_empty() {
-                        discover_pi_session_in_container(cid, &pi_slug)
-                    } else {
-                        None
-                    };
-                    let host_path = if let Some(host_path) = discovered {
-                        Some(host_path)
-                    } else {
-                        find_pi_session_for_cwd(&container_dir)
-                    };
+                    let mut host_path = None;
+                    for root in roots {
+                        if !cid.is_empty() {
+                            host_path = discover_pi_session_in_container(cid, &pi_slug, root);
+                        }
+                        if host_path.is_none() {
+                            host_path = find_pi_session_for_cwd(&container_dir, root);
+                        }
+                        if host_path.is_some() {
+                            break;
+                        }
+                    }
                     if let Some(host_path) = host_path {
-                        let home = dirs::home_dir().unwrap_or_default();
                         let cp = if host_path.starts_with(&home) {
                             std::path::PathBuf::from("/home/node")
                                 .join(host_path.strip_prefix(&home).unwrap_or(&host_path))
                         } else {
                             host_path
                         };
-                        eprintln!("  Session:   resuming pi session {}", cp.display());
+                        eprintln!("  Session:   resuming {bin} session {}", cp.display());
                         let mut updated_task = task.clone();
                         if let Some(ref mut ctx) = updated_task.context {
                             ctx.extra.insert(
@@ -3278,12 +3464,12 @@ fn cmd_sandbox_attach(
                             );
                         }
                         let _ = db.update_task(&updated_task);
-                        format!("{pi_install}; pi --session '{cp}'", cp = cp.display())
+                        format!("{install}; {bin} {resume_flag} '{cp}'", cp = cp.display())
                     } else {
                         eprintln!(
-                            "  Session:   no pi session found for {container_dir}, starting fresh"
+                            "  Session:   no {bin} session found for {container_dir}, starting fresh"
                         );
-                        format!("{pi_install}; pi")
+                        format!("{install}; {bin}")
                     }
                 };
                 pi_cmd
@@ -3352,19 +3538,26 @@ fn cmd_sandbox_attach(
             );
             eprintln!("(Exit hermes or press Ctrl+C to detach — the container keeps running)");
         }
-        SelectedAgent::Pi => {
+        SelectedAgent::Pi | SelectedAgent::Omp => {
+            let bin = if agent == SelectedAgent::Omp {
+                "omp"
+            } else {
+                "pi"
+            };
             if btw {
                 eprintln!(
-                    "Attaching to sandbox {} ({}) [pi, btw — side session]…",
+                    "Attaching to sandbox {} ({}) [{bin}, btw — side session]…",
                     task.title, container_id
                 );
                 eprintln!("(Independent session — main history untouched. Exit to close.)");
             } else {
                 eprintln!(
-                    "Attaching to sandbox {} ({}) [pi]…",
+                    "Attaching to sandbox {} ({}) [{bin}]…",
                     task.title, container_id
                 );
-                eprintln!("(Exit pi or press Ctrl+C to detach — the container keeps running)");
+                eprintln!(
+                    "(Exit {bin} or press Ctrl+C to detach — the container keeps running)"
+                );
             }
         }
         SelectedAgent::Claude => {
@@ -4406,5 +4599,68 @@ mod notification_tests {
             ctx.claude_session_id.as_deref(),
             Some("550e8400-e29b-41d4-a716-446655440000")
         );
+    }
+}
+
+#[cfg(test)]
+mod pi_family_tests {
+    use super::*;
+
+    #[test]
+    fn candidates_pi_root_returns_pi_path() {
+        let cands = pi_session_path_candidates(
+            "/home/node/.pi/agent/sessions/--nibble--/s.jsonl",
+            &[".pi"],
+        );
+        assert_eq!(
+            cands,
+            vec![std::path::PathBuf::from(
+                "/home/node/.pi/agent/sessions/--nibble--/s.jsonl"
+            )]
+        );
+    }
+
+    #[test]
+    fn candidates_omp_prefers_omp_twin_then_pi_original() {
+        let cands = pi_session_path_candidates(
+            "/home/node/.pi/agent/sessions/--nibble--/s.jsonl",
+            &[".omp", ".pi"],
+        );
+        assert_eq!(
+            cands,
+            vec![
+                std::path::PathBuf::from("/home/node/.omp/agent/sessions/--nibble--/s.jsonl"),
+                std::path::PathBuf::from("/home/node/.pi/agent/sessions/--nibble--/s.jsonl"),
+            ]
+        );
+    }
+
+    #[test]
+    fn candidates_omp_keeps_omp_path_first() {
+        let cands = pi_session_path_candidates(
+            "/home/node/.omp/agent/sessions/--nibble--/s.jsonl",
+            &[".omp", ".pi"],
+        );
+        assert_eq!(
+            cands[0],
+            std::path::PathBuf::from("/home/node/.omp/agent/sessions/--nibble--/s.jsonl")
+        );
+    }
+
+    #[test]
+    fn candidates_host_path_normalizes_to_container() {
+        let home = dirs::home_dir().unwrap();
+        let stored = home.join(".pi/agent/sessions/--nibble--/s.jsonl");
+        let cands = pi_session_path_candidates(stored.to_str().unwrap(), &[".omp", ".pi"]);
+        assert_eq!(
+            cands[0],
+            std::path::PathBuf::from("/home/node/.omp/agent/sessions/--nibble--/s.jsonl")
+        );
+    }
+
+    #[test]
+    fn candidates_unrelated_path_passes_through() {
+        let cands = pi_session_path_candidates("/opt/elsewhere/s.jsonl", &[".omp", ".pi"]);
+        assert_eq!(cands, vec![std::path::PathBuf::from("/opt/elsewhere/s.jsonl")]);
     }
 }
