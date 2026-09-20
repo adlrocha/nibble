@@ -144,6 +144,25 @@ fn main() -> Result<()> {
                 }
                 db.update_task(&task)?;
             }
+            ReportAction::SessionPath { task_id, path } => {
+                let mut task = db
+                    .get_task_by_id(&task_id)?
+                    .ok_or_else(|| anyhow::anyhow!("Task not found: {}", task_id))?;
+                let ctx = task.context.get_or_insert_with(|| TaskContext {
+                    url: None,
+                    project_path: None,
+                    session_id: None,
+                    claude_session_id: None,
+                    extra: HashMap::new(),
+                });
+                // Authoritative mapping written by the agent extension at session
+                // start; the attach flow reads the same key.
+                ctx.extra.insert(
+                    "pi_session_path".to_string(),
+                    serde_json::Value::String(path),
+                );
+                db.update_task(&task)?;
+            }
         },
         Commands::Memory { action } => {
             // Ensure memory directory exists
@@ -471,7 +490,7 @@ fn main() -> Result<()> {
 
                 for group in &groups {
                     println!("\n{} ({})", group.label, group.sessions.len());
-                    println!("{}", "─".repeat(max_title_width + 58));
+                    println!("{}", "─".repeat(max_title_width + 67));
                     for s in &group.sessions {
                         let time = session::format_time(s.modified);
                         let title = session::get_session_title(s);
@@ -499,20 +518,29 @@ fn main() -> Result<()> {
                             _ => None,
                         };
                         let mem_count = task_id_for_mem
-                            .and_then(|tid| memory_counts.get(&tid).copied())
+                            .as_ref()
+                            .and_then(|tid| memory_counts.get(tid).copied())
                             .unwrap_or(0);
                         let mem_badge = if mem_count > 0 {
                             format!("M:{}", mem_count)
                         } else {
                             "   ".to_string()
                         };
+                        // Show which sandbox task this session is linked to (the
+                        // session the next attach would resume), so recovering the
+                        // right conversation after a reboot doesn't require guessing.
+                        let linked_task = task_id_for_mem
+                            .as_deref()
+                            .map(|t| &t[..t.len().min(8)])
+                            .unwrap_or("—");
                         println!(
-                            "  {:<6} {:<10} {:<8}  {:<width$}  {:<12} {:>5} {}",
+                            "  {:<6} {:<10} {:<8}  {:<width$}  {:<12} {:<8} {:>5} {}",
                             time,
                             agent_short,
                             sid,
                             title,
                             ws,
+                            linked_task,
                             mem_badge,
                             session::format_size(s.size_bytes),
                             width = max_title_width.min(60)
@@ -975,7 +1003,7 @@ fn main() -> Result<()> {
                 host,
                 port,
                 token,
-                sessions_root: usage::pi_log::sessions_root(),
+                sessions_roots: usage::pi_log::sessions_roots(),
                 db_path,
             };
             web::serve(cfg)?;
@@ -1293,50 +1321,111 @@ fn discover_pi_session_in_container(
     }
 }
 
-/// Find the most recent Pi session file whose `cwd` matches the given path.
+/// List every pi session file for a container working directory, newest first.
 ///
-/// Pi session files start with a JSON line like:
-///   {"type":"session","cwd":"/nibble",...}
-///
-/// Returns the absolute path to the matching session file, or None if no match.
-/// Find the most recent Pi session file for a given container working directory.
-///
-/// With repo-specific mount points (e.g. `/nibble`), Pi stores sessions in a
-/// dedicated directory (`--nibble--`). We look there directly instead of scanning
-/// all sessions and grepping for a `cwd` field.
-///
-/// Falls back to the legacy `--workspace--` directory so old sessions are still
-/// discoverable.
-fn find_pi_session_for_cwd(container_dir: &str) -> Option<std::path::PathBuf> {
-    let home = dirs::home_dir()?;
+/// Uses the repo-specific slug directory; only when it is empty does the
+/// legacy `--workspace--` directory take over (same fallback semantics as
+/// `find_pi_session_for_cwd`).
+fn list_pi_sessions_for_cwd(
+    container_dir: &str,
+) -> Vec<(std::path::PathBuf, std::time::SystemTime)> {
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    list_pi_sessions_for_cwd_with_home(&home, container_dir)
+}
+
+fn list_pi_sessions_for_cwd_with_home(
+    home: &std::path::Path,
+    container_dir: &str,
+) -> Vec<(std::path::PathBuf, std::time::SystemTime)> {
     let slug = pi_session_dir_name(container_dir);
     let sessions_dir = home.join(".pi").join("agent").join("sessions");
 
-    // Helper: find newest .jsonl in a specific slug directory.
-    let find_newest = |slug_name: &str| -> Option<(std::path::PathBuf, std::time::SystemTime)> {
+    let collect = |slug_name: &str| -> Vec<(std::path::PathBuf, std::time::SystemTime)> {
         let slug_dir = sessions_dir.join(slug_name);
-        if !slug_dir.exists() {
-            return None;
-        }
-        let mut newest: Option<(std::path::PathBuf, std::time::SystemTime)> = None;
-        for file in std::fs::read_dir(&slug_dir).ok()?.flatten() {
-            let path = file.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                continue;
-            }
-            let meta = file.metadata().ok()?;
-            let mtime = meta.modified().ok()?;
-            if newest.as_ref().is_none_or(|(_, t)| mtime > *t) {
-                newest = Some((path, mtime));
+        let mut out = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&slug_dir) {
+            for file in entries.flatten() {
+                let path = file.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                if let Ok(mtime) = file.metadata().and_then(|m| m.modified()) {
+                    out.push((path, mtime));
+                }
             }
         }
-        newest
+        out
     };
 
-    // Try the repo-specific directory first, then fall back to legacy.
-    find_newest(&slug)
-        .or_else(|| find_newest("--workspace--"))
-        .map(|(path, _mtime)| path)
+    let mut sessions = collect(&slug);
+    if sessions.is_empty() {
+        sessions = collect("--workspace--");
+    }
+    sessions.sort_by(|a, b| b.1.cmp(&a.1));
+    sessions
+}
+
+/// The user's choice in the interactive session picker.
+enum PiSessionPick {
+    Session(std::path::PathBuf),
+    Fresh,
+}
+
+/// Interactively pick one of several pi sessions for a repo.
+///
+/// Shown when attach has no stored session mapping and more than one session
+/// exists — after a reboot/crash the newest file is often a `--btw` side
+/// session or an injected turn, not the conversation the user wants back.
+/// Empty input (or anything unparseable) selects the newest session; `n`
+/// starts a fresh one.
+fn pick_pi_session(candidates: &[(std::path::PathBuf, std::time::SystemTime)]) -> PiSessionPick {
+    use std::io::Write;
+
+    let show = candidates.len().min(8);
+    eprintln!("  Session:   multiple pi sessions found for this repo:");
+    for (i, (path, mtime)) in candidates.iter().take(show).enumerate() {
+        let info = crate::session::SessionInfo {
+            agent: "pi".to_string(),
+            session_id: path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+                .to_string(),
+            workspace: None,
+            path: path.clone(),
+            modified: Some(*mtime),
+            size_bytes: std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
+        };
+        let title = crate::session::get_session_title(&info);
+        let dt: chrono::DateTime<chrono::Local> = (*mtime).into();
+        eprintln!(
+            "    {}. [{}] {} ({})",
+            i + 1,
+            dt.format("%b %d %H:%M"),
+            title,
+            crate::session::format_size(info.size_bytes)
+        );
+    }
+    eprintln!("    n. Start a new session");
+    eprint!("  Choose [1-{show}, n] (default 1): ");
+    let _ = std::io::stderr().flush();
+
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return PiSessionPick::Session(candidates[0].0.clone());
+    }
+    let line = line.trim();
+    if line.eq_ignore_ascii_case("n") {
+        return PiSessionPick::Fresh;
+    }
+    if let Ok(n) = line.parse::<usize>() {
+        if (1..=show).contains(&n) {
+            return PiSessionPick::Session(candidates[n - 1].0.clone());
+        }
+    }
+    PiSessionPick::Session(candidates[0].0.clone())
 }
 
 // ── Hermes command handlers ──────────────────────────────────────────────────
@@ -3248,18 +3337,24 @@ fn cmd_sandbox_attach(
                     let _ = db.update_task(&updated_task);
                     format!("{pi_install}; pi --session '{cp}'", cp = cp.display())
                 } else {
-                    // Try container-specific discovery first, then fall back to global scan
-                    let cid = task.container_id.as_deref().unwrap_or("");
-                    let pi_slug = pi_session_dir_name(&container_dir);
-                    let discovered = if !cid.is_empty() {
-                        discover_pi_session_in_container(cid, &pi_slug)
+                    // No stored mapping (or it vanished): enumerate every session
+                    // for this repo. With more than one candidate and a terminal
+                    // attached, let the user pick — after a reboot/crash the newest
+                    // file is often a --btw side session, not the conversation they
+                    // want back. Non-interactive callers keep newest-wins.
+                    let candidates = list_pi_sessions_for_cwd(&container_dir);
+                    use std::io::IsTerminal;
+                    let mut user_chose_fresh = false;
+                    let host_path = if candidates.len() > 1 && std::io::stdin().is_terminal() {
+                        match pick_pi_session(&candidates) {
+                            PiSessionPick::Session(p) => Some(p),
+                            PiSessionPick::Fresh => {
+                                user_chose_fresh = true;
+                                None
+                            }
+                        }
                     } else {
-                        None
-                    };
-                    let host_path = if let Some(host_path) = discovered {
-                        Some(host_path)
-                    } else {
-                        find_pi_session_for_cwd(&container_dir)
+                        candidates.first().map(|(p, _)| p.clone())
                     };
                     if let Some(host_path) = host_path {
                         let home = dirs::home_dir().unwrap_or_default();
@@ -3279,6 +3374,9 @@ fn cmd_sandbox_attach(
                         }
                         let _ = db.update_task(&updated_task);
                         format!("{pi_install}; pi --session '{cp}'", cp = cp.display())
+                    } else if user_chose_fresh {
+                        eprintln!("  Session:   starting a fresh pi session");
+                        format!("{pi_install}; pi")
                     } else {
                         eprintln!(
                             "  Session:   no pi session found for {container_dir}, starting fresh"
@@ -3532,6 +3630,13 @@ fn cmd_sandbox_resume(db: &Database, all: bool) -> Result<()> {
     }
 
     println!("\n{} running, {} stale cleaned up.", resumed, stale);
+    if resumed > 0 {
+        println!("Re-attach to a sandbox with:  nibble sandbox attach <repo-or-task-id>");
+        println!("If attach resumes the wrong conversation, pick the right one with:");
+        println!("  nibble session list         (shows which session each task is linked to)");
+        println!("  nibble sandbox attach <repo> --session <id>");
+        println!("See docs/session-recovery.md for the full runbook.");
+    }
     Ok(())
 }
 
@@ -4406,5 +4511,92 @@ mod notification_tests {
             ctx.claude_session_id.as_deref(),
             Some("550e8400-e29b-41d4-a716-446655440000")
         );
+    }
+}
+
+#[cfg(test)]
+mod session_recovery_tests {
+    use super::*;
+    use crate::models::TaskContext;
+    use std::collections::HashMap;
+
+    #[test]
+    fn report_session_path_stores_pi_session_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = crate::db::Database::open(tmp.path().join("test.db")).unwrap();
+        let mut task = Task::new(
+            "task-pi".to_string(),
+            AgentType::from_str("pi").unwrap(),
+            "Test task".to_string(),
+            None,
+            None,
+        );
+        db.insert_task(&task).unwrap();
+        let ctx = task.context.get_or_insert_with(|| TaskContext {
+            url: None,
+            project_path: None,
+            session_id: None,
+            claude_session_id: None,
+            extra: HashMap::new(),
+        });
+        ctx.extra.insert(
+            "pi_session_path".to_string(),
+            serde_json::Value::String(
+                "/home/node/.pi/agent/sessions/--nibble--/s.jsonl".to_string(),
+            ),
+        );
+        db.update_task(&task).unwrap();
+
+        let reloaded = db.get_task_by_id(&task.task_id).unwrap().unwrap();
+        let stored = reloaded
+            .context
+            .as_ref()
+            .and_then(|c| c.extra.get("pi_session_path"))
+            .and_then(|v| v.as_str());
+        assert_eq!(
+            stored,
+            Some("/home/node/.pi/agent/sessions/--nibble--/s.jsonl")
+        );
+    }
+
+    #[test]
+    fn list_pi_sessions_for_cwd_sorts_newest_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let slug_dir = home.join(".pi/agent/sessions/--nibble--");
+        std::fs::create_dir_all(&slug_dir).unwrap();
+        let now = chrono::Utc::now().timestamp();
+        for (name, age_secs) in [
+            ("old.jsonl", 7200i64),
+            ("new.jsonl", 60i64),
+            ("mid.jsonl", 3600i64),
+        ] {
+            let p = slug_dir.join(name);
+            std::fs::write(&p, "{}\n").unwrap();
+            filetime::set_file_mtime(&p, filetime::FileTime::from_unix_time(now - age_secs, 0))
+                .unwrap();
+        }
+        // Non-jsonl files are ignored.
+        std::fs::write(slug_dir.join("notes.txt"), "x").unwrap();
+
+        let sessions = list_pi_sessions_for_cwd_with_home(home, "/nibble");
+        let names: Vec<&str> = sessions
+            .iter()
+            .map(|(p, _)| p.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["new.jsonl", "mid.jsonl", "old.jsonl"]);
+    }
+
+    #[test]
+    fn list_pi_sessions_for_cwd_falls_back_to_legacy_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let legacy = home.join(".pi/agent/sessions/--workspace--");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("legacy.jsonl"), "{}\n").unwrap();
+
+        let sessions = list_pi_sessions_for_cwd_with_home(home, "/nibble");
+        assert_eq!(sessions.len(), 1);
+        assert!(sessions[0].0.ends_with("legacy.jsonl"));
     }
 }
