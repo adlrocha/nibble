@@ -231,11 +231,17 @@ pub enum SandboxAction {
         /// Spawns a dedicated Hermes container with gateway support.
         #[arg(long)]
         hermes: bool,
-        /// Use Pi (pi.dev) coding agent instead of Claude Code.
-        /// Installs @earendil-works/pi-coding-agent at spawn time, plus any
-        /// [pi].extensions (e.g. pi-dynamic-workflows) from ~/.nibble/config.toml.
-        #[arg(long)]
+        /// Use a pi-family coding agent instead of Claude Code.
+        /// The implementation is chosen by [pi].implementation in ~/.nibble/config.toml
+        /// (default: omp). Installs the agent at spawn time, plus any
+        /// [pi].extensions (e.g. pi-dynamic-workflows).
+        #[arg(long, conflicts_with = "omp")]
         pi: bool,
+        /// Use omp (oh-my-pi) coding agent instead of Claude Code.
+        /// Like --pi, but forces the omp implementation regardless of
+        /// [pi].implementation in ~/.nibble/config.toml.
+        #[arg(long)]
+        omp: bool,
     },
 
     /// List all sandbox containers and their status
@@ -262,9 +268,16 @@ pub enum SandboxAction {
         /// Use Hermes Agent instead of Claude Code
         #[arg(long)]
         hermes: bool,
-        /// Use Pi (pi.dev) coding agent instead of Claude Code
-        #[arg(long)]
+        /// Use a pi-family coding agent instead of Claude Code.
+        /// The implementation is chosen by [pi].implementation in ~/.nibble/config.toml
+        /// (default: omp).
+        #[arg(long, conflicts_with = "omp")]
         pi: bool,
+        /// Use omp (oh-my-pi) coding agent instead of Claude Code.
+        /// Like --pi, but forces the omp implementation regardless of
+        /// [pi].implementation in ~/.nibble/config.toml.
+        #[arg(long)]
+        omp: bool,
         /// Resume a specific session by ID (from `nibble session list`).
         /// Overrides the stored session for this task.
         #[arg(long)]

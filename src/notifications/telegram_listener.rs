@@ -649,6 +649,7 @@ fn handle_spawn_command(
             false, // factory
             false, // hermes
             false, // pi
+            false, // omp
         ) {
             Ok(task_id) => {
                 let msg = format!(
@@ -1091,6 +1092,7 @@ fn find_or_spawn_for_cron(
         None,
         true,
         cfg.factory.enabled,
+        false,
         false,
         false,
     )?;
