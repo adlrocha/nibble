@@ -9,8 +9,7 @@
 #   claude --fresh [args...]   -- skip auto-resume, always start a new session
 #   claude --kimi [args...]    -- use Kimi as the LLM backend (reads KIMI_BASE_URL
 #                                 and KIMI_API_KEY from the environment)
-#   claude --remote [args...]  -- unattended mode: skips all permission prompts so
-#                                 you can interact purely via Telegram
+#   claude --remote [args...]  -- unattended mode: skips all permission prompts
 
 # nibble binary location
 AGENT_INBOX="${NIBBLE_BIN:-$HOME/.local/bin/nibble}"
@@ -135,7 +134,7 @@ nibble report start "$AGENT_TASK_ID" "claude_code" "$PWD" "$TASK_TITLE" \
 # Run claude - hooks handle status updates
 if [ "$REMOTE_MODE" = true ]; then
     # Unattended mode: skip all permission prompts so the session can run
-    # without keyboard interaction. Interact via Telegram Reply instead.
+    # without keyboard interaction.
     exec "$CLAUDE_BIN" --dangerously-skip-permissions "${SESSION_RESUME_FLAG[@]}" "${CLAUDE_ARGS[@]}"
 else
     exec "$CLAUDE_BIN" "${SESSION_RESUME_FLAG[@]}" "${CLAUDE_ARGS[@]}"

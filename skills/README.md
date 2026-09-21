@@ -27,22 +27,12 @@ The general skill routes to the right stack; add new stacks as
 `git-commit-pr` (vendored from `we-are-singular/skills`, MIT) is a standalone
 skill for the commit/PR workflow.
 
-## AI Factory pipeline (opt-in)
-
-A structured Spec → Implement → Verify → Audit → QA pipeline, **off by default**
-(enable with `nibble sandbox spawn --factory` or `[factory].enabled` in
-`~/.nibble/config.toml`). Ships as a single on-demand skill:
-
-- `factory-pipeline/SKILL.md` — tier classification + orchestration.
-- `factory-pipeline/references/` — `spec`, `verify`, `qa-gate`, `lessons`.
-
 ## Other skills
 
 | Skill | Purpose |
 |-------|---------|
 | `nibble-memory` | Cross-session memory capture/search (pairs with the nibble-memory extension). |
 | `nibble-pr-review` | Track and review GitHub PRs where you're a reviewer. |
-| `fable5-emulation` | Domain-specific emulation notes. |
 | `omarchy-migration` | Arch/Omarchy migration guidance. |
 
 ## Installation

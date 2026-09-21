@@ -92,6 +92,20 @@ else
     echo "    Install Claude Code and re-run this script to enable tracking."
 fi
 
+# Pi / omp (same family, same extension reports their live status)
+for agent in pi omp; do
+    if check_agent "$agent"; then
+        AGENT_ORIGINAL=$(which "$agent")
+        if [ -n "$AGENT_ORIGINAL" ]; then
+            ln -sf "$AGENT_ORIGINAL" "$WRAPPER_DIR/$agent.original" 2>/dev/null || true
+            add_alias "$agent"
+        fi
+    else
+        echo "  ⚠ '$agent' not found in PATH. Skipping wrapper setup."
+        echo "    Install $agent and re-run this script to enable tracking."
+    fi
+done
+
 
 echo ""
 echo "============================================"
@@ -108,10 +122,15 @@ echo "Wrapped agents:"
 if check_agent "claude"; then
     echo "  • claude (Claude Code)"
 fi
+for agent in pi omp; do
+    if check_agent "$agent"; then
+        echo "  • $agent"
+    fi
+done
 echo ""
 echo "Test it:"
 echo "  1. Run a wrapped command: claude --help"
-echo "  2. Check nibble: nibble list --all"
+echo "  2. Check nibble: nibble status"
 echo ""
 echo "To wrap additional agents, see: $REPO_DIR/wrappers/TEMPLATE-wrapper"
 echo ""

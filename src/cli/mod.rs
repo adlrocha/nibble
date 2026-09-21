@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "nibble")]
-#[command(about = "Manage sandboxed coding agents and scheduled tasks", long_about = None)]
+#[command(about = "Manage sandboxed coding agents", long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -23,38 +23,24 @@ pub enum Commands {
         action: HermesAction,
     },
 
-    /// Inject a message into a running sandbox agent (bypasses Telegram)
-    Inject {
-        /// Task ID of the agent to inject into
-        task_id: String,
-        /// Message to send
-        message: String,
-    },
+    /// Prune stale tasks (dead/gone containers → mark exited, GC old exited tasks)
+    Prune,
 
-    /// Run the Telegram long-polling daemon (routes phone replies back to agents)
-    Listen,
-
-    /// Send a Telegram notification (used by hooks and wrappers)
-    Notify {
-        /// Message body to send (agent last output or permission request)
+    /// Show live agent statuses (sidebar-friendly; use --watch in a zellij pane)
+    Status {
+        /// Re-render every second (for a dedicated zellij side pane)
         #[arg(short, long)]
-        message: String,
-
-        /// Optional task ID to attach context (agent type, title, elapsed time)
-        #[arg(short, long)]
-        task_id: Option<String>,
-
-        /// Mark this as an attention-required notification (permission request, question, etc.)
-        /// Uses a distinct visual style so it stands out from regular completion notifications.
+        watch: bool,
+        /// Output machine-readable JSON (implies no watch)
         #[arg(long)]
-        attention: bool,
+        json: bool,
+        /// Include exited tasks (dimmed at the bottom)
+        #[arg(short, long)]
+        all: bool,
     },
 
-    /// Manage scheduled cron jobs for sandboxes
-    Cron {
-        #[command(subcommand)]
-        action: CronAction,
-    },
+    /// Open the agent-status side panel in the current zellij session
+    Sidebar,
 
     /// Report task status (internal command used by wrappers and hooks)
     Report {
@@ -209,7 +195,7 @@ pub enum ReportAction {
     /// Called by the pi/omp nibble-memory extension at session start. This is
     /// the authoritative task→session mapping: without it, attach falls back
     /// to guessing the newest session file for the repo, which is ambiguous
-    /// once more than one session exists (main + --btw + injected turns).
+    /// once more than one session exists (main + --btw side sessions).
     #[command(name = "session-path")]
     SessionPath {
         /// Task ID
@@ -217,8 +203,47 @@ pub enum ReportAction {
         /// Absolute path to the session JSONL file (container or host path)
         path: String,
     },
+
+    /// Transition a task's live status (called by agent hooks/extensions)
+    ///
+    /// States: running (actively generating), blocked (needs user input —
+    /// permission prompt, question), completed (turn done, idle), exited.
+    Status {
+        /// Task ID
+        task_id: String,
+        /// New state: running | blocked | completed | exited
+        state: String,
+        /// Short context for blocked (e.g. the permission prompt summary)
+        #[arg(short, long)]
+        message: Option<String>,
+    },
 }
 
+/// Agent-selection flags shared by `sandbox spawn` and `sandbox attach`.
+#[derive(clap::Args)]
+pub struct AgentFlags {
+    /// Start a new session (generates a fresh random UUID, replacing the stored one)
+    #[arg(long)]
+    pub fresh: bool,
+    /// Create a git worktree for this branch and spawn a sandbox for it.
+    /// The worktree is created at <repo_parent>/<repo_name>--<branch-slug>.
+    /// The branch is auto-created from the repo's current HEAD if it doesn't exist.
+    #[arg(long)]
+    pub branch: Option<String>,
+    /// Use Hermes Agent instead of Claude Code.
+    /// Spawns a dedicated Hermes container with gateway support.
+    #[arg(long)]
+    pub hermes: bool,
+    /// Use the upstream pi coding agent (@earendil-works/pi-coding-agent)
+    /// instead of Claude Code. Installs pi plus any [pi].extensions
+    /// (e.g. pi-dynamic-workflows) at spawn time.
+    #[arg(long, conflicts_with = "omp")]
+    pub pi: bool,
+    /// Use the omp (oh-my-pi) coding agent instead of Claude Code.
+    /// Installs the standalone omp binary plus any [pi].extensions at spawn time.
+    #[arg(long)]
+    pub omp: bool,
+}
 #[derive(Subcommand)]
 pub enum SandboxAction {
     /// Spawn a sandboxed agent for a repo
@@ -231,34 +256,11 @@ pub enum SandboxAction {
         /// Sandbox image to use
         #[arg(long, default_value = "nibble-sandbox:latest")]
         image: String,
-        /// Start a new session (generates a fresh random UUID, replacing the stored one)
-        #[arg(long)]
-        fresh: bool,
         /// Use a specific Claude session UUID instead of the deterministic repo UUID
         #[arg(long)]
         session_id: Option<String>,
-        /// Create a git worktree for this branch and spawn a sandbox for it.
-        /// The worktree is created at <repo_parent>/<repo_name>--<branch-slug>.
-        /// The branch is auto-created from the repo's current HEAD if it doesn't exist.
-        #[arg(long)]
-        branch: Option<String>,
-        /// Enable the AI Factory development pipeline (spec → implement → TDD → adversarial → risk → QA).
-        /// Default is controlled by factory.enabled in ~/.nibble/config.toml.
-        #[arg(long)]
-        factory: Option<bool>,
-        /// Use Hermes Agent instead of Claude Code.
-        /// Spawns a dedicated Hermes container with gateway support.
-        #[arg(long)]
-        hermes: bool,
-        /// Use the upstream pi coding agent (@earendil-works/pi-coding-agent)
-        /// instead of Claude Code. Installs pi plus any [pi].extensions
-        /// (e.g. pi-dynamic-workflows) at spawn time.
-        #[arg(long, conflicts_with = "omp")]
-        pi: bool,
-        /// Use the omp (oh-my-pi) coding agent instead of Claude Code.
-        /// Installs the standalone omp binary plus any [pi].extensions at spawn time.
-        #[arg(long)]
-        omp: bool,
+        #[command(flatten)]
+        agent: AgentFlags,
     },
 
     /// List all sandbox containers and their status
@@ -274,33 +276,17 @@ pub enum SandboxAction {
     Attach {
         /// Repo path (e.g. "." or "/path/to/repo") OR container name
         container_or_path: String,
-        /// Start a fresh session instead of resuming the last conversation
-        #[arg(long)]
-        fresh: bool,
         /// Start an independent side session that doesn't overwrite which session the main
         /// attach would continue. The session is kept on disk like any other.
         /// Useful for ad-hoc research or non-conflicting changes alongside a main session.
         #[arg(long)]
         btw: bool,
-        /// Use Hermes Agent instead of Claude Code
-        #[arg(long)]
-        hermes: bool,
-        /// Use the upstream pi coding agent (@earendil-works/pi-coding-agent)
-        /// instead of Claude Code.
-        #[arg(long, conflicts_with = "omp")]
-        pi: bool,
-        /// Use the omp (oh-my-pi) coding agent instead of Claude Code.
-        #[arg(long)]
-        omp: bool,
         /// Resume a specific session by ID (from `nibble session list`).
         /// Overrides the stored session for this task.
         #[arg(long)]
         session: Option<String>,
-        /// Create a git worktree for this branch and spawn+attach a sandbox for it.
-        /// The worktree is created at <repo_parent>/<repo_name>--<branch-slug>.
-        /// The branch is auto-created from the repo's current HEAD if it doesn't exist.
-        #[arg(long)]
-        branch: Option<String>,
+        #[command(flatten)]
+        agent: AgentFlags,
     },
 
     /// Stop and remove a sandbox container
@@ -322,13 +308,6 @@ pub enum SandboxAction {
         #[arg(long)]
         branch: Option<String>,
     },
-
-    /// Restart all stopped sandbox containers (e.g. after a host reboot)
-    ///
-    /// Attempts to start any stopped containers tracked in the database.
-    /// Containers that no longer exist are cleaned up.
-    Restart,
-
     /// Resume sandboxes after a host reboot
     Resume {
         #[arg(short, long)]
@@ -647,96 +626,3 @@ pub enum ProxyAction {
     Status,
 }
 
-#[derive(Subcommand)]
-pub enum CronAction {
-    /// Add a new cron job targeting a repo path.
-    /// At trigger time nibble will find or spawn a sandbox for that repo automatically.
-    Add {
-        /// Path to the repository this cron job targets.
-        /// If omitted, repo_path must be set in the --file markdown.
-        #[arg(short, long)]
-        repo: Option<String>,
-
-        /// Cron schedule expression (e.g., "0 9 * * 1-5" for 9am weekdays)
-        #[arg(short, long)]
-        schedule: Option<String>,
-
-        /// Prompt text to send (alternative to --file)
-        #[arg(short, long)]
-        prompt: Option<String>,
-
-        /// Path to markdown file with cron definition
-        #[arg(short, long)]
-        file: Option<String>,
-
-        /// Label/name for this cron job
-        #[arg(short, long)]
-        label: Option<String>,
-
-        /// Expiry datetime in RFC3339 format (e.g. "2026-04-01T00:00:00Z").
-        /// Job is auto-disabled after this time.
-        #[arg(long)]
-        expires: Option<String>,
-    },
-
-    /// List cron jobs (optionally filtered by repo path)
-    List {
-        /// Optional canonical repo path to filter by
-        repo_path: Option<String>,
-    },
-
-    /// Edit an existing cron job
-    Edit {
-        /// Cron job ID or label
-        id: String,
-
-        /// New schedule expression
-        #[arg(short, long)]
-        schedule: Option<String>,
-
-        /// New prompt text
-        #[arg(short, long)]
-        prompt: Option<String>,
-
-        /// New label
-        #[arg(short, long)]
-        label: Option<String>,
-
-        /// Enable the cron job
-        #[arg(long)]
-        enable: bool,
-
-        /// Disable the cron job
-        #[arg(long)]
-        disable: bool,
-
-        /// Set or update expiry datetime in RFC3339 format (e.g. "2026-04-01T00:00:00Z").
-        /// Pass "none" to remove an existing expiry.
-        #[arg(long)]
-        expires: Option<String>,
-    },
-
-    /// Disable a cron job without deleting it (can be re-enabled with start)
-    Stop {
-        /// Cron job ID or label
-        id: String,
-    },
-
-    /// Re-enable a previously stopped cron job
-    Start {
-        /// Cron job ID or label
-        id: String,
-    },
-
-    /// Delete a cron job
-    Kill {
-        /// Cron job ID or label
-        id: String,
-    },
-
-    /// Run a cron job immediately (for testing)
-    Run {
-        /// Cron job ID or label
-        id: String,
-    },
-}

@@ -68,7 +68,7 @@ CREATE TABLE token_usage (
 
 The primary key is `(provider, message_id)`, so re-scanning is **idempotent** —
 each message is upserted with `INSERT OR IGNORE`, and existing rows are
-refreshed with the latest token counts and estimated cost. The cron scan runs
+refreshed with the latest token counts and estimated cost. The scheduled scan runs
 every 15 minutes without growing duplicates, and a pricing-table change is
 reflected for historical rows on the next scan.
 

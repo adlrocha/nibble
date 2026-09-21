@@ -3,7 +3,6 @@
 #
 # Usage:
 #   ./install.sh                    # full install / upgrade
-#   ./install.sh --telegram         # also (re)run Telegram bot setup
 #   ./install.sh --recover backup.zip  # install fresh then restore from backup
 
 set -e
@@ -25,8 +24,6 @@ warn() { echo -e "  ${YELLOW}!${NC} $1"; }
 die()  { echo -e "  ${RED}✗${NC} $1" >&2; exit 1; }
 
 # ── Parse flags ───────────────────────────────────────────────────────────────
-RUN_TELEGRAM=false
-RUN_LISTEN=false
 RUN_LLAMA=false
 RUN_BASELIGHT=false
 RUN_PRIVACY_PROXY=false
@@ -36,8 +33,6 @@ RECOVER_ZIP=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --telegram)   RUN_TELEGRAM=true; shift ;;
-        --listen)     RUN_LISTEN=true; shift ;;
         --llama)      RUN_LLAMA=true; shift ;;
         --baselight)  RUN_BASELIGHT=true; shift ;;
         --privacy-proxy) RUN_PRIVACY_PROXY=true; shift ;;
@@ -56,9 +51,7 @@ done
 
 echo -e "${BOLD}=== Nibble — Install / Upgrade ===${NC}"
 echo ""
-echo "  Flags: --telegram   set up Telegram notifications"
-echo "         --listen     set up Telegram reply listener daemon"
-echo "         --llama      set up llama-server systemd service"
+echo "  Flags: --llama      set up llama-server systemd service"
 echo "         --baselight      install Baselight MCP server in Claude Code"
 echo "         --privacy-proxy  install LLM privacy filter proxy service"
 echo "         --browser        set up Chromium CDP integration for agents"
@@ -216,31 +209,15 @@ elif command -v musl-gcc >/dev/null 2>&1; then
         && chmod +x "$BIN_DIR/nibble-musl.new" \
         && mv -f "$BIN_DIR/nibble-musl.new" "$BIN_DIR/nibble-musl" \
         && ok "nibble-musl (static, for containers)" \
-        || warn "musl build failed — container hooks won't send Telegram notifications"
+        || warn "musl build failed — in-container hooks won't have a working nibble binary"
 else
     warn "musl-gcc not found — skipping static build (install: sudo pacman -S musl)"
-    warn "Container hooks won't send Telegram notifications until this is built."
+    warn "In-container hooks won't have a working nibble binary until this is built."
     warn "After installing musl, re-run: ./install.sh"
 fi
 
 # ── 3. Install binaries ───────────────────────────────────────────────────────
 step "Installing binaries to $BIN_DIR"
-
-# Stop the listener service before overwriting the binary (avoids "Text file busy").
-LISTENER_WAS_ACTIVE=false
-if systemctl --user is-active --quiet nibble-listener.service 2>/dev/null; then
-    LISTENER_WAS_ACTIVE=true
-    # systemctl stop can hang for 90s if the process ignores SIGTERM.
-    # Use timeout (if available) or --no-block + SIGKILL to avoid hanging.
-    if command -v timeout >/dev/null 2>&1; then
-        timeout 5 systemctl --user stop nibble-listener.service 2>/dev/null || true
-    else
-        systemctl --user stop --no-block nibble-listener.service 2>/dev/null || true
-        sleep 2
-        systemctl --user kill --signal=SIGKILL nibble-listener.service 2>/dev/null || true
-    fi
-    ok "Stopped nibble-listener.service for upgrade"
-fi
 
 # Also stop the privacy proxy so we can overwrite the binary if it's running.
 if systemctl --user is-active --quiet nibble-privacy-proxy.service 2>/dev/null; then
@@ -268,17 +245,21 @@ if systemctl --user is-active --quiet nibble-web.service 2>/dev/null; then
     ok "Stopped nibble-web.service for upgrade"
 fi
 
+# Remove the deprecated Telegram listener service if an old install left it
+# behind — the binary no longer has a `listen` command, so the unit would
+# crash-loop after this upgrade.
+if [ -f "$HOME/.config/systemd/user/nibble-listener.service" ]; then
+    systemctl --user disable --now nibble-listener.service 2>/dev/null || true
+    rm -f "$HOME/.config/systemd/user/nibble-listener.service"
+    systemctl --user daemon-reload 2>/dev/null || true
+    ok "Removed deprecated nibble-listener.service"
+fi
+
 cp "$REPO_DIR/target/release/nibble" "$BIN_DIR/nibble.new"
 chmod +x "$BIN_DIR/nibble.new"
 mv -f "$BIN_DIR/nibble.new" "$BIN_DIR/nibble"
 ok "nibble"
 
-
-# Restart services that were running before.
-if [ "$LISTENER_WAS_ACTIVE" = true ]; then
-    systemctl --user start nibble-listener.service 2>/dev/null || warn "Could not restart nibble-listener.service"
-    ok "Restarted nibble-listener.service"
-fi
 
 # Warn if BIN_DIR is not on PATH
 if ! echo "$PATH" | tr ':' '\n' | grep -qx "$BIN_DIR"; then
@@ -289,11 +270,15 @@ fi
 # ── 4. Install wrappers ───────────────────────────────────────────────────────
 step "Installing wrappers to $WRAPPERS_DIR"
 
-cp "$REPO_DIR/wrappers/claude-wrapper" "$WRAPPERS_DIR/claude-wrapper"
-chmod +x "$WRAPPERS_DIR/claude-wrapper"
-ok "claude-wrapper"
+for w in claude pi omp; do
+    if [ -f "$REPO_DIR/wrappers/$w-wrapper" ]; then
+        cp "$REPO_DIR/wrappers/$w-wrapper" "$WRAPPERS_DIR/$w-wrapper"
+        chmod +x "$WRAPPERS_DIR/$w-wrapper"
+        ok "$w-wrapper"
+    fi
+done
 
-# ── 4a. Install AI Factory skills ─────────────────────────────────────────────
+# ── 4a. Install skills ────────────────────────────────────────────────────────
 # Skills are installed to ~/.claude/skills/ (Claude Code),
 # ~/.nibble/skills/ (internal), and ~/.pi/agent/skills/ (Pi harness).
 # Existing files are overwritten so updates always propagate.
@@ -325,9 +310,9 @@ for skill_dir in "$REPO_DIR/skills"/*/; do
     fi
 done
 
-# Remove factory stage skills that were consolidated into factory-pipeline/.
+# Remove skills that were deleted from the repo.
 # Targeted (not a blanket purge) so third-party skills in ~/.claude/skills are kept.
-for stale in factory-spec factory-verify factory-qa-gate factory-lessons; do
+for stale in factory-pipeline factory-spec factory-verify factory-qa-gate factory-lessons fable5-emulation; do
     for dest in "$CLAUDE_SKILLS_DIR" "$NIBBLE_SKILLS_DIR" "$PI_SKILLS_DIR"; do
         [ -d "$dest/$stale" ] && rm -rf "$dest/$stale" && ok "removed stale skill: $stale"
     done
@@ -747,40 +732,7 @@ if [ "$NEEDS_SETUP" = true ]; then
     fi
 fi
 
-# ── 8. Telegram (optional) ────────────────────────────────────────────────────
-if [ "$RUN_TELEGRAM" = true ]; then
-    step "Setting up Telegram notifications"
-    bash "$REPO_DIR/scripts/setup-telegram.sh"
-else
-    CONFIG_FILE="$HOME/.nibble/config.toml"
-    if grep -q "enabled = true" "$CONFIG_FILE" 2>/dev/null; then
-        ok "Telegram already configured ($CONFIG_FILE)"
-    else
-        echo ""
-        warn "Telegram not configured. Run when ready:"
-        warn "  ./install.sh --telegram"
-    fi
-fi
-
-# ── 9. Telegram listener daemon (optional) ────────────────────────────────────
-if [ "$RUN_LISTEN" = true ]; then
-    step "Setting up Telegram reply listener (systemd service)"
-    bash "$REPO_DIR/scripts/setup-listen.sh"
-else
-    # Offer the hint only when Telegram is already configured but listener isn't running.
-    CONFIG_FILE="$HOME/.nibble/config.toml"
-    if grep -q "enabled = true" "$CONFIG_FILE" 2>/dev/null; then
-        if ! systemctl --user is-active --quiet nibble-listener.service 2>/dev/null; then
-            echo ""
-            warn "Telegram reply listener not running. Enable with:"
-            warn "  ./install.sh --listen"
-        else
-            ok "Telegram reply listener already running"
-        fi
-    fi
-fi
-
-# ── 10. Llama server (optional) ────────────────────────────────────────────────
+# ── 8. Llama server (optional) ────────────────────────────────────────────────
 if [ "$RUN_LLAMA" = true ]; then
     step "Setting up llama-server service"
     bash "$REPO_DIR/scripts/setup-llama-server.sh"
@@ -792,7 +744,7 @@ else
     fi
 fi
 
-# ── 11. Baselight MCP server (optional) ───────────────────────────────────────
+# ── 9. Baselight MCP server (optional) ───────────────────────────────────────
 if [ "$RUN_BASELIGHT" = true ]; then
     step "Installing Baselight MCP server into Claude Code settings"
 
@@ -843,7 +795,7 @@ else
     fi
 fi
 
-# ── 12. Browser CDP integration (optional) ───────────────────────────────────
+# ── 10. Browser CDP integration (optional) ───────────────────────────────────
 if [ "$RUN_BROWSER" = true ]; then
     step "Setting up Chromium CDP browser integration"
 
@@ -900,7 +852,7 @@ else
     fi
 fi
 
-# ── 14. Recover from backup (optional) ────────────────────────────────────────
+# ── 11. Recover from backup (optional) ────────────────────────────────────────
 if [ -n "$RECOVER_ZIP" ]; then
     step "Recovering from backup"
     if [ ! -f "$RECOVER_ZIP" ]; then
@@ -911,12 +863,11 @@ if [ -n "$RECOVER_ZIP" ]; then
     ok "Restored from $RECOVER_ZIP"
 fi
 
-# ── 15. Done ───────────────────────────────────────────────────────────────────
+# ── 12. Done ───────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}${GREEN}Done!${NC} Restart Claude Code for hooks to take effect."
 echo ""
 echo "  Verify:      nibble --help"
-echo "  Test notify: nibble notify --message 'install test' --attention"
 echo ""
 echo -e "${BOLD}Sandbox usage:${NC}"
 echo "  Start agent:  nibble sandbox spawn /path/to/repo"

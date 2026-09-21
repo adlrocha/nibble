@@ -66,8 +66,8 @@ any other session.
 
 ## When attach resumes the wrong conversation
 
-Symptoms: you get a `--btw` side session, a Telegram-injected turn, or a
-session from before the crash instead of your main conversation.
+Symptoms: you get a `--btw` side session or a session from before the crash
+instead of your main conversation.
 
 1. List what exists and what each task is linked to:
 
@@ -91,8 +91,8 @@ session from before the crash instead of your main conversation.
 
 ## Backing sessions up
 
-`nibble backup` archives nibble's own state (`~/.nibble`: task DB, memory,
-cron jobs). Add `--sessions` to also archive every agent transcript
+`nibble backup` archives nibble's own state (`~/.nibble`: task DB, memory).
+Add `--sessions` to also archive every agent transcript
 (`~/.pi/agent/sessions`, `~/.omp/agent/sessions`, `~/.claude/projects`) —
 can be large:
 

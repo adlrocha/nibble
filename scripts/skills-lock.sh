@@ -25,10 +25,8 @@ command -v jq >/dev/null 2>&1 || { echo "jq is required" >&2; exit 1; }
 declare -A PROVENANCE=(
   ["engineering"]="vendored:local|local|unpinned|proprietary"
   ["git-commit-pr"]="we-are-singular/skills|github|vendored-2026-07|MIT"
-  ["factory-pipeline"]="vendored:local|local|unpinned|proprietary"
   ["nibble-memory"]="vendored:local|local|unpinned|proprietary"
   ["nibble-pr-review"]="vendored:local|local|unpinned|proprietary"
-  ["fable5-emulation"]="vendored:local|local|unpinned|proprietary"
   ["omarchy-migration"]="vendored:local|local|unpinned|proprietary"
 )
 

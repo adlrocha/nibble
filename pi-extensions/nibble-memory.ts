@@ -7,10 +7,13 @@
  *   - message_end:   assistant messages
  *   - tool_call:     records tool inputs (paired with tool_execution_end)
  *   - tool_execution_end: records tool outputs
- *   - session_shutdown: triggers async session summarization
+ *   - session_shutdown: reports status → exited and triggers async summarization
  *   - session_start:   reports the session file path to nibble (eager
  *                      task→session mapping so attach never has to guess
  *                      which session belongs to this task after a reboot)
+ *   - agent_start:     status → running (also retries session-path report)
+ *   - agent_settled:   status → completed (only when the session is idle,
+ *                      so subagent/workflow activity doesn't flap the state)
  *
  * Events are written to ~/.nibble/memory/capture/<project>/<task-id>.jsonl
  * and later processed by `nibble memory summarize <task-id>`.
@@ -70,6 +73,19 @@ const reportSessionPath = (taskId: string, path: string): void => {
 		);
 	} catch {
 		// Non-fatal: session-path reporting is best-effort
+	}
+};
+
+const reportStatus = (taskId: string, state: string): void => {
+	if (!taskId) return;
+
+	try {
+		execSync(`nibble report status '${taskId.replace(/'/g, "'\\''")}' '${state}'`, {
+			timeout: 5000,
+			stdio: "pipe",
+		});
+	} catch {
+		// Non-fatal: status reporting is best-effort
 	}
 };
 
@@ -159,17 +175,38 @@ export default function (pi: ExtensionAPI) {
 			reportSessionPath(taskId, file);
 		}
 	};
-	pi.on("session_start", async (_event, ctx) => reportCurrentSession(ctx));
-	// Fallback for agents whose session_start fires before the session file
-	// path is known: retry on the first agent turn.
-	pi.on("agent_start", async (_event, ctx) => reportCurrentSession(ctx));
+	// ── agent_settled: status → completed (only when truly idle) ───────────
+	// agent_settled also fires while subagents/queued retries/compaction are
+	// active; only mark idle when the session reports itself idle so the
+	// status doesn't flap mid-run.
+	pi.on("agent_settled", async (_event, ctx) => {
+		const taskId = getTaskId();
+		if (!taskId) return;
+		const isIdle = (ctx as { isIdle?: () => boolean } | null)?.isIdle;
+		if (typeof isIdle === "function" && isIdle.call(ctx) === false) return;
+		reportStatus(taskId, "completed");
+	});
 
-	// ── session_shutdown: trigger summarization ────────────────────────────
+	// ── session_start: eager task→session mapping ─────────────────────────
+	// Fires on fresh and resumed sessions (also on mid-run /resume switches)
+	// so the DB mapping always tracks the session this task is actually in.
+	pi.on("session_start", async (_event, ctx) => reportCurrentSession(ctx));
+
+	// Fallback for agents whose session_start fires before the session file
+	// path is known: retry on the first agent turn. Also flips live status to
+	// running for the nibble status sidebar.
+	pi.on("agent_start", async (_event, ctx) => {
+		const taskId = getTaskId();
+		if (taskId) reportStatus(taskId, "running");
+		reportCurrentSession(ctx);
+	});
 	pi.on("session_shutdown", async (_event, _ctx) => {
 		const taskId = getTaskId();
 		if (!taskId) return;
 
-		// Summarize in background so Pi exits cleanly
+		reportStatus(taskId, "exited");
+
+		// Summarize in background so the agent exits cleanly
 		setTimeout(() => summarize(taskId), 500);
 	});
 

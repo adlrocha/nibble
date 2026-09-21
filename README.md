@@ -2,7 +2,7 @@
 
 > *In Futurama, Nibbler's species is tasked with protecting the universe from giant flying brains. Nibble is your orchestrator — keeping watch over the smaller agents so you don't have to.*
 
-A CLI tool that runs Claude Code agents inside isolated Podman sandboxes, monitors their status, sends Telegram notifications when they need your attention, and lets you reply from your phone to unblock them — all without touching your keyboard.
+A CLI tool that runs Claude Code agents inside isolated Podman sandboxes and tracks their status — persistent sessions, unified task tracking, and a web session inspector.
 
 ---
 
@@ -13,28 +13,22 @@ This section lists every feature area in the project. Use it to audit what's wor
 | # | Feature | Status | Description |
 |---|---------|--------|-------------|
 | 1 | **Podman Sandboxes** | core | Per-repo rootless containers; repo mounted RW; `sleep infinity` PID 1; `podman exec` for attach |
-| 2 | **Session Continuity** | core | Deterministic session UUID per repo; resume across detach/reboot/Telegram injection; `--fresh` to start over |
+| 2 | **Session Continuity** | core | Deterministic session UUID per repo; resume across detach/reboot; `--fresh` to start over |
 | 3 | **Task DB** | core | SQLite backend tracking all tasks (sandboxed + non-sandboxed), states (running/completed/exited), session IDs |
-| 4 | **Install script** | core | `install.sh` — builds binary, installs Podman if absent, builds sandbox image, wires Claude hooks, optionally sets up Telegram |
-| 5 | **Claude Code hooks** | core | Stop hook → `nibble report session-id` + `nibble notify`; wrappers register tasks at startup |
+| 4 | **Install script** | core | `install.sh` — builds binary, installs Podman if absent, builds sandbox image, wires Claude hooks |
+| 5 | **Claude Code hooks** | core | Stop hook → `nibble report session-id` + memory capture; wrappers register tasks at startup |
 | 6 | **Setup scripts** | dx | `.nibble/setup.sh` in any repo — auto-runs at spawn to install toolchain before first attach |
 | 7 | **Git worktrees** | dx | `--branch` flag on spawn/attach/kill — creates/cleans up a worktree automatically per branch |
 | 8 | **`--btw` sessions** | dx | `attach --btw` — side session that doesn't overwrite which session the main attach would continue (ad-hoc research, parallel work); kept on disk like any other |
 | 9 | **Session retention** | core | Sessions are never deleted — `--fresh` only renames the current file to `.jsonl.bak`; Claude's own 30-day purge is disabled via `cleanupPeriodDays` |
 | 10 | **Hermes Agent** | experimental | Singleton sandbox where you mount/unmount repos dynamically; `hermes gateway` as PID 1 |
-| 11 | **Alternative LLM backends** | experimental | `--kimi`, `--glm` flags on attach — use non-Claude agents inside the same sandbox |
-| 12 | **Telegram notifications** | notifications | Sends last-message/attention alert to phone when agent finishes or needs input |
-| 13 | **Telegram reply listener** | notifications | Long-poll daemon (`nibble listen`) — routes phone replies back to agents via `podman exec -i` |
-| 14 | **Telegram bot commands** | notifications | `/help`, `/sandboxes`, `/spawn`, `/cron list` — control nibble from phone |
-| 15 | **Cron jobs** | scheduling | Schedule prompts to run inside sandboxes on a cron expression; markdown file format; skip-if-running; expiry |
-| 16 | **Status line** | dx | Claude Code terminal status bar showing dir, branch, model, context %, 5h and 7d rate limit bars |
-| 17 | **AI Factory pipeline** | meta | 3-tier pipeline (Quick/Standard/Full) with 5 skills; `--factory` flag on spawn injects pipeline instructions into AGENTS.md; blueprints/reports stored under `.nibble/factory/` |
-| 18 | **Health checks** | ops | `SandboxHealth` enum (Healthy/Degraded/Dead); periodic prune in listen daemon; Telegram alert on unexpected container death |
-| 19 | **Auto-resume on reboot** | ops | systemd user service (`nibble-resume.service`) restarts containers after host reboot |
-| 20 | **Inject** | ops | `nibble inject <id> <msg>` — send a message directly to any sandbox agent, bypassing Telegram |
-| 21 | **Web session inspector** | dx | `nibble web` — dark-mode browser UI (port 7878) for browsing/searching pi sessions, usage dashboard, conversation viewer; runs as `nibble-web.service`, Tailscale-reachable with token auth. See [docs/web.md](docs/web.md) |
-| 22 | **omp (oh-my-pi) support** | core | `--pi` runs upstream pi, `--omp` runs omp (oh-my-pi) — explicit, independent flags. Sandboxes mount both `~/.pi` and `~/.omp`; sessions are format-compatible and cross-resumable. `scripts/migrate-pi-to-omp.sh` migrates host config |
-| 23 | **Session recovery** | core | Eager task→session mapping via extension-reported `session-path`; interactive picker when attach finds multiple sessions for a repo; `session list` shows task links; runbook in [docs/session-recovery.md](docs/session-recovery.md) |
+| 11 | **Status line** | dx | Claude Code terminal status bar showing dir, branch, model, context %, 5h and 7d rate limit bars |
+| 12 | **Health checks** | ops | `SandboxHealth` enum (Healthy/Degraded/Dead); `nibble prune` marks stale tasks exited and GCs old records |
+| 13 | **Auto-resume on reboot** | ops | systemd user service (`nibble-resume.service`) restarts containers after host reboot |
+| 14 | **Web session inspector** | dx | `nibble web` — dark-mode browser UI (port 7878) for browsing/searching pi sessions, usage dashboard, conversation viewer; runs as `nibble-web.service`, Tailscale-reachable with token auth. See [docs/web.md](docs/web.md) |
+| 15 | **omp (oh-my-pi) support** | core | `--pi` runs upstream pi, `--omp` runs omp (oh-my-pi) — explicit, independent flags. Sandboxes mount both `~/.pi` and `~/.omp`; sessions are format-compatible and cross-resumable. `scripts/migrate-pi-to-omp.sh` migrates host config |
+| 16 | **Session recovery** | core | Eager task→session mapping via extension-reported `session-path`; interactive picker when attach finds multiple sessions for a repo; `session list` shows task links; runbook in [docs/session-recovery.md](docs/session-recovery.md) |
+| 17 | **Agent status panel** | core | `nibble status` live table (blocked/running/idle/exited with attention reasons) fed by `nibble report status` hooks; `nibble sidebar` opens an auto-refreshing side pane in the current zellij session. Claude hooks (Notification → blocked, Stop → idle, SessionEnd → exited) and the pi/omp extension (agent_start/settled/shutdown) report transitions |
 
 ---
 
@@ -42,12 +36,9 @@ This section lists every feature area in the project. Use it to audit what's wor
 
 - **Podman Sandboxes**: Run agents in rootless containers — repo mounted read-write, ports exposed, full dev flexibility inside
 - **Setup Scripts**: Drop a `.nibble/setup.sh` in any repo to auto-install its toolchain and dependencies at spawn time
-- **Persistent Session Continuity**: Every repo gets a stable session UUID — re-attaching and Telegram replies always resume the same conversation
+- **Persistent Session Continuity**: Every repo gets a stable session UUID — re-attaching always resumes the same conversation
 - **Sessions are never deleted**: every conversation (main, `--fresh`, `--btw`) stays on disk forever; Claude's built-in 30-day transcript purge is disabled
-- **Telegram Notifications**: Receive the agent's last message on your phone when it finishes or needs a decision
-- **Telegram Replies**: Reply to notifications from your phone to unblock agents (input injected via `podman exec`)
 - **Auto-Resume**: Sandbox agents are tracked across host reboots
-- **Cron Jobs**: Schedule prompts to run automatically inside sandboxes
 - **Unified Task Tracking**: Track sandboxed and non-sandboxed agents in one dashboard
 - **3-State Model**: Running → Completed → Exited
 - **SQLite Backend**: Fast, reliable, concurrent-safe storage
@@ -58,31 +49,26 @@ This section lists every feature area in the project. Use it to audit what's wor
 ┌─────────────────────────────────────────────────────────────────────┐
 │                          HOST SYSTEM                                │
 │                                                                     │
-│  nibble CLI               SQLite DB           Telegram Listener     │
-│  ─────────                ─────────           ────────────────      │
-│  sandbox / kill           tasks.db            long-polls Telegram   │
-│  list / watch             container_state     routes replies to     │
-│  prune / inject           session_id          sandbox via exec      │
-│         │                                              │            │
-│         │ podman run                                   │            │
-│         ▼                                              ▼            │
+│  nibble CLI               SQLite DB                                 │
+│  ─────────                ─────────                                 │
+│  sandbox / kill           tasks.db                                  │
+│  list / watch             container_state                           │
+│  prune                    session_id                                │
+│         │                                                           │
+│         │ podman run                                                │
+│         ▼                                                           │
 │  ┌──────────────────────────────────────────────────────────────┐   │
 │  │  Podman Container                                            │   │
 │  │                                                              │   │
-│  │  claude --resume <id>  ←── podman exec -i (stdin message)   │   │
+│  │  claude --resume <id>  ←── podman exec (attach)             │   │
 │  │                                                              │   │
-│  │  Stop hook → nibble report session-id / last-message        │   │
+│  │  Stop hook → nibble report session-id                       │   │
 │  │  /workspace  (repo mounted RW)                              │   │
 │  └──────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────┘
-                         │
-                         ▼
-               📱 Telegram (your phone)
 ```
 
-**Notification flow**: Claude Code `Stop` hook → `nibble report last-message` + `nibble notify` → Telegram message with Reply button
-
-**Reply flow**: Telegram reply → listener daemon → `podman exec -i claude --resume <session-id>` (stdin) → Claude processes turn → Stop hook fires → next notification sent
+**Hook flow**: Claude Code `Stop` hook → `nibble report session-id` + memory capture → async session summarization
 
 ## Installation
 
@@ -102,12 +88,6 @@ cd nibble
 
 # Full install (builds binary, installs podman if needed, builds sandbox image)
 ./install.sh
-
-# Also set up Telegram notifications
-./install.sh --telegram
-
-# Also start the reply listener daemon
-./install.sh --telegram --listen
 ```
 
 After install, add aliases to your shell if prompted:
@@ -127,7 +107,6 @@ What `install.sh` does:
 6. Installs the Claude Code status line script (see [Status Line](#status-line))
 7. Builds the sandbox image (`nibble-sandbox:latest`)
 8. Enables `nibble-resume.service` (systemd user service, resumes agents on reboot)
-9. Optionally sets up Telegram and the reply listener daemon
 
 ---
 
@@ -225,9 +204,8 @@ nibble sandbox attach a1b2c3d4
 # Start a fresh conversation instead of resuming
 nibble sandbox attach . --fresh
 
-# Use an alternative LLM backend
-nibble sandbox attach . --kimi
-nibble sandbox attach . --glm
+# Ad-hoc side session that doesn't touch the main conversation
+nibble sandbox attach . --btw
 ```
 
 Detach with `exit` or `Ctrl+C`.
@@ -238,7 +216,7 @@ When a sandbox spawns, nibble writes agent instructions into two files inside th
 
 | File | Purpose |
 |------|---------|
-| `AGENTS.md` | Sandbox environment info, toolchain detection, and (if enabled) the AI Factory pipeline instructions |
+| `AGENTS.md` | Sandbox environment info and toolchain detection |
 | `.claude/CLAUDE.md` | Claude Code entry point — first line is `@../AGENTS.md` which imports the file above |
 
 **How it works:**
@@ -376,31 +354,37 @@ Only the repos you explicitly mount are accessible inside the container. No home
 ## Monitoring
 
 ```bash
-# Show running tasks (default)
-nibble
+# Live agent status table (blocked 🔴 / running 🟢 / idle ⚪ / exited ⚫)
+nibble status
 
-# List all tasks
-nibble list --all
+# Auto-refreshing status — run it in a dedicated (zellij) pane
+nibble status --watch
 
-# Filter by status
-nibble list --status running
-nibble list --status completed
-nibble list --status exited
+# Open the status side panel in the current zellij session
+nibble sidebar
 
-# Live dashboard (refreshes every 2s)
-nibble watch
+# Machine-readable output
+nibble status --json
 
-# Detailed view of one task
-nibble show <task-id>
+# Include recently exited tasks (dimmed)
+nibble status --all
 
-# Clean up completed/exited tasks
-nibble clear-all
-nibble reset --force   # wipe everything
+# List sandbox containers
+nibble sandbox list
+
+# Browse agent sessions (pi/omp/claude)
+nibble session list
 
 # Prune stale tasks (dead PIDs / gone containers → mark exited)
-# Runs automatically every ~5 min inside the listen daemon
 nibble prune
 ```
+
+Status transitions are reported by the Claude Code hooks (UserPromptSubmit /
+PostToolUse → running, Notification → blocked with the prompt summary, Stop →
+idle, SessionEnd → exited) and by the pi/omp extension events
+(agent_start → running, agent_settled → completed, session_shutdown → exited).
+A blocked agent shows 🔴 with its attention reason at the top of the table —
+that's your "look at me now" signal when steering several agents at once.
 
 ---
 
@@ -433,208 +417,6 @@ nibble installs a Claude Code status line that shows live context and quota info
 
 ---
 
-## Telegram Setup
-
-### Notifications
-
-```bash
-./install.sh --telegram
-```
-
-The setup script walks you through creating a bot via @BotFather and writes `~/.agent-tasks/config.toml`:
-
-```toml
-[telegram]
-enabled = true
-bot_token = "123456789:ABCdefGHIjklMNOpqrSTUvwxYZ"
-chat_id   = "123456789"
-# allowed_username = "yourusername"   # optional extra auth
-```
-
-**Message format:**
-
-```
-🤖 Claude Code
-📁 myapp · main
-⏱ 4m 32s
-────────────────────────────
-I've finished the refactor. Here's what changed: ...
-```
-
-```
-🚨 Needs your attention
-🤖 Claude Code
-📁 myapp · main
-⏱ 2m 10s
-────────────────────────────
-Claude needs permission to run: npm install
-```
-
-### Reply listener (send messages to agents from phone)
-
-```bash
-./install.sh --listen
-```
-
-This installs a systemd user service (`nibble-listener.service`) that long-polls Telegram. Every notification has a **↩ Reply** button — tap it, type your message, and it gets injected into the agent inside its container.
-
-```bash
-# Daemon management
-systemctl --user status nibble-listener
-journalctl --user -u nibble-listener -f
-```
-
-You can also inject directly from the terminal (bypasses Telegram):
-
-```bash
-nibble inject <task-id> "Yes, proceed with the migration"
-```
-
-#### Telegram bot commands
-
-```
-/help           — show available commands
-/sandboxes      — list running sandboxes with reply buttons
-/spawn <path>   — spawn a new sandbox
-/cron list      — list scheduled cron jobs
-```
-
----
-
-## Troubleshooting & Logging
-
-### Checking listener logs
-
-The listener logs all activity to stderr with a `[listen]` prefix. When running as a systemd service, view logs with:
-
-```bash
-# Follow live logs
-journalctl --user -u nibble-listener -f
-
-# Last 5 minutes
-journalctl --user -u nibble-listener --since '5 min ago'
-```
-
-### Log lines and what they mean
-
-| Log line | Meaning |
-|----------|---------|
-| `[listen] Poll ok: N update(s)` | Listener is alive and received N Telegram updates. If you don't see this, the listener is stuck or not running. |
-| `[listen] Command menu registered` | Bot commands (/help, /sandboxes, etc.) registered with Telegram on startup. |
-| `[listen] handle_update type=callback_query` | User tapped an inline button (e.g. ↩ Reply). |
-| `[listen] Callback from user ...: data="reply:..."` | Reply button tapped; routing data extracted. |
-| `[listen] Pending reply set: chat=... task=...` | `pending_reply` stored in DB — user's next message will route to this task. |
-| `[listen] Routing via pending reply to task ...` | User's message matched a pending reply and is being injected. |
-| `[listen] No pending reply for chat=...` | User sent a message but no pending reply was set (no button tap, or already consumed). |
-| `[listen] Task not found: ...` | The task_id from routing doesn't exist in the DB. |
-| `[listen] getUpdates error: ... 409 ...` | **Another listener instance is running.** See below. |
-| `[listen] Running periodic prune…` / `Prune done` | Periodic health check of all containers. If "Prune done" never appears, a `podman inspect`/`exec` is hanging. |
-| `[sandboxes] checking N container state entries` | `/sandboxes` is evaluating N containers from the DB. |
-| `[sandboxes] container=... health=...` | Health check result for each container. |
-
-### Common issues
-
-#### HTTP 409 Conflict
-
-```
-[listen] getUpdates error: ... status code 409
-```
-
-Telegram only allows one `getUpdates` connection per bot token. A 409 means another process is already polling. This typically happens when:
-
-1. You started `nibble listen` manually while the systemd service is also running
-2. An agent inside a sandbox container accidentally started `nibble listen` (the binary is bind-mounted into containers)
-
-**Fix:**
-
-```bash
-# Kill all listener instances
-systemctl --user stop nibble-listener
-pkill -9 -f 'nibble'
-
-# Verify nothing is running
-ps aux | grep 'nibble listen'
-
-# Wait for Telegram's long-poll to expire (30s timeout)
-sleep 35
-
-# Reset Telegram's polling state
-curl -s "https://api.telegram.org/bot<BOT_TOKEN>/getUpdates?offset=-1" | head -c 200
-
-# Start exactly one instance
-systemctl --user start nibble-listener
-```
-
-**Prevention:** nibble refuses to run `listen` inside a sandbox container (detected via `AGENT_TASK_ID` env var).
-
-#### /sandboxes shows nothing
-
-- Check logs for `[sandboxes]` lines — if containers show `health=Dead`, Podman may not be running or the container was removed
-- If containers show `health=Stopped`, they will be auto-restarted; wait 2-3 seconds
-- If no `[sandboxes]` lines appear at all, the listener isn't processing the command (see 409 above)
-
-#### Reply doesn't route
-
-1. Check that `[listen] Pending reply set` appears after tapping the reply button
-2. Check that `[listen] Routing via pending reply` or `[listen] No pending reply` appears after sending your message
-3. If "No pending reply" — the `pending_reply` was consumed by a different message, or the DB write failed
-
-#### Listener gets stuck (no logs, no responses)
-
-A `podman inspect` or `podman exec` command may be hanging (rare, but happens with certain Podman states). The listener is single-threaded — a hanging subprocess blocks the entire loop. Restart the listener:
-
-```bash
-systemctl --user restart nibble-listener
-```
-
----
-
-## Cron Jobs
-
-Schedule prompts to run automatically inside a sandbox:
-
-```bash
-# Add a daily standup at 9am weekdays
-nibble cron add ~/projects/myapp \
-    --schedule "0 9 * * 1-5" \
-    --prompt "Review yesterday's commits and summarise what was done." \
-    --label "Daily Standup"
-
-# From a markdown file (easier for long prompts)
-nibble cron add ~/projects/myapp --file my-cron.md
-
-# List all cron jobs
-nibble cron list
-nibble cron list ~/projects/myapp
-
-# Edit a job
-nibble cron edit "Daily Standup" --schedule "0 8 * * 1-5"
-nibble cron edit "Daily Standup" --disable
-
-# Delete a job
-nibble cron del "Daily Standup"
-
-# Run immediately (for testing)
-nibble cron run "Daily Standup"
-```
-
-Markdown file format (`my-cron.md`):
-
-```markdown
-# Daily Standup
-
-schedule = "0 9 * * 1-5"
-enabled = true
-skip_if_running = true
-
-## Prompt
-
-Please review yesterday's commits and prepare a summary of what was accomplished.
-Focus on the main branch changes.
-```
-
----
-
 ## How it works
 
 ### Sandbox model
@@ -648,7 +430,6 @@ If you try to spawn a sandbox for a repo that already has one, nibble re-attache
 Every repo gets a **deterministic session UUID** derived from its canonical path. This means:
 
 - Re-attaching to the same repo always resumes the same conversation — no matter how many times you detach and re-attach
-- Telegram replies land in the same session as your interactive terminal session
 - Container restarts after a reboot resume the same history
 
 Session history is stored in `~/.claude/projects/<hash>/<uuid>.jsonl` on the host (mounted into the container), so it survives container recreation.
@@ -660,22 +441,11 @@ Session history is stored in `~/.claude/projects/<hash>/<uuid>.jsonl` on the hos
 nibble sandbox attach . --fresh
 ```
 
-`--fresh` renames the current `.jsonl` to `.jsonl.bak` and starts Claude with a blank slate. The backup is never deleted — nibble keeps every session file forever, and Claude Code's own transcript cleanup is pinned to ~100 years (`cleanupPeriodDays` in `~/.claude/settings.json`, set by `scripts/setup-claude-hooks.sh`). The session UUID stays the same so Telegram injection keeps working without any DB changes.
+`--fresh` renames the current `.jsonl` to `.jsonl.bak` and starts Claude with a blank slate. The backup is never deleted — nibble keeps every session file forever, and Claude Code's own transcript cleanup is pinned to ~100 years (`cleanupPeriodDays` in `~/.claude/settings.json`, set by `scripts/setup-claude-hooks.sh`). The session UUID stays the same so re-attaches keep working without any DB changes.
 
-### Telegram injection
+### Container crash detection
 
-When you reply to a notification from your phone, the listener daemon:
-
-1. Receives the reply via Telegram long-poll
-2. Runs `claude --continue` inside the container with your message on stdin (non-interactive, one-shot turn)
-3. Claude loads the full prior conversation history and processes the new message
-4. The Stop hook inside the container fires when Claude finishes and sends the response back to Telegram
-
-The injected turn and an interactive attach session share the same conversation history — they are just different ways to add a turn to the same session.
-
-### Container crash notifications
-
-If a container disappears unexpectedly (OOM, host kill, etc.), the prune daemon detects it and sends a Telegram notification so you can re-spawn. Normal session exits (detach, turn complete) are not notified.
+If a container disappears unexpectedly (OOM, host kill, etc.), `nibble prune` detects it and marks the task exited so you can re-spawn.
 
 ---
 
@@ -707,20 +477,18 @@ Network is host-mode, so services started inside the container (e.g. `npm run de
 
 | Command | Purpose |
 |---------|---------|
-| `nibble` | Show running tasks |
-| `nibble list --all` | List all tasks |
-| `nibble watch` | Live dashboard |
-| `nibble show <id>` | Task detail |
-| `nibble clear-all` | Clear completed/exited tasks |
+| `nibble status` | Live agent status table (blocked 🔴 / running 🟢 / idle ⚪ / exited ⚫) |
+| `nibble status --watch` | Auto-refreshing status (for a dedicated pane) |
+| `nibble status --json` | Machine-readable status output |
+| `nibble sidebar` | Open the agent-status side panel in the current zellij session |
 | `nibble prune` | Mark stale processes as exited |
-| `nibble inject <id> <msg>` | Send message to agent |
-| `nibble notify --message <msg>` | Send Telegram notification |
 | `nibble sandbox spawn <repo>` | Start a sandboxed agent |
 | `nibble sandbox list` | List open sandboxes |
 | `nibble sandbox attach <id>` | Attach to sandbox |
 | `nibble sandbox kill <id>` | Stop sandbox |
 | `nibble sandbox kill --all` | Stop all sandboxes |
 | `nibble sandbox resume --all` | Resume agents after reboot |
+| `nibble session list` | Browse/search agent sessions (pi/omp/claude) |
 | `nibble hermes init` | Start Hermes Agent sandbox (singleton) |
 | `nibble hermes attach` | Attach to Hermes CLI (auto-spawns if needed) |
 | `nibble hermes mount <path>` | Mount a repo into the Hermes sandbox |
@@ -728,14 +496,7 @@ Network is host-mode, so services started inside the container (e.g. `npm run de
 | `nibble hermes list` | Show Hermes sandbox status and mounted repos |
 | `nibble hermes kill` | Stop Hermes sandbox (repos preserved) |
 | `./install.sh --rebuild` | Rebuild sandbox image |
-| `nibble cron add` | Schedule a prompt |
-| `nibble cron list` | List cron jobs |
-| `nibble cron edit <id>` | Modify a cron job |
-| `nibble cron del <id>` | Delete a cron job |
-| `nibble cron run <id>` | Run immediately |
 | `install.sh` | Install / upgrade |
-| `install.sh --telegram` | Set up Telegram bot |
-| `install.sh --listen` | Start reply listener daemon |
 
 ---
 
@@ -758,10 +519,6 @@ src/
 ├── sandbox/
 │   ├── mod.rs               # Sandbox trait, ContainerInfo, helpers
 │   └── podman.rs            # Podman implementation + Dockerfile
-├── agent_input.rs           # Input injection via podman exec -i (sandbox tasks)
-├── notifications/
-│   ├── telegram.rs          # Send Telegram messages
-│   └── telegram_listener.rs # Long-polling daemon, reply routing
 ├── config.rs                # TOML config loader
 ├── display/mod.rs           # Terminal task list rendering
 └── monitor/mod.rs           # Process liveness monitoring
