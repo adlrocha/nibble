@@ -456,13 +456,7 @@ fi
 SYSTEMD_DIR="$HOME/.config/systemd/user"
 mkdir -p "$SYSTEMD_DIR"
 
-# ── 5c. Privacy filter proxy (optional) ──────────────────────────────────────
-step "Installing privacy filter proxy"
-
-mkdir -p "$HOME/.nibble"
-cp "$REPO_DIR/scripts/privacy-proxy.py" "$HOME/.nibble/privacy-proxy.py"
-chmod +x "$HOME/.nibble/privacy-proxy.py"
-ok "privacy-proxy.py → $HOME/.nibble/privacy-proxy.py"
+# ── 5c. Privacy filter proxy (opt-in: --privacy-proxy) ───────────────────────
 
 # Stage llama-server script + model profiles so `nibble lm use` can find them
 # from the installed binary in ~/.local/bin (outside the repo tree).
@@ -471,26 +465,31 @@ chmod +x "$HOME/.nibble/setup-llama-server.sh"
 cp "$REPO_DIR/scripts/llm-model-profiles.toml" "$HOME/.nibble/llm-model-profiles.toml"
 ok "llama-server script + profiles → $HOME/.nibble/"
 
-# Check Python + dependencies
-if command -v python3 >/dev/null 2>&1; then
-    ok "python3 found"
-    # Try importing required packages
-    if python3 -c "import fastapi, httpx, uvicorn, transformers" 2>/dev/null; then
-        ok "Python dependencies installed (fastapi, httpx, uvicorn, transformers)"
-    else
-        warn "Missing Python dependencies for privacy proxy."
-        warn "Install with:"
-        warn "  python3 -m pip install --user fastapi httpx uvicorn transformers torch"
-        warn ""
-        warn "Or run with --privacy-proxy to attempt auto-install."
-    fi
-else
-    warn "python3 not found — privacy proxy requires Python 3."
-    warn "Install Python 3 and then run:"
-    warn "  python3 -m pip install --user fastapi httpx uvicorn transformers torch"
-fi
+if [ "$RUN_PRIVACY_PROXY" = true ]; then
+    step "Installing privacy filter proxy"
 
-cat > "$SYSTEMD_DIR/nibble-privacy-proxy.service" << UNIT
+    mkdir -p "$HOME/.nibble"
+    cp "$REPO_DIR/scripts/privacy-proxy.py" "$HOME/.nibble/privacy-proxy.py"
+    chmod +x "$HOME/.nibble/privacy-proxy.py"
+    ok "privacy-proxy.py → $HOME/.nibble/privacy-proxy.py"
+
+    # Check Python + dependencies
+    if command -v python3 >/dev/null 2>&1; then
+        ok "python3 found"
+        if python3 -c "import fastapi, httpx, uvicorn, transformers" 2>/dev/null; then
+            ok "Python dependencies installed (fastapi, httpx, uvicorn, transformers)"
+        else
+            warn "Missing Python dependencies for privacy proxy."
+            warn "Install with:"
+            warn "  python3 -m pip install --user fastapi httpx uvicorn transformers torch"
+        fi
+    else
+        warn "python3 not found — privacy proxy requires Python 3."
+        warn "Install Python 3 and then run:"
+        warn "  python3 -m pip install --user fastapi httpx uvicorn transformers torch"
+    fi
+
+    cat > "$SYSTEMD_DIR/nibble-privacy-proxy.service" << UNIT
 [Unit]
 Description=Nibble LLM Privacy Filter Proxy
 After=network.target
@@ -505,18 +504,23 @@ Environment=HOME=%h
 WantedBy=default.target
 UNIT
 
-if systemctl --user daemon-reload 2>/dev/null; then
-    systemctl --user enable nibble-privacy-proxy.service 2>/dev/null || true
-    if [ "$RUN_PRIVACY_PROXY" = true ]; then
+    if systemctl --user daemon-reload 2>/dev/null; then
+        systemctl --user enable nibble-privacy-proxy.service 2>/dev/null || true
         systemctl --user restart nibble-privacy-proxy.service 2>/dev/null \
             && ok "Privacy proxy service started" \
             || warn "Could not start privacy proxy service"
     else
-        ok "Privacy proxy service installed (enable with --privacy-proxy)"
+        warn "systemd user session not available. Privacy proxy won't auto-start."
+        warn "Start manually: python3 $HOME/.nibble/privacy-proxy.py"
     fi
 else
-    warn "systemd user session not available. Privacy proxy won't auto-start."
-    warn "Start manually: python3 $HOME/.nibble/privacy-proxy.py"
+    # Not opted in — but if an older install left the service behind, refresh
+    # the script file so the existing unit keeps working.
+    if [ -f "$SYSTEMD_DIR/nibble-privacy-proxy.service" ]; then
+        mkdir -p "$HOME/.nibble"
+        cp "$REPO_DIR/scripts/privacy-proxy.py" "$HOME/.nibble/privacy-proxy.py"
+        chmod +x "$HOME/.nibble/privacy-proxy.py"
+    fi
 fi
 
 # ── 5a. Install systemd auto-resume service ───────────────────────────────────
