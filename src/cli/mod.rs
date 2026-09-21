@@ -40,9 +40,22 @@ pub enum Commands {
     },
 
     /// Open the agent-status side panel in the current zellij session
-    Sidebar,
+    Sidebar {
+        /// Install the always-on sidebar layout (every tab of every new
+        /// zellij session gets a status pane). Never overwrites a custom layout.
+        #[arg(long)]
+        install: bool,
+        /// Remove the nibble-managed zellij layout files
+        #[arg(long)]
+        uninstall: bool,
+    },
 
-    /// Report task status (internal command used by wrappers and hooks)
+    /// Jump to the zellij pane hosting an agent (task ID or unique prefix)
+    Goto {
+        /// Task ID, unique ID prefix, or row number from `nibble status`
+        task: String,
+    },
+
     Report {
         #[command(subcommand)]
         action: ReportAction,

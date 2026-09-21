@@ -45,8 +45,11 @@ fn main() -> Result<()> {
         Commands::Status { watch, json, all } => {
             status::cmd_status(&db, watch, json, all)?;
         }
-        Commands::Sidebar => {
-            status::cmd_sidebar()?;
+        Commands::Sidebar { install, uninstall } => {
+            status::cmd_sidebar(install, uninstall)?;
+        }
+        Commands::Goto { task } => {
+            status::cmd_goto(&db, &task)?;
         }
         Commands::Report { action } => match action {
             ReportAction::Start {

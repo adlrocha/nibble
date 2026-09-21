@@ -1360,12 +1360,31 @@ pub(crate) fn cmd_sandbox_attach(
     omp: bool,
     session_id: Option<String>,
 ) -> Result<()> {
-    let task = db
+    let mut task = db
         .get_task_by_id(&task_id)?
         .ok_or_else(|| anyhow::anyhow!("Task not found: {}", task_id))?;
 
     if task.sandbox_type != SandboxType::Podman {
         anyhow::bail!("Task {} is not a sandbox task", task_id);
+    }
+
+    // Remember which zellij pane this agent is attached in, so
+    // `nibble status --watch` / `nibble goto` can jump back to it.
+    if let Ok(pane) = std::env::var("ZELLIJ_PANE_ID") {
+        if let Ok(pane) = pane.parse::<u32>() {
+            let ctx = task.context.get_or_insert_with(|| TaskContext {
+                url: None,
+                project_path: None,
+                session_id: None,
+                claude_session_id: None,
+                extra: std::collections::HashMap::new(),
+            });
+            ctx.extra.insert(
+                "zellij_pane_id".to_string(),
+                serde_json::Value::Number(pane.into()),
+            );
+            let _ = db.update_task(&task);
+        }
     }
 
     let container_id = task

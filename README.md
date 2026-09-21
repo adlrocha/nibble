@@ -28,7 +28,7 @@ This section lists every feature area in the project. Use it to audit what's wor
 | 14 | **Web session inspector** | dx | `nibble web` — dark-mode browser UI (port 7878) for browsing/searching pi sessions, usage dashboard, conversation viewer; runs as `nibble-web.service`, Tailscale-reachable with token auth. See [docs/web.md](docs/web.md) |
 | 15 | **omp (oh-my-pi) support** | core | `--pi` runs upstream pi, `--omp` runs omp (oh-my-pi) — explicit, independent flags. Sandboxes mount both `~/.pi` and `~/.omp`; sessions are format-compatible and cross-resumable. `scripts/migrate-pi-to-omp.sh` migrates host config |
 | 16 | **Session recovery** | core | Eager task→session mapping via extension-reported `session-path`; interactive picker when attach finds multiple sessions for a repo; `session list` shows task links; runbook in [docs/session-recovery.md](docs/session-recovery.md) |
-| 17 | **Agent status panel** | core | `nibble status` live table (blocked/running/idle/exited with attention reasons) fed by `nibble report status` hooks; `nibble sidebar` opens an auto-refreshing side pane in the current zellij session. Claude hooks (Notification → blocked, Stop → idle, SessionEnd → exited) and the pi/omp extension (agent_start/settled/shutdown) report transitions |
+| 17 | **Agent status panel** | core | `nibble status` live table (blocked/running/idle/exited with attention reasons) fed by `nibble report status` hooks; `nibble sidebar --install` gives every zellij tab an auto-refreshing status pane; `1`-`9` or `nibble goto` jumps focus to an agent's pane. Claude hooks (Notification → blocked, Stop → idle, SessionEnd → exited) and the pi/omp extension (agent_start/settled/shutdown) report transitions |
 
 ---
 
@@ -360,9 +360,17 @@ nibble status
 # Auto-refreshing status — run it in a dedicated (zellij) pane
 nibble status --watch
 
-# Open the status side panel in the current zellij session
+# Open the status side panel in the current zellij tab (ad-hoc)
 nibble sidebar
 
+# Install the always-on sidebar: every tab of every new zellij session
+# gets a narrow status pane on the right. Never overwrites a custom layout —
+# if you already have one it writes layouts/nibble.kdl instead and tells
+# you how to adopt it. Remove with: nibble sidebar --uninstall
+nibble sidebar --install
+
+# Jump to the zellij pane hosting an agent (task ID or unique prefix)
+nibble goto <task>
 # Machine-readable output
 nibble status --json
 
@@ -385,6 +393,12 @@ idle, SessionEnd → exited) and by the pi/omp extension events
 (agent_start → running, agent_settled → completed, session_shutdown → exited).
 A blocked agent shows 🔴 with its attention reason at the top of the table —
 that's your "look at me now" signal when steering several agents at once.
+
+The `--watch` view is interactive: pressing `1`-`9` jumps zellij focus to the
+pane hosting that agent (pane IDs are recorded by the wrappers at agent start
+and by `sandbox attach`; cross-tab jumps work), and `q` quits.
+
+Requires zellij ≥ 0.42 for pane jumping (`zellij action focus-pane-id`).
 
 ---
 
@@ -480,7 +494,9 @@ Network is host-mode, so services started inside the container (e.g. `npm run de
 | `nibble status` | Live agent status table (blocked 🔴 / running 🟢 / idle ⚪ / exited ⚫) |
 | `nibble status --watch` | Auto-refreshing status (for a dedicated pane) |
 | `nibble status --json` | Machine-readable status output |
-| `nibble sidebar` | Open the agent-status side panel in the current zellij session |
+| `nibble sidebar` | Open the agent-status side panel in the current zellij tab |
+| `nibble sidebar --install` | Always-on sidebar: every zellij tab gets a status pane |
+| `nibble goto <task>` | Jump zellij focus to the pane hosting an agent |
 | `nibble prune` | Mark stale processes as exited |
 | `nibble sandbox spawn <repo>` | Start a sandboxed agent |
 | `nibble sandbox list` | List open sandboxes |

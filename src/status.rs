@@ -115,9 +115,10 @@ fn truncate_chars(s: &str, max: usize) -> String {
 
 /// Render the status list for a terminal `width` columns wide.
 /// Two lines per task so narrow (sidebar) panes stay readable.
-pub(crate) fn render_status(tasks: &[&Task], width: usize) -> String {
+/// `numbered` prefixes `N)` keys for the interactive watch mode (max 9).
+pub(crate) fn render_status(tasks: &[&Task], width: usize, numbered: bool) -> String {
     let mut out = String::new();
-    for task in tasks {
+    for (i, task) in tasks.iter().enumerate() {
         let state = sidebar_state(task);
         let icon = state_icon(&state);
         let (_emoji, agent_label) = agent_display(&task.agent_type);
@@ -127,10 +128,14 @@ pub(crate) fn render_status(tasks: &[&Task], width: usize) -> String {
             .map(|c| format!("sandbox {}", &c[..12.min(c.len())]))
             .unwrap_or_else(|| "host".to_string());
 
+        let key = if numbered && i < 9 {
+            format!("{}\u{1b}[2m)\u{1b}[0m", i + 1)
+        } else {
+            " ".to_string()
+        };
         let title_width = width.saturating_sub(4).max(10);
         out.push_str(&format!(
-            "{} {}\n",
-            icon,
+            "{icon}{key} {}\n",
             truncate_chars(task.title.trim(), title_width)
         ));
 
@@ -210,6 +215,63 @@ fn status_json(tasks: &[Task]) -> Result<String> {
     Ok(serde_json::to_string_pretty(&rows)?)
 }
 
+/// The zellij pane id recorded for this task — written by the wrappers at
+/// agent start (`report start --zellij-pane-id`) and by sandbox attach.
+pub(crate) fn pane_id_of(task: &Task) -> Option<u32> {
+    task.context
+        .as_ref()?
+        .extra
+        .get("zellij_pane_id")?
+        .as_u64()
+        .and_then(|v| u32::try_from(v).ok())
+}
+
+fn focus_pane_id(pane_id: u32) -> Result<()> {
+    let status = std::process::Command::new("zellij")
+        .args(["action", "focus-pane-id"])
+        .arg(pane_id.to_string())
+        .status()
+        .context("failed to run `zellij action focus-pane-id`")?;
+    if !status.success() {
+        anyhow::bail!("zellij action focus-pane-id exited with {status}");
+    }
+    Ok(())
+}
+
+/// Resolve a task by full ID or unique ID prefix.
+fn resolve_task(db: &Database, target: &str) -> Result<Task> {
+    if let Some(t) = db.get_task_by_id(target)? {
+        return Ok(t);
+    }
+    let tasks = collect_status_tasks(db, true)?;
+    let matches: Vec<&Task> = tasks.iter().filter(|t| t.task_id.starts_with(target)).collect();
+    match matches.as_slice() {
+        [t] => Ok((*t).clone()),
+        [] => anyhow::bail!("no task matches '{target}'"),
+        many => anyhow::bail!(
+            "'{target}' is ambiguous ({}): {}",
+            many.len(),
+            many.iter().map(|t| &t.task_id[..8.min(t.task_id.len())]).collect::<Vec<_>>().join(", ")
+        ),
+    }
+}
+
+/// `nibble goto <task>` — jump to the zellij pane hosting the agent.
+pub(crate) fn cmd_goto(db: &Database, target: &str) -> Result<()> {
+    if std::env::var_os("ZELLIJ").is_none() {
+        anyhow::bail!("not inside a zellij session");
+    }
+    let task = resolve_task(db, target)?;
+    match pane_id_of(&task) {
+        Some(pane) => focus_pane_id(pane),
+        None => anyhow::bail!(
+            "no zellij pane recorded for task {} (host agents started before \
+             the wrappers were installed, or a dead pane, have none)",
+            &task.task_id[..8.min(task.task_id.len())]
+        ),
+    }
+}
+
 pub(crate) fn cmd_status(db: &Database, watch: bool, json: bool, all: bool) -> Result<()> {
     if json {
         let tasks = collect_status_tasks(db, all)?;
@@ -223,13 +285,16 @@ pub(crate) fn cmd_status(db: &Database, watch: bool, json: bool, all: bool) -> R
         .unwrap_or(40)
         .max(20);
 
+    // In watch mode grab single-key input so digits jump to the agent's pane.
+    let mut raw = if watch { RawMode::enable() } else { None };
+    let mut notice: Option<String> = None;
+
     loop {
         let tasks = collect_status_tasks(db, all)?;
-        let refs: Vec<&Task> = tasks.iter().collect();
-        let body = if refs.is_empty() {
+        let body = if tasks.is_empty() {
             "  no active agents\n".to_string()
         } else {
-            render_status(&refs, width)
+            render_status(&tasks.iter().collect::<Vec<_>>(), width, watch)
         };
 
         if watch {
@@ -242,28 +307,200 @@ pub(crate) fn cmd_status(db: &Database, watch: bool, json: bool, all: bool) -> R
             println!();
         }
         print!("{body}");
+        if let Some(n) = &notice {
+            println!("\x1b[1;33m{n}\x1b[0m");
+        }
         use std::io::Write;
         std::io::stdout().flush()?;
 
         if !watch {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_secs(1));
+
+        notice = None;
+        if raw.is_none() {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            continue;
+        }
+        match read_key(1000) {
+            Some(Some(key)) => match key {
+                b'q' | 0x03 => break,
+                b'1'..=b'9' => {
+                    let idx = (key - b'1') as usize;
+                    notice = Some(match tasks.get(idx) {
+                        Some(t) => match pane_id_of(t) {
+                            Some(pane) => focus_pane_id(pane)
+                                .map_err(|e| e.to_string())
+                                .err()
+                                .unwrap_or_else(|| format!("→ {}", t.title.trim())),
+                            None => format!("no pane recorded for {}", t.title.trim()),
+                        },
+                        None => format!("no row {idx}"),
+                    });
+                }
+                _ => {}
+            },
+            // stdin went away (pane closed, piped input) — stop polling
+            Some(None) => raw = None,
+            None => {}
+        }
+    }
+    drop(raw);
+    Ok(())
+}
+
+/// Put stdin in cbreak mode; restored on drop (also on panic/unwind).
+struct RawMode {
+    orig: libc::termios,
+}
+
+impl RawMode {
+    fn enable() -> Option<Self> {
+        // SAFETY: tcgetattr/tcsetattr on fd 0 with a valid termios pointer.
+        unsafe {
+            let mut orig = std::mem::zeroed();
+            if libc::tcgetattr(0, &mut orig) != 0 {
+                return None;
+            }
+            let mut raw = orig;
+            raw.c_lflag &= !(libc::ICANON | libc::ECHO);
+            raw.c_cc[libc::VMIN] = 0;
+            raw.c_cc[libc::VTIME] = 0;
+            if libc::tcsetattr(0, libc::TCSANOW, &raw) != 0 {
+                return None;
+            }
+            Some(RawMode { orig })
+        }
+    }
+}
+
+impl Drop for RawMode {
+    fn drop(&mut self) {
+        // SAFETY: restoring the previously-saved termios on fd 0.
+        unsafe {
+            libc::tcsetattr(0, libc::TCSANOW, &self.orig);
+        }
+    }
+}
+/// Wait up to `timeout_ms` for a byte on stdin.
+/// `Some(Some(b))` = key, `Some(None)` = stdin closed/EOF (stop reading),
+/// `None` = nothing arrived in time.
+fn read_key(timeout_ms: i32) -> Option<Option<u8>> {
+    let mut pfd = libc::pollfd {
+        fd: 0,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: poll(2) on a single stack pollfd.
+    let ready = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+    if ready <= 0 {
+        return None;
+    }
+    let mut buf = [0u8; 1];
+    // SAFETY: read(2) one byte from fd 0.
+    let n = unsafe { libc::read(0, buf.as_mut_ptr() as *mut libc::c_void, 1) };
+    match n {
+        1 => Some(Some(buf[0])),
+        0 => Some(None), // EOF — stdin closed, poll would spin forever
+        _ => None,       // read error (e.g. EINTR) — treat as no key
+    }
+}
+
+/// The zellij layout managed by `nibble sidebar --install`.
+const SIDEBAR_LAYOUT: &str = r#"// managed by nibble — sidebar on every tab. Remove with: nibble sidebar --uninstall
+layout {
+    default_tab_template {
+        pane split_direction="vertical" {
+            pane size="22%" name="agents" {
+                command "nibble"
+                args "status" "--watch"
+            }
+            children
+        }
+    }
+}
+"#;
+
+const MANAGED_MARKER: &str = "// managed by nibble";
+
+fn zellij_config_dir() -> std::path::PathBuf {
+    std::env::var_os("ZELLIJ_CONFIG_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".config/zellij")))
+        .unwrap_or_else(|| std::path::PathBuf::from(".config/zellij"))
+}
+
+/// Install the always-on sidebar: every tab of every new zellij session gets
+/// a narrow `nibble status --watch` pane on the right.
+fn sidebar_install() -> Result<()> {
+    let layouts_dir = zellij_config_dir().join("layouts");
+    std::fs::create_dir_all(&layouts_dir)?;
+
+    let default_kdl = layouts_dir.join("default.kdl");
+    if default_kdl.exists() {
+        let existing = std::fs::read_to_string(&default_kdl)?;
+        if existing.contains(MANAGED_MARKER) {
+            std::fs::write(&default_kdl, SIDEBAR_LAYOUT)?;
+            println!("Updated {}", default_kdl.display());
+        } else {
+            // Never clobber a hand-written layout: install side-by-side.
+            let nibble_kdl = layouts_dir.join("nibble.kdl");
+            std::fs::write(&nibble_kdl, SIDEBAR_LAYOUT)?;
+            println!("You already have a custom {}", default_kdl.display());
+            println!("Wrote {} instead. To use it:\n", nibble_kdl.display());
+            println!("  zellij --layout nibble        # per session");
+            println!("  # or in ~/.config/zellij/config.kdl:");
+            println!("  default_layout \"nibble\"\n");
+            println!("Or merge this into your default.kdl:\n");
+            print!("{SIDEBAR_LAYOUT}");
+        }
+    } else {
+        std::fs::write(&default_kdl, SIDEBAR_LAYOUT)?;
+        println!("Wrote {}", default_kdl.display());
+    }
+
+    println!();
+    println!("New zellij sessions (and every tab opened in them) now get the");
+    println!("sidebar. Restart zellij to pick it up — running sessions keep");
+    println!("their current layout.");
+    println!();
+    println!("In the sidebar: 1-9 jumps to that agent's pane, q quits.");
+    Ok(())
+}
+
+/// Remove nibble-managed zellij layouts.
+fn sidebar_uninstall() -> Result<()> {
+    let layouts_dir = zellij_config_dir().join("layouts");
+    for name in ["default.kdl", "nibble.kdl"] {
+        let path = layouts_dir.join(name);
+        if !path.exists() {
+            continue;
+        }
+        let body = std::fs::read_to_string(&path)?;
+        if body.contains(MANAGED_MARKER) {
+            std::fs::remove_file(&path)?;
+            println!("Removed {}", path.display());
+        } else {
+            println!("Skipping {} (not nibble-managed)", path.display());
+        }
     }
     Ok(())
 }
 
 /// Open the status side panel as a zellij pane in the current session.
-pub(crate) fn cmd_sidebar() -> Result<()> {
+pub(crate) fn cmd_sidebar(install: bool, uninstall: bool) -> Result<()> {
+    if install {
+        return sidebar_install();
+    }
+    if uninstall {
+        return sidebar_uninstall();
+    }
+
     if std::env::var_os("ZELLIJ").is_none() {
         println!("Not inside a zellij session. To get the side panel:\n");
-        println!("  1. Start zellij, then run:  nibble sidebar");
-        println!("  2. Or run `nibble status --watch` in any narrow pane");
-        println!("  3. Or add a permanent sidebar to your zellij layout:\n");
-        println!("     pane split_direction=\"vertical\" {{");
-        println!("       pane size=\"15%\" name=\"agents\" {{ command \"nibble\"; args \"status\" \"--watch\" }}");
-        println!("       pane");
-        println!("     }}");
+        println!("  1. nibble sidebar --install   # every tab of every new session (recommended)");
+        println!("  2. Start zellij, then run:    nibble sidebar  (current tab only)");
+        println!("  3. Or run `nibble status --watch` in any narrow pane");
         return Ok(());
     }
 
@@ -350,11 +587,56 @@ mod tests {
     fn render_two_lines_and_multibyte_safe() {
         let mut t = task();
         t.title = "🚧 emoji 标题 that is quite long indeed".to_string();
-        let out = render_status(&[&t], 30);
+        let out = render_status(&[&t], 30, false);
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 2, "two lines per task");
         assert!(out.contains("Pi"), "agent label present");
         // truncation must not split a multibyte char (would panic or garble)
         assert!(lines[0].chars().count() <= 30 + 4, "respects width");
+    }
+
+    #[test]
+    fn render_numbered_shows_keys() {
+        let t = task();
+        let out = render_status(&[&t], 30, true);
+        assert!(out.contains("1\x1b[2m)\x1b[0m"), "numbered key prefix");
+        let plain = render_status(&[&t], 30, false);
+        assert!(!plain.contains("1\u{1b}[2m)"), "plain render has no keys");
+    }
+
+    #[test]
+    fn pane_id_read_from_context_extra() {
+        let mut t = task();
+        assert_eq!(pane_id_of(&t), None, "no context → no pane");
+        let mut ctx = crate::models::TaskContext {
+            url: None,
+            project_path: None,
+            session_id: None,
+            claude_session_id: None,
+            extra: std::collections::HashMap::new(),
+        };
+        ctx.extra.insert(
+            "zellij_pane_id".to_string(),
+            serde_json::Value::Number(42u32.into()),
+        );
+        t.context = Some(ctx);
+        assert_eq!(pane_id_of(&t), Some(42));
+    }
+
+    #[test]
+    fn resolve_task_by_prefix() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = Database::open(tmp.path().join("t.db")).unwrap();
+        let mut a = task();
+        a.task_id = "aaaa1111-0000-0000-0000-000000000000".to_string();
+        let mut b = task();
+        b.task_id = "bbbb2222-0000-0000-0000-000000000000".to_string();
+        db.insert_task(&a).unwrap();
+        db.insert_task(&b).unwrap();
+
+        let hit = resolve_task(&db, "aaaa").unwrap();
+        assert_eq!(hit.task_id, a.task_id);
+        assert!(resolve_task(&db, "zzzz").is_err(), "unknown prefix errors");
+        assert!(resolve_task(&db, "0").is_err(), "ambiguous/unknown errors");
     }
 }
