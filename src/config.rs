@@ -8,12 +8,6 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
-    pub telegram: TelegramConfig,
-
-    #[serde(default)]
-    pub factory: FactoryConfig,
-
-    #[serde(default)]
     pub hermes: HermesConfig,
 
     #[serde(default)]
@@ -30,31 +24,6 @@ pub struct Config {
 
     #[serde(default)]
     pub lm: LmConfig,
-}
-
-/// AI Factory pipeline configuration.
-///
-/// When enabled, every sandboxed agent follows the structured development pipeline:
-/// Spec → Implement → TDD → Adversarial → Risk Score → QA Gate.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FactoryConfig {
-    /// Whether the AI Factory pipeline is enabled for new sandboxes.
-    #[serde(default = "default_factory_enabled")]
-    pub enabled: bool,
-}
-
-fn default_factory_enabled() -> bool {
-    // Opt-in: the full pipeline is noisy (token cost) for the common case.
-    // Enable per-spawn with `nibble sandbox spawn --factory` or [factory].enabled.
-    false
-}
-
-impl Default for FactoryConfig {
-    fn default() -> Self {
-        Self {
-            enabled: default_factory_enabled(),
-        }
-    }
 }
 
 /// Hermes Agent sandbox configuration.
@@ -267,53 +236,6 @@ impl Default for PrivacyFilterConfig {
     }
 }
 
-/// Telegram bot notification settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TelegramConfig {
-    /// Whether Telegram notifications are enabled at all.
-    #[serde(default)]
-    pub enabled: bool,
-
-    /// Whether agent-triggered notifications (Claude Stop hook, etc.) are sent.
-    /// When false, `nibble notify` is a no-op, but Telegram listener messages
-    /// (injection completions, heartbeats, cron alerts) are still sent.
-    #[serde(default = "default_true")]
-    pub notifications: bool,
-
-    /// Bot token from @BotFather (e.g. "123456:ABC-DEF...").
-    #[serde(default)]
-    pub bot_token: String,
-
-    /// Chat ID to send notifications to (user or group chat).
-    #[serde(default)]
-    pub chat_id: String,
-
-    /// Telegram username (without @) that is allowed to interact with the bot.
-    /// When set, the listener rejects any message whose sender username does not
-    /// match, providing a second layer of protection on top of the chat_id check.
-    #[serde(default)]
-    pub allowed_username: String,
-}
-
-impl Default for TelegramConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            notifications: true,
-            bot_token: String::new(),
-            chat_id: String::new(),
-            allowed_username: String::new(),
-        }
-    }
-}
-
-impl TelegramConfig {
-    /// Returns true when the config is complete enough to use.
-    pub fn is_configured(&self) -> bool {
-        self.enabled && !self.bot_token.is_empty() && !self.chat_id.is_empty()
-    }
-}
-
 /// Local LLM model management configuration.
 ///
 /// Controls where `nibble lm list` scans for model files and which systemd
@@ -503,108 +425,6 @@ pub fn memory_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_default_config_is_disabled() {
-        let cfg = Config::default();
-        assert!(!cfg.telegram.is_configured());
-    }
-
-    #[test]
-    fn test_telegram_config_is_configured() {
-        let cfg = TelegramConfig {
-            enabled: true,
-            notifications: true,
-            bot_token: "token".to_string(),
-            chat_id: "123".to_string(),
-            allowed_username: String::new(),
-        };
-        assert!(cfg.is_configured());
-    }
-
-    #[test]
-    fn test_telegram_config_not_configured_when_disabled() {
-        let cfg = TelegramConfig {
-            enabled: false,
-            notifications: true,
-            bot_token: "token".to_string(),
-            chat_id: "123".to_string(),
-            allowed_username: String::new(),
-        };
-        assert!(!cfg.is_configured());
-    }
-
-    #[test]
-    fn test_telegram_config_not_configured_when_empty_token() {
-        let cfg = TelegramConfig {
-            enabled: true,
-            notifications: true,
-            bot_token: String::new(),
-            chat_id: "123".to_string(),
-            allowed_username: String::new(),
-        };
-        assert!(!cfg.is_configured());
-    }
-
-    #[test]
-    fn test_parse_valid_toml() {
-        let toml_str = r#"
-[telegram]
-enabled = true
-bot_token = "123:ABC"
-chat_id = "456789"
-"#;
-        let config: Config = toml::from_str(toml_str).unwrap();
-        assert!(config.telegram.is_configured());
-        assert!(config.telegram.notifications);
-        assert_eq!(config.telegram.bot_token, "123:ABC");
-        assert_eq!(config.telegram.chat_id, "456789");
-        // allowed_username is optional — defaults to empty string
-        assert_eq!(config.telegram.allowed_username, "");
-    }
-
-    #[test]
-    fn test_parse_toml_with_username() {
-        let toml_str = r#"
-[telegram]
-enabled = true
-bot_token = "123:ABC"
-chat_id = "456789"
-allowed_username = "adlrocha"
-"#;
-        let config: Config = toml::from_str(toml_str).unwrap();
-        assert!(config.telegram.notifications);
-        assert_eq!(config.telegram.allowed_username, "adlrocha");
-    }
-
-    #[test]
-    fn test_parse_empty_toml() {
-        let config: Config = toml::from_str("").unwrap();
-        assert!(!config.telegram.is_configured());
-        assert!(config.telegram.notifications); // default true
-    }
-
-    #[test]
-    fn test_telegram_notifications_disabled_in_toml() {
-        let toml_str = r#"
-[telegram]
-enabled = true
-notifications = false
-bot_token = "123:ABC"
-chat_id = "456789"
-"#;
-        let config: Config = toml::from_str(toml_str).unwrap();
-        assert!(config.telegram.is_configured());
-        assert!(!config.telegram.notifications);
-    }
-
-    #[test]
-    fn test_factory_default_disabled() {
-        // Factory is opt-in by default to keep sandboxes low-noise.
-        let config = Config::default();
-        assert!(!config.factory.enabled);
-    }
-
     #[test]
     fn test_pi_extensions_default_from_manifest() {
         // Defaults are sourced from pi-extensions/external-packages.txt.
@@ -618,36 +438,6 @@ chat_id = "456789"
             assert!(!e.is_empty(), "no empty entries: {ext:?}");
             assert!(!e.starts_with('#'), "no comment entries: {ext:?}");
         }
-    }
-
-    #[test]
-    fn test_parse_toml_with_factory_enabled() {
-        let toml_str = r#"
-[factory]
-enabled = true
-"#;
-        let config: Config = toml::from_str(toml_str).unwrap();
-        assert!(config.factory.enabled);
-    }
-
-    #[test]
-    fn test_parse_toml_with_factory_disabled() {
-        let toml_str = r#"
-[factory]
-enabled = false
-"#;
-        let config: Config = toml::from_str(toml_str).unwrap();
-        assert!(!config.factory.enabled);
-    }
-
-    #[test]
-    fn test_parse_toml_factory_absent_defaults_disabled() {
-        let toml_str = r#"
-[telegram]
-enabled = false
-"#;
-        let config: Config = toml::from_str(toml_str).unwrap();
-        assert!(!config.factory.enabled);
     }
 
     // ── Hermes config tests (from hermes-agent-sandbox blueprint) ──────────────

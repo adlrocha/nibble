@@ -265,7 +265,12 @@ impl Task {
         if title.len() <= max_len {
             title.to_string()
         } else {
-            format!("{}...", &title[..max_len.saturating_sub(3)])
+            // Back off to a char boundary so multibyte UTF-8 never gets split.
+            let mut cut = max_len.saturating_sub(3);
+            while !title.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            format!("{}...", &title[..cut])
         }
     }
 
@@ -282,6 +287,7 @@ impl Task {
     pub fn set_running(&mut self) {
         self.status = TaskStatus::Running;
         self.completed_at = None;
+        self.attention_reason = None;
         self.updated_at = Utc::now();
     }
 
@@ -291,54 +297,6 @@ impl Task {
         self.exit_code = exit_code;
         self.completed_at = Some(Utc::now());
         self.updated_at = Utc::now();
-    }
-}
-
-/// Cron job for scheduled prompts to sandboxes
-#[derive(Debug, Clone)]
-pub struct CronJob {
-    pub id: Option<i64>,
-    /// Canonical absolute path of the repo this job targets.
-    /// At trigger time nibble finds or spawns a sandbox for this path.
-    pub repo_path: String,
-    pub label: Option<String>,
-    pub schedule: String,
-    pub prompt: String,
-    pub enabled: bool,
-    pub skip_if_running: bool,
-    /// True while a background injection thread is running for this job.
-    /// Prevents overlap when skip_if_running is set.
-    pub running: bool,
-    pub last_run: Option<DateTime<Utc>>,
-    pub next_run: DateTime<Utc>,
-    /// Optional expiry: job is auto-disabled after this datetime.
-    pub expires_at: Option<DateTime<Utc>>,
-    #[allow(dead_code)]
-    pub created_at: DateTime<Utc>,
-}
-
-impl CronJob {
-    pub fn new(
-        repo_path: String,
-        schedule: String,
-        prompt: String,
-        label: Option<String>,
-        next_run: DateTime<Utc>,
-    ) -> Self {
-        Self {
-            id: None,
-            repo_path,
-            label,
-            schedule,
-            prompt,
-            enabled: true,
-            skip_if_running: true,
-            running: false,
-            last_run: None,
-            next_run,
-            expires_at: None,
-            created_at: Utc::now(),
-        }
     }
 }
 
@@ -375,6 +333,26 @@ mod tests {
 
         assert_eq!(task.title.len(), 100);
         assert!(task.title.ends_with("..."));
+    }
+
+    #[test]
+    fn test_title_truncation_multibyte_utf8() {
+        // 30 emojis (4 bytes each) + CJK (3 bytes each) straddle the 100-byte
+        // cut point; truncation must not panic or split a character.
+        let long_title = format!("{}{}", "🦀".repeat(30), "漢字".repeat(20));
+        let task = Task::new(
+            "test-id".to_string(),
+            AgentType::ClaudeCode,
+            long_title,
+            None,
+            None,
+        );
+
+        assert!(task.title.len() <= 100);
+        assert!(task.title.ends_with("..."));
+        // Every char before the ellipsis must be a whole original character.
+        let stem = &task.title[..task.title.len() - 3];
+        assert!(stem.chars().all(|c| c == '🦀' || c == '漢' || c == '字'));
     }
 
     #[test]

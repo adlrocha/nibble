@@ -1,4 +1,0 @@
-# Audit and risk reports are process artifacts — useful during pipeline run
-# but stale after findings are fixed and merged. Not committed to the repo.
-# Blueprints and QA gate reports ARE committed (see ../blueprints/ and qa/).
-reports/audit/

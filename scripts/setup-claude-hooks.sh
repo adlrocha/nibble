@@ -19,17 +19,21 @@ mkdir -p "$CLAUDE_SETTINGS_DIR"
 # run asynchronously (backgrounded) so Claude is never waiting on us.
 
 # UserPromptSubmit — captures user messages into the memory capture JSONL.
-USERPROMPT_CMD='if [ -n "$AGENT_TASK_ID" ]; then export NIBBLE_AGENT_TYPE=claude; INPUT=$(cat); if command -v jq >/dev/null 2>&1; then MSG=$(printf "%s" "$INPUT" | jq -r ".message // empty"); [ -n "$MSG" ] && nibble memory capture "$AGENT_TASK_ID" "user" "$MSG" 2>/dev/null || true; fi; fi'
+USERPROMPT_CMD='if [ -n "$AGENT_TASK_ID" ]; then export NIBBLE_AGENT_TYPE=claude; nibble report status "$AGENT_TASK_ID" running 2>/dev/null || true; INPUT=$(cat); if command -v jq >/dev/null 2>&1; then MSG=$(printf "%s" "$INPUT" | jq -r ".message // empty"); [ -n "$MSG" ] && nibble memory capture "$AGENT_TASK_ID" "user" "$MSG" 2>/dev/null || true; fi; fi'
 
 # PostToolUse — captures tool calls + results into the memory capture JSONL.
-POSTTOOL_CMD='if [ -n "$AGENT_TASK_ID" ]; then export NIBBLE_AGENT_TYPE=claude; INPUT=$(cat); if command -v jq >/dev/null 2>&1; then TOOL=$(printf "%s" "$INPUT" | jq -r ".tool_name // empty"); TOOL_INPUT=$(printf "%s" "$INPUT" | jq -c ".tool_input // {}" | cut -c1-4096); TOOL_OUTPUT=$(printf "%s" "$INPUT" | jq -r ".tool_output // \"\"" | cut -c1-4096); [ -n "$TOOL" ] && nibble memory capture "$AGENT_TASK_ID" "tool" "" --tool-name "$TOOL" --tool-input "$TOOL_INPUT" --tool-output "$TOOL_OUTPUT" 2>/dev/null || true; fi; fi'
+POSTTOOL_CMD='if [ -n "$AGENT_TASK_ID" ]; then export NIBBLE_AGENT_TYPE=claude; nibble report status "$AGENT_TASK_ID" running 2>/dev/null || true; INPUT=$(cat); if command -v jq >/dev/null 2>&1; then TOOL=$(printf "%s" "$INPUT" | jq -r ".tool_name // empty"); TOOL_INPUT=$(printf "%s" "$INPUT" | jq -c ".tool_input // {}" | cut -c1-4096); TOOL_OUTPUT=$(printf "%s" "$INPUT" | jq -r ".tool_output // \"\"" | cut -c1-4096); [ -n "$TOOL" ] && nibble memory capture "$AGENT_TASK_ID" "tool" "" --tool-name "$TOOL" --tool-input "$TOOL_INPUT" --tool-output "$TOOL_OUTPUT" 2>/dev/null || true; fi; fi'
 
-# Stop — captures session_id, last assistant message, notifies Telegram,
-# and triggers async session summarization.
-STOP_CMD='if [ -n "$AGENT_TASK_ID" ]; then export NIBBLE_AGENT_TYPE=claude; INPUT=$(cat); if command -v jq >/dev/null 2>&1; then SID=$(printf "%s" "$INPUT" | jq -r ".sessionId // .session_id // empty"); [ -n "$SID" ] && nibble report session-id "$AGENT_TASK_ID" "$SID" 2>/dev/null; MSG=$(printf "%s" "$INPUT" | jq -r ".last_assistant_message // \"(no message)\""); else MSG="(install jq to see last message)"; fi; nibble notify --task-id "$AGENT_TASK_ID" --message "$MSG" 2>/dev/null || true; nibble memory capture "$AGENT_TASK_ID" "assistant" "$MSG" 2>/dev/null || true; nibble memory summarize "$AGENT_TASK_ID" >/dev/null 2>&1 & fi'
+# Stop — captures session_id and last assistant message, and triggers
+# async session summarization.
+STOP_CMD='if [ -n "$AGENT_TASK_ID" ]; then export NIBBLE_AGENT_TYPE=claude; INPUT=$(cat); if command -v jq >/dev/null 2>&1; then SID=$(printf "%s" "$INPUT" | jq -r ".sessionId // .session_id // empty"); [ -n "$SID" ] && nibble report session-id "$AGENT_TASK_ID" "$SID" 2>/dev/null; MSG=$(printf "%s" "$INPUT" | jq -r ".last_assistant_message // \"(no message)\""); else MSG="(install jq to see last message)"; fi; nibble report status "$AGENT_TASK_ID" completed 2>/dev/null || true; nibble memory capture "$AGENT_TASK_ID" "assistant" "$MSG" 2>/dev/null || true; nibble memory summarize "$AGENT_TASK_ID" >/dev/null 2>&1 & fi'
 
-# Notification — sends attention-required alerts (permission prompts, etc.).
-NOTIFY_CMD='if [ -n "$AGENT_TASK_ID" ]; then export NIBBLE_AGENT_TYPE=claude; INPUT=$(cat); if command -v jq >/dev/null 2>&1; then TOOL=$(printf "%s" "$INPUT" | jq -r ".tool_name // empty"); TOOL_INPUT=$(printf "%s" "$INPUT" | jq -c ".tool_input // empty"); BASE=$(printf "%s" "$INPUT" | jq -r ".message // \"Permission required\""); if [ -n "$TOOL" ]; then MSG="$BASE\nTool: $TOOL"; if [ -n "$TOOL_INPUT" ] && [ "$TOOL_INPUT" != "null" ]; then SHORT=$(printf "%s" "$TOOL_INPUT" | jq -r "to_entries | map(.key + \": \" + (.value | tostring)) | join(\", \")" 2>/dev/null | cut -c1-120); MSG="$MSG\n$SHORT"; fi; else MSG="$BASE"; fi; else MSG="Permission required (install jq for details)"; fi; nibble notify --task-id "$AGENT_TASK_ID" --message "$MSG" --attention 2>/dev/null; fi'
+# Notification — permission prompts / attention requests: status → blocked
+# so the nibble status sidebar steers your attention.
+NOTIFY_CMD='if [ -n "$AGENT_TASK_ID" ]; then INPUT=$(cat); REASON=$(printf "%s" "$INPUT" | jq -r ".message // .notification_type // empty" 2>/dev/null | tr "\n" " " | cut -c1-160); nibble report status "$AGENT_TASK_ID" blocked ${REASON:+--message "$REASON"} 2>/dev/null || true; fi'
+
+# SessionEnd — marks the task exited so the status sidebar drops it.
+SESSIONEND_CMD='if [ -n "$AGENT_TASK_ID" ]; then nibble report status "$AGENT_TASK_ID" exited 2>/dev/null || true; fi'
 
 # Session retention — Claude Code purges local transcripts older than
 # `cleanupPeriodDays` (default: 30 days). Nibble never deletes session data,
@@ -55,12 +59,12 @@ if [ -f "$CLAUDE_SETTINGS_FILE" ]; then
             echo "Removed stale hooks — will write latest version"
         fi
         echo "Merging hooks into existing settings..."
-
         HOOKS_JSON=$(jq -n \
             --arg userprompt "$USERPROMPT_CMD" \
             --arg posttool "$POSTTOOL_CMD" \
             --arg stop   "$STOP_CMD" \
             --arg notify "$NOTIFY_CMD" \
+            --arg sessionend "$SESSIONEND_CMD" \
             --argjson cleanup "$CLEANUP_PERIOD_DAYS" \
             '{
               cleanupPeriodDays: $cleanup,
@@ -68,10 +72,8 @@ if [ -f "$CLAUDE_SETTINGS_FILE" ]; then
                 UserPromptSubmit: [{hooks: [{type:"command", command:$userprompt, timeout:5}]}],
                 PostToolUse:      [{hooks: [{type:"command", command:$posttool, timeout:5}]}],
                 Stop:             [{hooks: [{type:"command", command:$stop, timeout:30}]}],
-                Notification: [{
-                  matcher: "permission_prompt",
-                  hooks:   [{type:"command", command:$notify, timeout:10}]
-                }]
+                Notification:     [{hooks: [{type:"command", command:$notify, timeout:5}]}],
+                SessionEnd:       [{hooks: [{type:"command", command:$sessionend, timeout:5}]}]
               }
             }')
 
@@ -98,6 +100,7 @@ else
         --arg posttool "$POSTTOOL_CMD" \
         --arg stop   "$STOP_CMD" \
         --arg notify "$NOTIFY_CMD" \
+        --arg sessionend "$SESSIONEND_CMD" \
         --argjson cleanup "$CLEANUP_PERIOD_DAYS" \
         '{
           cleanupPeriodDays: $cleanup,
@@ -105,10 +108,8 @@ else
             UserPromptSubmit: [{hooks: [{type:"command", command:$userprompt, timeout:5}]}],
             PostToolUse:      [{hooks: [{type:"command", command:$posttool, timeout:5}]}],
             Stop:             [{hooks: [{type:"command", command:$stop, timeout:30}]}],
-            Notification: [{
-              matcher: "permission_prompt",
-              hooks:   [{type:"command", command:$notify, timeout:10}]
-            }]
+            Notification:     [{hooks: [{type:"command", command:$notify, timeout:5}]}],
+            SessionEnd:       [{hooks: [{type:"command", command:$sessionend, timeout:5}]}]
           }
         }' > "$CLAUDE_SETTINGS_FILE"
 fi
@@ -116,10 +117,9 @@ fi
 echo ""
 echo "Claude Code hooks installed for nibble!"
 echo ""
-echo "Hooks configured:"
-echo "  - UserPromptSubmit: captures user messages to memory capture JSONL"
-echo "  - PostToolUse:      captures tool calls + results to memory capture JSONL"
-echo "  - Stop:             captures session_id + Telegram notification + async summarization"
-echo "  - Notification:     Telegram 🚨 alert when Claude needs a permission decision"
-echo ""
+echo "  - UserPromptSubmit: captures user messages + status → running"
+echo "  - PostToolUse:      captures tool calls + results + status → running"
+echo "  - Stop:             captures session_id + summarize + status → idle"
+echo "  - Notification:     status → blocked (sidebar steers your attention)"
+echo "  - SessionEnd:       status → exited"
 echo "NOTE: You need to restart Claude Code for hooks to take effect."
