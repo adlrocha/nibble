@@ -24,18 +24,14 @@ warn() { echo -e "  ${YELLOW}!${NC} $1"; }
 die()  { echo -e "  ${RED}✗${NC} $1" >&2; exit 1; }
 
 # ── Parse flags ───────────────────────────────────────────────────────────────
-RUN_LLAMA=false
 RUN_BASELIGHT=false
-RUN_PRIVACY_PROXY=false
 RUN_BROWSER=false
 REBUILD_IMAGE=false
 RECOVER_ZIP=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --llama)      RUN_LLAMA=true; shift ;;
         --baselight)  RUN_BASELIGHT=true; shift ;;
-        --privacy-proxy) RUN_PRIVACY_PROXY=true; shift ;;
         --browser)    RUN_BROWSER=true; shift ;;
         --rebuild)    REBUILD_IMAGE=true; shift ;;
         --recover)
@@ -51,9 +47,7 @@ done
 
 echo -e "${BOLD}=== Nibble — Install / Upgrade ===${NC}"
 echo ""
-echo "  Flags: --llama      set up llama-server systemd service"
-echo "         --baselight      install Baselight MCP server in Claude Code"
-echo "         --privacy-proxy  install LLM privacy filter proxy service"
+echo "  Flags: --baselight      install Baselight MCP server in Claude Code"
 echo "         --browser        set up Chromium CDP integration for agents"
 echo "         --rebuild        force rebuild the sandbox container image"
 echo "         --recover        restore from a backup zip after install"
@@ -218,18 +212,6 @@ fi
 
 # ── 3. Install binaries ───────────────────────────────────────────────────────
 step "Installing binaries to $BIN_DIR"
-
-# Also stop the privacy proxy so we can overwrite the binary if it's running.
-if systemctl --user is-active --quiet nibble-privacy-proxy.service 2>/dev/null; then
-    if command -v timeout >/dev/null 2>&1; then
-        timeout 5 systemctl --user stop nibble-privacy-proxy.service 2>/dev/null || true
-    else
-        systemctl --user stop --no-block nibble-privacy-proxy.service 2>/dev/null || true
-        sleep 1
-        systemctl --user kill --signal=SIGKILL nibble-privacy-proxy.service 2>/dev/null || true
-    fi
-    ok "Stopped nibble-privacy-proxy.service for upgrade"
-fi
 
 # Also stop the web UI so we can overwrite the binary if it's running.
 WEB_WAS_ACTIVE=false
@@ -456,73 +438,6 @@ fi
 SYSTEMD_DIR="$HOME/.config/systemd/user"
 mkdir -p "$SYSTEMD_DIR"
 
-# ── 5c. Privacy filter proxy (opt-in: --privacy-proxy) ───────────────────────
-
-# Stage llama-server script + model profiles so `nibble lm use` can find them
-# from the installed binary in ~/.local/bin (outside the repo tree).
-cp "$REPO_DIR/scripts/setup-llama-server.sh" "$HOME/.nibble/setup-llama-server.sh"
-chmod +x "$HOME/.nibble/setup-llama-server.sh"
-cp "$REPO_DIR/scripts/llm-model-profiles.toml" "$HOME/.nibble/llm-model-profiles.toml"
-ok "llama-server script + profiles → $HOME/.nibble/"
-
-if [ "$RUN_PRIVACY_PROXY" = true ]; then
-    step "Installing privacy filter proxy"
-
-    mkdir -p "$HOME/.nibble"
-    cp "$REPO_DIR/scripts/privacy-proxy.py" "$HOME/.nibble/privacy-proxy.py"
-    chmod +x "$HOME/.nibble/privacy-proxy.py"
-    ok "privacy-proxy.py → $HOME/.nibble/privacy-proxy.py"
-
-    # Check Python + dependencies
-    if command -v python3 >/dev/null 2>&1; then
-        ok "python3 found"
-        if python3 -c "import fastapi, httpx, uvicorn, transformers" 2>/dev/null; then
-            ok "Python dependencies installed (fastapi, httpx, uvicorn, transformers)"
-        else
-            warn "Missing Python dependencies for privacy proxy."
-            warn "Install with:"
-            warn "  python3 -m pip install --user fastapi httpx uvicorn transformers torch"
-        fi
-    else
-        warn "python3 not found — privacy proxy requires Python 3."
-        warn "Install Python 3 and then run:"
-        warn "  python3 -m pip install --user fastapi httpx uvicorn transformers torch"
-    fi
-
-    cat > "$SYSTEMD_DIR/nibble-privacy-proxy.service" << UNIT
-[Unit]
-Description=Nibble LLM Privacy Filter Proxy
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=%h/.nibble/privacy-proxy.py
-Restart=always
-Environment=HOME=%h
-
-[Install]
-WantedBy=default.target
-UNIT
-
-    if systemctl --user daemon-reload 2>/dev/null; then
-        systemctl --user enable nibble-privacy-proxy.service 2>/dev/null || true
-        systemctl --user restart nibble-privacy-proxy.service 2>/dev/null \
-            && ok "Privacy proxy service started" \
-            || warn "Could not start privacy proxy service"
-    else
-        warn "systemd user session not available. Privacy proxy won't auto-start."
-        warn "Start manually: python3 $HOME/.nibble/privacy-proxy.py"
-    fi
-else
-    # Not opted in — but if an older install left the service behind, refresh
-    # the script file so the existing unit keeps working.
-    if [ -f "$SYSTEMD_DIR/nibble-privacy-proxy.service" ]; then
-        mkdir -p "$HOME/.nibble"
-        cp "$REPO_DIR/scripts/privacy-proxy.py" "$HOME/.nibble/privacy-proxy.py"
-        chmod +x "$HOME/.nibble/privacy-proxy.py"
-    fi
-fi
-
 # ── 5a. Install systemd auto-resume service ───────────────────────────────────
 cat > "$SYSTEMD_DIR/nibble-resume.service" << UNIT
 [Unit]
@@ -546,7 +461,7 @@ else
     warn "systemd user session not available. Auto-resume on reboot won't work."
 fi
 
-# ── 5d. Token-usage tracker (systemd-user timer) ─────────────────────────────
+# ── 5c. Token-usage tracker (systemd-user timer) ─────────────────────────────
 # Scans claude + pi session logs every 15 minutes and writes per-message
 # token counts into ~/.nibble/tasks.db. Query with `nibble usage report`.
 step "Installing token-usage tracker timer"
@@ -606,7 +521,7 @@ PRICING
     ok "Pricing override stub written: $PRICING_FILE"
 fi
 
-# ── 5e. Web session inspector (systemd-user service) ────────────────────────
+# ── 5d. Web session inspector (systemd-user service) ────────────────────────
 # Dark-mode browser UI for browsing/searching pi sessions, token stats and
 # live tasks. Binds 0.0.0.0:7878 so it's reachable over Tailscale; a bearer
 # token in ~/.nibble/web.env guards against hostile-LAN exposure.
@@ -736,19 +651,7 @@ if [ "$NEEDS_SETUP" = true ]; then
     fi
 fi
 
-# ── 8. Llama server (optional) ────────────────────────────────────────────────
-if [ "$RUN_LLAMA" = true ]; then
-    step "Setting up llama-server service"
-    bash "$REPO_DIR/scripts/setup-llama-server.sh"
-else
-    if [ ! -f /etc/systemd/system/llama-server.service ]; then
-        echo ""
-        warn "llama-server not installed. Set up with:"
-        warn "  ./install.sh --llama"
-    fi
-fi
-
-# ── 9. Baselight MCP server (optional) ───────────────────────────────────────
+# ── 8. Baselight MCP server (optional) ───────────────────────────────────────
 if [ "$RUN_BASELIGHT" = true ]; then
     step "Installing Baselight MCP server into Claude Code settings"
 
@@ -799,7 +702,7 @@ else
     fi
 fi
 
-# ── 10. Browser CDP integration (optional) ───────────────────────────────────
+# ── 9. Browser CDP integration (optional) ───────────────────────────────────
 if [ "$RUN_BROWSER" = true ]; then
     step "Setting up Chromium CDP browser integration"
 
@@ -856,7 +759,7 @@ else
     fi
 fi
 
-# ── 11. Recover from backup (optional) ────────────────────────────────────────
+# ── 10. Recover from backup (optional) ───────────────────────────────────────
 if [ -n "$RECOVER_ZIP" ]; then
     step "Recovering from backup"
     if [ ! -f "$RECOVER_ZIP" ]; then
@@ -867,7 +770,7 @@ if [ -n "$RECOVER_ZIP" ]; then
     ok "Restored from $RECOVER_ZIP"
 fi
 
-# ── 12. Done ───────────────────────────────────────────────────────────────────
+# ── 11. Done ───────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}${GREEN}Done!${NC} Restart Claude Code for hooks to take effect."
 echo ""

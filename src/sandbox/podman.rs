@@ -398,7 +398,7 @@ impl PodmanSandbox {
         }
         if let Ok(base_url) = std::env::var("ANTHROPIC_BASE_URL") {
             // Only forward host base URL if the sandbox config hasn't already
-            // set one (e.g. via the privacy filter proxy).
+            // set one.
             if !config.env_vars.contains_key("ANTHROPIC_BASE_URL") {
                 args.push("-e".to_string());
                 args.push(format!("ANTHROPIC_BASE_URL={}", base_url));

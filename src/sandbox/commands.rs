@@ -15,7 +15,6 @@ use crate::config;
 use crate::db::{self, Database};
 use crate::format::expand_tilde;
 use crate::models::{AgentType, SandboxConfig, SandboxType, Task, TaskContext, TaskStatus};
-use crate::privacy_filter;
 use crate::sandbox::podman::PodmanSandbox;
 use crate::sandbox::{container_working_dir, pi_session_dir_name, SandboxHealth};
 use crate::session::pi::{
@@ -235,21 +234,6 @@ pub(crate) fn cmd_sandbox_spawn(db: &Database, opts: SpawnOptions) -> Result<Str
         }
     }
 
-    // Redirect LLM API traffic through the privacy filter proxy if enabled.
-    {
-        let pf_cfg = config::load().unwrap_or_default().privacy_filter;
-        if pf_cfg.enabled {
-            let proxy_url = privacy_filter::proxy_endpoint(pf_cfg.proxy_port);
-            if std::env::var("ANTHROPIC_BASE_URL").is_err() {
-                env_vars.insert("ANTHROPIC_BASE_URL".to_string(), proxy_url.clone());
-            }
-            if std::env::var("OPENAI_BASE_URL").is_err() {
-                env_vars.insert("OPENAI_BASE_URL".to_string(), proxy_url.clone());
-            }
-            env_vars.insert("BASE_URL".to_string(), proxy_url);
-        }
-    }
-
     let mut extra_volumes = Vec::new();
 
     // Hermes-specific mounts: ~/.hermes/ config dir
@@ -316,26 +300,6 @@ pub(crate) fn cmd_sandbox_spawn(db: &Database, opts: SpawnOptions) -> Result<Str
 
     println!("Spawning sandbox for '{}'…", repo_path);
     let info = sandbox.spawn(&task_id, &repo, &config)?;
-
-    // Ensure privacy filter proxy is running if enabled.
-    {
-        let pf_cfg = config::load().unwrap_or_default().privacy_filter;
-        if pf_cfg.enabled {
-            if let Err(e) = privacy_filter::ensure_proxy_running(&pf_cfg) {
-                eprintln!("  Privacy:   ⚠️  Could not start privacy filter proxy: {e}");
-                if !pf_cfg.fail_open {
-                    anyhow::bail!(
-                        "Privacy filter is enabled but proxy failed to start and fail_open=false"
-                    );
-                }
-            } else {
-                println!(
-                    "  Privacy:   LLM privacy proxy active on port {}",
-                    pf_cfg.proxy_port
-                );
-            }
-        }
-    }
 
     let repo_name = repo
         .canonicalize()
