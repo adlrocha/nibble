@@ -398,6 +398,10 @@ The `--watch` view is interactive: pressing `1`-`9` jumps zellij focus to the
 pane hosting that agent (pane IDs are recorded by the wrappers at agent start
 and by `sandbox attach`; cross-tab jumps work), and `q` quits.
 
+Agent panes are named after their task title automatically (wrappers at
+start, `sandbox attach` on re-attach), so the frame border tells you what
+each agent is working on.
+
 Requires zellij ≥ 0.42 for pane jumping (`zellij action focus-pane-id`).
 
 ---

@@ -238,6 +238,24 @@ fn focus_pane_id(pane_id: u32) -> Result<()> {
     Ok(())
 }
 
+/// Rename the zellij pane the caller is running in to the given title, so
+/// agent panes are recognisable in the frame border. Best-effort: silently
+/// no-ops outside zellij and never fails the caller (hooks must not break
+/// agents). Runs from inside the pane being renamed (focused by definition).
+pub(crate) fn rename_current_pane(title: &str) {
+    if std::env::var_os("ZELLIJ").is_none() {
+        return;
+    }
+    let title = title.trim();
+    if title.is_empty() {
+        return;
+    }
+    let _ = std::process::Command::new("zellij")
+        .args(["action", "rename-pane"])
+        .arg(title)
+        .status();
+}
+
 /// Resolve a task by full ID or unique ID prefix.
 fn resolve_task(db: &Database, target: &str) -> Result<Task> {
     if let Some(t) = db.get_task_by_id(target)? {
