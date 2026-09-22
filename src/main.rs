@@ -82,6 +82,9 @@ fn main() -> Result<()> {
                     extra,
                 });
                 db.insert_task(&task)?;
+                // Name the zellij pane after the task so agent panes are
+                // recognisable in their frame border (no-op outside zellij).
+                status::rename_current_pane(&task.title);
                 println!("Task started: {}", task.task_id);
             }
             ReportAction::SessionId {

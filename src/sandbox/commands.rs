@@ -1351,6 +1351,10 @@ pub(crate) fn cmd_sandbox_attach(
         }
     }
 
+    // Name the pane after the task so it's recognisable in the frame border
+    // (no-op outside zellij).
+    crate::status::rename_current_pane(&task.title);
+
     let container_id = task
         .container_id
         .clone()
