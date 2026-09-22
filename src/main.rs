@@ -7,10 +7,8 @@ mod db;
 mod format;
 #[path = "sandbox/hermes.rs"]
 mod hermes;
-mod lm;
 mod memory;
 mod models;
-mod privacy_filter;
 mod sandbox;
 mod session;
 mod status;
@@ -19,7 +17,7 @@ mod web;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use cli::{Cli, Commands, HermesAction, LmAction, ReportAction, SandboxAction};
+use cli::{Cli, Commands, HermesAction, ReportAction, SandboxAction};
 use db::Database;
 use models::{AgentType, Task, TaskContext};
 use sandbox::podman::PodmanSandbox;
@@ -353,19 +351,6 @@ fn main() -> Result<()> {
             let zip_path = PathBuf::from(path);
             backup::import_backup(&zip_path)?;
         }
-        Commands::Proxy { action } => match action {
-            cli::ProxyAction::Start => {
-                let cfg = config::load().unwrap_or_default();
-                privacy_filter::start_proxy(&cfg.privacy_filter)?;
-            }
-            cli::ProxyAction::Stop => {
-                privacy_filter::stop_proxy()?;
-            }
-            cli::ProxyAction::Status => {
-                let cfg = config::load().unwrap_or_default();
-                privacy_filter::proxy_status(cfg.privacy_filter.proxy_port);
-            }
-        },
         // ── Sandbox subcommands ────────────────────────────────────────────
         Commands::Sandbox { action } => match action {
             SandboxAction::Spawn {
@@ -597,18 +582,6 @@ fn main() -> Result<()> {
                 hermes::cmd_hermes_kill(&db)?;
             }
         },
-        Commands::Lm { action } => {
-            let cfg = config::load().unwrap_or_default();
-            match action {
-                LmAction::List => {
-                    let models = lm::list_models(&cfg.lm)?;
-                    lm::print_list(&models);
-                }
-                LmAction::Use { model } => {
-                    lm::use_model(&cfg.lm, &model)?;
-                }
-            }
-        }
         Commands::Usage { action } => {
             let pricing = usage::PricingTable::load().context("Failed to load pricing table")?;
             match action {

@@ -13,7 +13,6 @@ use crate::config;
 use crate::db::Database;
 use crate::format::expand_tilde;
 use crate::models::{AgentType, SandboxConfig, SandboxType, Task, TaskContext};
-use crate::privacy_filter;
 use crate::sandbox::podman::PodmanSandbox;
 
 /// Sentinel repo_path for the hermes sandbox.
@@ -74,21 +73,6 @@ fn cmd_hermes_spawn_internal(db: &Database) -> Result<String> {
     ] {
         if let Ok(val) = std::env::var(key) {
             env_vars.insert(key.to_string(), val);
-        }
-    }
-
-    // Redirect LLM API traffic through the privacy filter proxy if enabled.
-    {
-        let pf_cfg = config::load().unwrap_or_default().privacy_filter;
-        if pf_cfg.enabled {
-            let proxy_url = privacy_filter::proxy_endpoint(pf_cfg.proxy_port);
-            if std::env::var("ANTHROPIC_BASE_URL").is_err() {
-                env_vars.insert("ANTHROPIC_BASE_URL".to_string(), proxy_url.clone());
-            }
-            if std::env::var("OPENAI_BASE_URL").is_err() {
-                env_vars.insert("OPENAI_BASE_URL".to_string(), proxy_url.clone());
-            }
-            env_vars.insert("BASE_URL".to_string(), proxy_url);
         }
     }
 
@@ -185,26 +169,6 @@ fn cmd_hermes_spawn_internal(db: &Database) -> Result<String> {
     std::fs::create_dir_all(&workspace_dir)?;
     println!("Spawning Hermes sandbox…");
     let info = sandbox.spawn(&task_id, &workspace_dir, &sb_config)?;
-
-    // Ensure privacy filter proxy is running if enabled.
-    {
-        let pf_cfg = config::load().unwrap_or_default().privacy_filter;
-        if pf_cfg.enabled {
-            if let Err(e) = privacy_filter::ensure_proxy_running(&pf_cfg) {
-                eprintln!("  Privacy:   ⚠️  Could not start privacy filter proxy: {e}");
-                if !pf_cfg.fail_open {
-                    anyhow::bail!(
-                        "Privacy filter is enabled but proxy failed to start and fail_open=false"
-                    );
-                }
-            } else {
-                println!(
-                    "  Privacy:   LLM privacy proxy active on port {}",
-                    pf_cfg.proxy_port
-                );
-            }
-        }
-    }
 
     // Health check: wait a moment and verify the container is still running.
     // If the gateway crashes immediately (e.g. hermes binary not found),
