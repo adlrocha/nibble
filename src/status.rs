@@ -184,8 +184,8 @@ fn render_inner(agents: &[LiveAgent], color: bool) -> String {
         let painted = if color {
             match agent.activity {
                 Activity::Blocked => format!("\x1b[1;31m{mark}\x1b[0m"),
-                Activity::Working => format!("\x1b[32m{mark}\x1b[0m"),
-                Activity::Idle => format!("\x1b[35m{mark}\x1b[0m"),
+                Activity::Working => format!("\x1b[38;5;208m{mark}\x1b[0m"),
+                Activity::Idle => format!("\x1b[32m{mark}\x1b[0m"),
             }
         } else {
             mark.to_string()
@@ -201,9 +201,9 @@ fn render_inner(agents: &[LiveAgent], color: bool) -> String {
         "{}{}{}{}{}\n",
         paint(color, "1;31", "! needs input"),
         paint(color, "2", " · "),
-        paint(color, "32", "* working"),
+        paint(color, "38;5;208", "* working"),
         paint(color, "2", " · "),
-        paint(color, "35", "● idle"),
+        paint(color, "32", "● ready"),
     ));
     out
 }
@@ -518,8 +518,8 @@ fn agent_line(index: usize, agent: &LiveAgent, width: usize, color: bool) -> Str
     let show_who = who_w > 0 && 5 + label.chars().count() + 2 + who_w <= width;
     let painted = match agent.activity {
         Activity::Blocked => paint(color, "1;31", mark),
-        Activity::Working => paint(color, "32", mark),
-        Activity::Idle => paint(color, "35", mark),
+        Activity::Working => paint(color, "38;5;208", mark),
+        Activity::Idle => paint(color, "32", mark),
     };
     let mut row = format!(" {} {painted} {label}", paint(color, "36", &num));
     if show_who {
@@ -550,10 +550,10 @@ fn topic_line(topic: &str, width: usize, color: bool) -> String {
 /// Explains the activity marks so the pane is self-describing. Dropped when
 /// the pane is too narrow to fit even the compact form.
 fn legend_line(width: usize, color: bool) -> Option<String> {
-    let (needs, working, idle) = if width >= 35 {
-        ("! needs input", "● working", "● idle")
-    } else if width >= 26 {
-        ("! input", "● busy", "● idle")
+    let (needs, working, ready) = if width >= 36 {
+        ("! needs input", "● working", "● ready")
+    } else if width >= 27 {
+        ("! input", "● busy", "● ready")
     } else {
         return None;
     };
@@ -561,8 +561,8 @@ fn legend_line(width: usize, color: bool) -> Option<String> {
     Some(format!(
         " {}{sep}{}{sep}{}",
         paint(color, "1;31", needs),
-        paint(color, "32", working),
-        paint(color, "35", idle),
+        paint(color, "38;5;208", working),
+        paint(color, "32", ready),
     ))
 }
 
@@ -1014,7 +1014,10 @@ mod tests {
         assert!(text.contains("1 ! atlas"));
         assert!(text.contains("2 ● nibble"));
         assert!(text.contains("1-9 jump"));
-        assert!(text.contains("! needs input"), "{text}");
+        assert!(
+            text.contains("! needs input · ● working · ● ready"),
+            "{text}"
+        );
         assert!(text.contains("Founder in residence proposal"));
         assert!(text.contains("Fix the sidebar resize loop"));
         let topic_at = text.find("Founder in residence").unwrap();
