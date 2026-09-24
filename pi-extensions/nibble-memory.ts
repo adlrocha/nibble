@@ -8,6 +8,9 @@
  *   - tool_call:     records tool inputs (paired with tool_execution_end)
  *   - tool_execution_end: records tool outputs
  *   - session_shutdown: triggers async session summarization
+ *   - tool_approval_requested/resolved: reports the agent blocked (with the
+ *                      approval reason) while it waits on a permission
+ *                      decision, and working again once resolved
  *   - session_start:   reports the session file path to nibble (eager
  *                      task→session mapping so attach never has to guess
  *                      which session belongs to this task after a reboot)
@@ -73,6 +76,24 @@ const reportSessionPath = (taskId: string, path: string): void => {
 	}
 };
 
+const reportStatus = (taskId: string, state: string, message?: string): void => {
+	if (!taskId) return;
+
+	const args = ["report", "status", taskId, state];
+	if (message?.trim()) {
+		args.push("--message", message.trim());
+	}
+
+	try {
+		execSync(
+			`nibble ${args.map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(" ")}`,
+			{ timeout: 5000, stdio: "pipe" },
+		);
+	} catch {
+		// Non-fatal: status reporting is best-effort
+	}
+};
+
 // ─── Extension ───────────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
@@ -82,10 +103,11 @@ export default function (pi: ExtensionAPI) {
 		{ name: string; input: string }
 	>();
 
-	// ── input: capture user messages ───────────────────────────────────────
+	// ── input: capture user messages, mark the agent working ──────────────
 	pi.on("input", async (event, _ctx) => {
 		const taskId = getTaskId();
 		if (!taskId) return;
+		reportStatus(taskId, "working");
 		if (event.text?.trim()) {
 			capture(taskId, "user", event.text);
 		}
@@ -122,11 +144,12 @@ export default function (pi: ExtensionAPI) {
 		});
 	});
 
-	// ── tool_execution_end: capture tool result ────────────────────────────
+	// ── tool_execution_end: capture tool result, mark the agent working ───
+	// (also clears a blocked marker once a decision is acted on)
 	pi.on("tool_execution_end", async (event, _ctx) => {
 		const taskId = getTaskId();
 		if (!taskId) return;
-
+		reportStatus(taskId, "working");
 		const toolInfo = toolInputs.get(event.toolCallId);
 		if (!toolInfo) return;
 
@@ -144,6 +167,56 @@ export default function (pi: ExtensionAPI) {
 		});
 
 		toolInputs.delete(event.toolCallId);
+	});
+
+	// ── tool_approval_requested/resolved: agent is waiting on the user ───
+	// omp only emits these when an extension subscribes, so registering the
+	// handlers is what turns them on. Track concurrent approvals by call id
+	// so one resolution does not clear the blocked marker while another
+	// prompt is still open. Payload (observability event): { sessionId,
+	// toolName, toolCallId, reason?, approvalMode? } / { ..., approved }.
+	const pendingApprovals = new Map<string, string>();
+
+	const approvalKey = (event: unknown): string =>
+		event && typeof event === "object" && "toolCallId" in event &&
+		typeof event.toolCallId === "string"
+			? event.toolCallId
+			: "unknown";
+
+	pi.on("tool_approval_requested", async (event: unknown, _ctx) => {
+		const taskId = getTaskId();
+		if (!taskId) return;
+		const label =
+			event && typeof event === "object"
+				? "reason" in event &&
+					typeof event.reason === "string" &&
+					event.reason.trim()
+					? event.reason.trim()
+					: "toolName" in event && typeof event.toolName === "string"
+						? `approve ${event.toolName}`
+						: "approval needed"
+				: "approval needed";
+		pendingApprovals.set(approvalKey(event), label);
+		reportStatus(taskId, "blocked", label);
+	});
+	pi.on("tool_approval_resolved", async (event: unknown, _ctx) => {
+		const taskId = getTaskId();
+		if (!taskId) return;
+		pendingApprovals.delete(approvalKey(event));
+		const remaining = [...pendingApprovals.values()].pop();
+		if (remaining) {
+			reportStatus(taskId, "blocked", remaining);
+		} else {
+			reportStatus(taskId, "working");
+		}
+	});
+
+	// ── turn_end: agent finished responding, mark it idle ────────────────
+	pi.on("turn_end", async (_event, _ctx) => {
+		const taskId = getTaskId();
+		if (!taskId) return;
+		pendingApprovals.clear();
+		reportStatus(taskId, "idle");
 	});
 
 	// ── session_start: report the session file path to nibble ────────────
