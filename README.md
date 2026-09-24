@@ -16,7 +16,7 @@ This section lists every feature area in the project. Use it to audit what's wor
 | 2 | **Session Continuity** | core | Deterministic session UUID per repo; resume across detach/reboot/Telegram injection; `--fresh` to start over |
 | 3 | **Task DB** | core | SQLite backend tracking all tasks (sandboxed + non-sandboxed), states (running/completed/exited), session IDs |
 | 4 | **Install script** | core | `install.sh` — builds binary, installs Podman if absent, builds sandbox image, wires Claude hooks, optionally sets up Telegram |
-| 5 | **Claude Code hooks** | core | Stop hook → `nibble report session-id` + `nibble notify`; wrappers register tasks at startup |
+| 5 | **Claude Code hooks** | core | Stop hook → `nibble report session-id` + `nibble notify`; claude and omp wrappers register host-run agents as tasks at startup so the sidebar tracks them too |
 | 6 | **Setup scripts** | dx | `.nibble/setup.sh` in any repo — auto-runs at spawn to install toolchain before first attach |
 | 7 | **Git worktrees** | dx | `--branch` flag on spawn/attach/kill — creates/cleans up a worktree automatically per branch |
 | 8 | **`--btw` sessions** | dx | `attach --btw` — side session that doesn't overwrite which session the main attach would continue (ad-hoc research, parallel work); kept on disk like any other |
@@ -33,7 +33,8 @@ This section lists every feature area in the project. Use it to audit what's wor
 | 19 | **Auto-resume on reboot** | ops | systemd user service (`nibble-resume.service`) restarts containers after host reboot |
 | 20 | **Inject** | ops | `nibble inject <id> <msg>` — send a message directly to any sandbox agent, bypassing Telegram |
 | 21 | **Web session inspector** | dx | `nibble web` — dark-mode browser UI (port 7878) for browsing/searching pi sessions, usage dashboard, conversation viewer; runs as `nibble-web.service`, Tailscale-reachable with token auth. See [docs/web.md](docs/web.md) |
-| 22 | **omp (oh-my-pi) support** | core | `--pi` runs upstream pi, `--omp` runs omp (oh-my-pi) — explicit, independent flags. Sandboxes mount both `~/.pi` and `~/.omp`; sessions are format-compatible and cross-resumable. `scripts/migrate-pi-to-omp.sh` migrates host config |
+| 22 | **omp (oh-my-pi) support** | core | `--pi` runs upstream pi, `--omp` runs omp. Tasks are stored as `omp` or `pi`, not collapsed. Sandboxes mount both `~/.pi` and `~/.omp`; sessions are format-compatible and cross-resumable. `scripts/migrate-pi-to-omp.sh` migrates host config |
+| 24 | **Live agent status** | core | `nibble status` shows only processes that are still alive. A killed process or a closed attach pane drops off on the next read. A running sandbox with nobody attached is not listed. Each row is marked `!` needs input (red — permission prompt or question, reason shown below, sorted first), `●` working (green), or `●` idle (purple — finished its turn, waiting for your next message); a legend sits above the footer. `nibble sidebar` opens that view as a left-edge zellij pane showing each agent's pane-reported topic; `q` or `nibble sidebar --close` removes it; `Alt a` (zellij keybind) jumps to it and opens it if needed. It does not replace zellij's bars |
 | 23 | **Session recovery** | core | Eager task→session mapping via extension-reported `session-path`; interactive picker when attach finds multiple sessions for a repo; `session list` shows task links; runbook in [docs/session-recovery.md](docs/session-recovery.md) |
 
 ---
