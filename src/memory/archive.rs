@@ -36,7 +36,7 @@ pub fn archive_session(task_id: &str) -> Result<Option<PathBuf>> {
             .context
             .as_ref()
             .and_then(|c| c.claude_session_id.clone()),
-        AgentType::Pi => task.context.as_ref().and_then(|c| c.session_id.clone()),
+        AgentType::Pi | AgentType::Omp => task.context.as_ref().and_then(|c| c.session_id.clone()),
         AgentType::Hermes => task.context.as_ref().and_then(|c| c.session_id.clone()),
         AgentType::Unknown(_) => task.context.as_ref().and_then(|c| c.session_id.clone()),
     };
@@ -112,6 +112,7 @@ fn agent_short_name(agent: &AgentType) -> String {
         AgentType::ClaudeCode => "claude".to_string(),
         AgentType::Hermes => "hermes".to_string(),
         AgentType::Pi => "pi".to_string(),
+        AgentType::Omp => "omp".to_string(),
         AgentType::Unknown(s) => s.clone(),
     }
 }
@@ -122,11 +123,14 @@ fn find_agent_session_file(agent: &AgentType, session_id: &str) -> Option<PathBu
 
     match agent {
         AgentType::ClaudeCode => find_claude_session(&home, session_id),
-        AgentType::Pi => find_pi_session(&home, session_id),
-        AgentType::Hermes => None, // Hermes sessions are inside the sandbox container
+        AgentType::Pi => find_pi_family_session(&home, ".pi", session_id),
+        AgentType::Omp => find_pi_family_session(&home, ".omp", session_id),
+        AgentType::Hermes => None,
         AgentType::Unknown(_) => {
             // Try all known agents
-            find_claude_session(&home, session_id).or_else(|| find_pi_session(&home, session_id))
+            find_claude_session(&home, session_id)
+                .or_else(|| find_pi_family_session(&home, ".pi", session_id))
+                .or_else(|| find_pi_family_session(&home, ".omp", session_id))
         }
     }
 }
@@ -151,8 +155,8 @@ fn find_claude_session(home: &Path, session_id: &str) -> Option<PathBuf> {
     None
 }
 
-fn find_pi_session(home: &Path, session_id: &str) -> Option<PathBuf> {
-    let sessions_dir = home.join(".pi").join("agent").join("sessions");
+fn find_pi_family_session(home: &Path, config_dir: &str, session_id: &str) -> Option<PathBuf> {
+    let sessions_dir = home.join(config_dir).join("agent").join("sessions");
     if !sessions_dir.is_dir() {
         return None;
     }
