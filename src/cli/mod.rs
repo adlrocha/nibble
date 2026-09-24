@@ -31,6 +31,39 @@ pub enum Commands {
         message: String,
     },
 
+    /// Show agents that are actually alive. Dead processes and closed panes drop off.
+    Status {
+        /// Re-render every second. In the pane: q closes, 1-9 jump to an agent.
+        #[arg(long, short)]
+        watch: bool,
+        /// Machine-readable JSON
+        #[arg(long)]
+        json: bool,
+        /// Include exited tasks (the archive). Default is the live set only.
+        #[arg(long, short)]
+        all: bool,
+        /// Delete exited task rows. Does not stop containers.
+        #[arg(long)]
+        clear: bool,
+        /// Stop every sandbox and delete every task row.
+        #[arg(long)]
+        scratch: bool,
+    },
+
+    /// Open the live-agent sidebar in the current zellij tab.
+    ///
+    /// The pane tracks agents that are still alive. Press a number inside it
+    /// to jump to that agent's pane, q to close it, or run
+    /// `nibble sidebar --close` from any pane in the tab.
+    Sidebar {
+        /// Focus the sidebar pane, opening it first if it is not open.
+        #[arg(long, conflicts_with = "close")]
+        focus: bool,
+        /// Close the sidebar pane in this tab.
+        #[arg(long)]
+        close: bool,
+    },
+
     /// Run the Telegram long-polling daemon (routes phone replies back to agents)
     Listen,
 
@@ -216,6 +249,18 @@ pub enum ReportAction {
         task_id: String,
         /// Absolute path to the session JSONL file (container or host path)
         path: String,
+    },
+
+    /// Annotate a live task. Does not keep a dead process on the list;
+    /// `nibble status` drops anything whose process is gone.
+    Status {
+        /// Task ID
+        task_id: String,
+        /// running, blocked, completed, or exited
+        state: String,
+        /// Short reason, used for blocked (the permission prompt, the question)
+        #[arg(long)]
+        message: Option<String>,
     },
 }
 

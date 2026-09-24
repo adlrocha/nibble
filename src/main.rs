@@ -11,6 +11,7 @@ mod notifications;
 mod privacy_filter;
 mod sandbox;
 mod session;
+mod status;
 mod usage;
 mod web;
 
@@ -134,6 +135,7 @@ fn main() -> Result<()> {
                     AgentType::ClaudeCode
                     | AgentType::Hermes
                     | AgentType::Pi
+                    | AgentType::Omp
                     | AgentType::Unknown(_) => {
                         if session_id.starts_with("ses_") {
                             // Legacy session ID (ses_ prefix) — ignore
@@ -163,7 +165,76 @@ fn main() -> Result<()> {
                 );
                 db.update_task(&task)?;
             }
+            ReportAction::Status {
+                task_id,
+                state,
+                message,
+            } => {
+                status::apply_report(&db, &task_id, &state, message.as_deref())?;
+                status::reconcile(&db)?;
+            }
         },
+        Commands::Status {
+            watch,
+            json,
+            all,
+            clear,
+            scratch,
+        } => {
+            if scratch {
+                cmd_sandbox_kill_all(&db)?;
+                let n = db.delete_all_tasks()?;
+                println!("Removed {n} task row(s). Sandboxes stopped.");
+            } else if clear {
+                let n = db.delete_exited_tasks()?;
+                println!("Removed {n} exited task row(s).");
+            } else if watch {
+                status::watch(&db)?;
+            } else {
+                status::reconcile(&db)?;
+                let agents = status::live_agents(&db)?;
+                if json {
+                    let rows: Vec<_> = agents
+                        .iter()
+                        .map(|a| {
+                            serde_json::json!({
+                                "task_id": a.task_id,
+                                "agent": a.agent,
+                                "title": a.title,
+                                "activity": match a.activity {
+                                    status::Activity::Working => "working",
+                                    status::Activity::Blocked => "blocked",
+                                    status::Activity::Idle => "idle",
+                                },
+                                "reason": a.reason,
+                                "pane_id": a.pane_id,
+                            })
+                        })
+                        .collect();
+                    println!("{}", serde_json::to_string_pretty(&rows)?);
+                } else {
+                    print!("{}", status::render(&agents));
+                    if all {
+                        println!("--- exited ---");
+                        for t in db.list_tasks()? {
+                            if t.status == TaskStatus::Exited {
+                                let id = &t.task_id[..t.task_id.len().min(8)];
+                                println!("  {id} {} {}", t.agent_type, t.title);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Commands::Sidebar { focus, close } => {
+            if close {
+                close_sidebar_pane()?;
+            } else if focus {
+                focus_sidebar_pane()?;
+            } else {
+                open_sidebar_pane()?;
+            }
+        }
         Commands::Memory { action } => {
             // Ensure memory directory exists
             crate::memory::init_memory_dir()?;
@@ -943,9 +1014,11 @@ fn main() -> Result<()> {
             if _hermes {
                 anyhow::bail!("Inject is not yet supported for Hermes sandboxes. Use `nibble sandbox attach` instead.");
             }
-            let _pi = task.agent_type == AgentType::Pi;
-            if _pi {
-                anyhow::bail!("Inject is not yet supported for Pi sandboxes. Use `nibble sandbox attach` instead.");
+            if matches!(task.agent_type, AgentType::Pi | AgentType::Omp) {
+                anyhow::bail!(
+                    "Inject is not yet supported for {} sandboxes. Use `nibble sandbox attach` instead.",
+                    task.agent_type
+                );
             }
             agent_input::inject(&task, &message)?;
             println!("Message injected into task {}", task_id);
@@ -1530,11 +1603,9 @@ fn pi_session_path_candidates(stored: &str, roots: &[&str]) -> Vec<std::path::Pa
         Some(".pi") | Some(".omp") => roots
             .iter()
             .map(|root| {
-                container_home.join(root).join(
-                    rel.components()
-                        .skip(1)
-                        .collect::<std::path::PathBuf>(),
-                )
+                container_home
+                    .join(root)
+                    .join(rel.components().skip(1).collect::<std::path::PathBuf>())
             })
             .collect(),
         _ => vec![container_home.join(rel)],
@@ -2147,7 +2218,16 @@ pub(crate) fn cmd_sandbox_spawn(
                             eprintln!("Attach with:");
                             eprintln!("  nibble sandbox attach {}", tid);
                         } else {
-                            cmd_sandbox_attach(db, tid.clone(), fresh, false, hermes, pi, omp, None)?;
+                            cmd_sandbox_attach(
+                                db,
+                                tid.clone(),
+                                fresh,
+                                false,
+                                hermes,
+                                pi,
+                                omp,
+                                None,
+                            )?;
                         }
                         return Ok(tid.clone());
                     }
@@ -2316,7 +2396,9 @@ pub(crate) fn cmd_sandbox_spawn(
                     .map(|h| h.join(".omp").join("agent").join("agent.db"))
                     .unwrap_or_default();
                 if !omp_agent_db.exists() {
-                    eprintln!("  Auth:      ⚠️  no omp login on host (~/.omp/agent/agent.db missing)");
+                    eprintln!(
+                        "  Auth:      ⚠️  no omp login on host (~/.omp/agent/agent.db missing)"
+                    );
                     eprintln!("             Run `omp` → /login once (on the host or inside this");
                     eprintln!("             sandbox) — ~/.omp is mounted rw, so it persists for");
                     eprintln!("             every future sandbox. Coming from pi? Run");
@@ -2411,7 +2493,9 @@ pub(crate) fn cmd_sandbox_spawn(
                                     // mounted ~/.omp/agent/extensions, so this is benign.
                                     eprintln!("  Tools:     ⚠️  omp install {ext} exited non-zero (needs bun in the sandbox; extensions already in ~/.omp/agent/extensions on the host are available via the mount)");
                                 } else {
-                                    eprintln!("  Tools:     ⚠️  {ext_cmd} install {ext} exited non-zero");
+                                    eprintln!(
+                                        "  Tools:     ⚠️  {ext_cmd} install {ext} exited non-zero"
+                                    );
                                 }
                             }
                             Err(e) => eprintln!(
@@ -2518,10 +2602,12 @@ pub(crate) fn cmd_sandbox_spawn(
 
     let agent_type = if hermes {
         AgentType::Hermes
-    } else if pi_family {
-        AgentType::Pi
     } else {
-        AgentType::ClaudeCode
+        match pi_impl {
+            Some(PiImplementation::Omp) => AgentType::Omp,
+            Some(PiImplementation::Pi) => AgentType::Pi,
+            None => AgentType::ClaudeCode,
+        }
     };
     let mut task = Task::new(task_id.clone(), agent_type, title, None, None);
     task.sandbox_type = SandboxType::Podman;
@@ -2647,7 +2733,8 @@ pub(crate) fn cmd_sandbox_spawn(
             let pi_slug = pi_session_dir_name(&container_working_dir(&repo));
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_secs(5));
-                if let Some(host_path) = discover_pi_session_in_container(&cid, &pi_slug, dir_name) {
+                if let Some(host_path) = discover_pi_session_in_container(&cid, &pi_slug, dir_name)
+                {
                     let home = dirs::home_dir().unwrap_or_default();
                     let cp = if host_path.starts_with(&home) {
                         std::path::PathBuf::from("/home/node")
@@ -3225,6 +3312,15 @@ impl std::fmt::Display for SelectedAgent {
     }
 }
 
+fn agent_type_of(agent: SelectedAgent) -> AgentType {
+    match agent {
+        SelectedAgent::Claude => AgentType::ClaudeCode,
+        SelectedAgent::Pi => AgentType::Pi,
+        SelectedAgent::Omp => AgentType::Omp,
+        SelectedAgent::Hermes => AgentType::Hermes,
+    }
+}
+
 /// Which pi-family agent a spawn installs and an attach runs. Selected
 /// explicitly per invocation: `--pi` (upstream pi) or `--omp` (oh-my-pi).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3233,12 +3329,11 @@ enum PiImplementation {
     Pi,
 }
 
-/// Determine which agent to attach to, and validate flag combinations.
-///
 /// Rules:
-/// - Plain sandboxes (non-hermes) default to Claude; hermes sandboxes default to hermes.
-/// - `--pi` selects upstream pi; `--omp` selects omp (oh-my-pi). The two flags
-///   are explicit and independent — no config indirection.
+/// - No flag: resume the agent stored on the task. Claude is only the default
+///   when the task itself is Claude (or an unknown type).
+/// - `--pi` selects upstream pi; `--omp` selects omp. Explicit flags override
+///   the stored type; the caller rewrites the task row to match.
 /// - `--hermes` is only valid on hermes sandboxes (different image/binary).
 /// - Claude-only option (`--btw`) is rejected for other agents.
 /// - At most one agent flag can be specified per invocation.
@@ -3283,10 +3378,13 @@ fn resolve_attach_agent(
             anyhow::bail!("--pi is not supported on hermes sandboxes (pi is not installed)");
         }
         SelectedAgent::Pi
-    } else if is_hermes_sandbox {
-        SelectedAgent::Hermes
     } else {
-        SelectedAgent::Claude
+        match stored_type {
+            AgentType::Hermes => SelectedAgent::Hermes,
+            AgentType::Pi => SelectedAgent::Pi,
+            AgentType::Omp => SelectedAgent::Omp,
+            AgentType::ClaudeCode | AgentType::Unknown(_) => SelectedAgent::Claude,
+        }
     };
 
     if btw
@@ -3371,7 +3469,7 @@ fn cmd_sandbox_attach(
     omp: bool,
     session_id: Option<String>,
 ) -> Result<()> {
-    let task = db
+    let mut task = db
         .get_task_by_id(&task_id)?
         .ok_or_else(|| anyhow::anyhow!("Task not found: {}", task_id))?;
 
@@ -3431,6 +3529,11 @@ fn cmd_sandbox_attach(
     };
 
     let agent = resolve_attach_agent(&task.agent_type, hermes, pi, omp, btw)?;
+    let resolved = agent_type_of(agent);
+    if task.agent_type != resolved {
+        task.agent_type = resolved;
+        db.update_task(&task)?;
+    }
 
     // Resolve the per-agent session IDs stored for this task.
     // Each agent writes its own field so they never clobber each other.
@@ -3548,7 +3651,10 @@ fn cmd_sandbox_attach(
                 let pi_cmd = if let Some(cp) = maybe_cp {
                     // Stored path exists — use it, but still refresh the DB record
                     // so the link survives if the user switched sessions.
-                    eprintln!("  Session:   resuming stored {bin} session {}", cp.display());
+                    eprintln!(
+                        "  Session:   resuming stored {bin} session {}",
+                        cp.display()
+                    );
                     let mut updated_task = task.clone();
                     if let Some(ref mut ctx) = updated_task.context {
                         ctx.extra.insert(
@@ -3695,9 +3801,7 @@ fn cmd_sandbox_attach(
                     "Attaching to sandbox {} ({}) [{bin}]…",
                     task.title, container_id
                 );
-                eprintln!(
-                    "(Exit {bin} or press Ctrl+C to detach — the container keeps running)"
-                );
+                eprintln!("(Exit {bin} or press Ctrl+C to detach — the container keeps running)");
             }
         }
         SelectedAgent::Claude => {
@@ -3713,6 +3817,27 @@ fn cmd_sandbox_attach(
             }
         }
     }
+    // The pane's process is this process after exec. Record it so a closed
+    // pane or a killed attach drops off the live list without a hook.
+    // Side sessions must not steal the main task's pid.
+    if !btw {
+        task.pid = Some(std::process::id() as i32);
+        if let Ok(pane) = std::env::var("ZELLIJ_PANE_ID") {
+            if let Ok(id) = pane.parse::<u64>() {
+                let ctx = task.context.get_or_insert_with(|| TaskContext {
+                    url: None,
+                    project_path: None,
+                    session_id: None,
+                    claude_session_id: None,
+                    extra: HashMap::new(),
+                });
+                ctx.extra
+                    .insert("zellij_pane_id".to_string(), serde_json::json!(id));
+            }
+        }
+        std::env::set_var("AGENT_TASK_ID", &task.task_id);
+        db.update_task(&task)?;
+    }
 
     let err = std::os::unix::process::CommandExt::exec(
         std::process::Command::new("podman").args(&podman_args),
@@ -3720,7 +3845,486 @@ fn cmd_sandbox_attach(
     anyhow::bail!("Failed to exec podman: {}", err)
 }
 
-/// Kill a sandbox container and mark its task as exited.
+const SIDEBAR_PANE_NAME: &str = "nibble";
+
+/// Wide enough to read agent rows without resizing, capped as a strip.
+fn sidebar_target_cols(tab_cols: u16) -> u16 {
+    let target = (tab_cols / 9).clamp(28, 48);
+    let room = tab_cols.saturating_sub(24).max(16);
+    target.min(room)
+}
+
+fn is_sidebar_pane(title: &str, command: Option<&str>) -> bool {
+    title == SIDEBAR_PANE_NAME
+        || title == "agents"
+        || command.is_some_and(|cmd| {
+            cmd.contains("nibble") && cmd.contains("status") && cmd.contains("--watch")
+        })
+}
+
+/// zellij 0.45: `resize <increase|decrease> [left|right|up|down]`.
+/// `--direction` is rejected. The border to shrink is the inner one.
+fn resize_args(pane_id: &str, resize: &str, border: &str) -> Vec<String> {
+    ["action", "resize", resize, border, "--pane-id", pane_id]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
+fn shrink_args(pane_id: &str, border: &str) -> Vec<String> {
+    resize_args(pane_id, "decrease", border)
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ZellijPane {
+    id: u32,
+    #[serde(default)]
+    is_plugin: bool,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    pane_columns: u16,
+    #[serde(default)]
+    pane_x: u16,
+    #[serde(default)]
+    tab_id: u32,
+    #[serde(default)]
+    pane_command: Option<String>,
+}
+
+fn zellij_panes() -> Result<Vec<ZellijPane>> {
+    let output = std::process::Command::new("zellij")
+        .args(["action", "list-panes", "--all", "--json"])
+        .output()
+        .context("zellij not available. Run `nibble status --watch` in a narrow pane.")?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        let detail = err.trim();
+        anyhow::bail!(
+            "Not inside zellij{}. Run `nibble status --watch` in a pane you size yourself.",
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(" ({detail})")
+            }
+        );
+    }
+    serde_json::from_slice(&output.stdout).context("could not parse zellij pane list")
+}
+
+fn current_tab_id(panes: &[ZellijPane]) -> Option<u32> {
+    if let Ok(raw) = std::env::var("ZELLIJ_PANE_ID") {
+        if let Ok(id) = raw.parse::<u32>() {
+            if let Some(pane) = panes.iter().find(|p| !p.is_plugin && p.id == id) {
+                return Some(pane.tab_id);
+            }
+        }
+    }
+    focused_pane_id()
+        .and_then(|id| panes.iter().find(|p| !p.is_plugin && p.id == id))
+        .map(|p| p.tab_id)
+}
+
+/// The pane the attached client is looking at. `list-clients` is the only
+/// reliable focus probe in zellij 0.45: `is_focused` in the pane JSON and
+/// `action focus-pane-id` both misbehave when driven from outside a client.
+fn focused_pane_id() -> Option<u32> {
+    let output = std::process::Command::new("zellij")
+        .args(["action", "list-clients"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in text.lines().skip(1) {
+        let mut fields = line.split_whitespace();
+        let _client = fields.next()?;
+        let pane = fields.next()?;
+        if let Some(id) = pane.strip_prefix("terminal_") {
+            return id.parse::<u32>().ok();
+        }
+    }
+    None
+}
+
+/// Focus a pane by cycling. `action focus-pane-id` is a silent no-op from
+/// outside a client in zellij 0.45, while `focus-next-pane` works.
+fn focus_pane_by_id(panes: &[ZellijPane], target: u32) -> Result<()> {
+    let steps = panes.iter().filter(|p| !p.is_plugin).count() + 2;
+    for _ in 0..steps {
+        if focused_pane_id() == Some(target) {
+            return Ok(());
+        }
+        zellij_action(&["focus-next-pane".into()])?;
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    anyhow::bail!("Could not focus pane {}", pane_ref(target))
+}
+
+fn pane_ref(id: u32) -> String {
+    format!("terminal_{id}")
+}
+
+fn tab_columns(panes: &[ZellijPane], tab_id: u32) -> u16 {
+    panes
+        .iter()
+        .filter(|p| !p.is_plugin && p.tab_id == tab_id)
+        .map(|p| p.pane_x.saturating_add(p.pane_columns))
+        .max()
+        .unwrap_or(80)
+}
+
+fn sidebar_in_tab<'a>(panes: &'a [ZellijPane], tab_id: u32) -> Option<&'a ZellijPane> {
+    panes.iter().find(|p| {
+        !p.is_plugin && p.tab_id == tab_id && is_sidebar_pane(&p.title, p.pane_command.as_deref())
+    })
+}
+
+fn pane_geometry(pane_id: &str) -> Option<(u16, u16)> {
+    let id = pane_id
+        .strip_prefix("terminal_")
+        .unwrap_or(pane_id)
+        .parse::<u32>()
+        .ok()?;
+    let pane = zellij_panes()
+        .ok()?
+        .into_iter()
+        .find(|p| !p.is_plugin && p.id == id)?;
+    if pane.pane_columns == 0 {
+        return None;
+    }
+    Some((pane.pane_columns, pane.pane_x))
+}
+
+fn shrink_sidebar(pane_id: &str, target: u16) {
+    let mut previous = u16::MAX;
+    let mut missing = 0u8;
+    for _ in 0..48 {
+        let Some((cols, x)) = pane_geometry(pane_id) else {
+            missing += 1;
+            if missing > 5 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            continue;
+        };
+        missing = 0;
+        // Left edge of the screen: the inner border is right. Otherwise the
+        // pane is to the right of something, and the inner border is left.
+        let border = if x == 0 { "right" } else { "left" };
+        if cols <= target || cols >= previous {
+            if previous != u16::MAX && cols * 4 < target * 3 {
+                // The last step overshot far below the target: grow back once.
+                let _ = std::process::Command::new("zellij")
+                    .args(resize_args(pane_id, "increase", border))
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+            break;
+        }
+        let ok = std::process::Command::new("zellij")
+            .args(shrink_args(pane_id, border))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !ok {
+            break;
+        }
+        previous = cols;
+    }
+}
+
+/// Swap the pane left until nothing in its tab sits further left, so the
+/// sidebar always lands at the left edge.
+fn move_pane_leftmost(pane_id: &str) {
+    let Some(id) = pane_id
+        .strip_prefix("terminal_")
+        .and_then(|n| n.parse::<u32>().ok())
+    else {
+        return;
+    };
+    for _ in 0..8 {
+        let Ok(panes) = zellij_panes() else { break };
+        let Some(me) = panes.iter().find(|p| !p.is_plugin && p.id == id) else {
+            break;
+        };
+        let furthest_left = panes
+            .iter()
+            .filter(|p| !p.is_plugin && p.tab_id == me.tab_id && p.id != id)
+            .map(|p| p.pane_x)
+            .min()
+            .unwrap_or(0);
+        if me.pane_x <= furthest_left {
+            break;
+        }
+        let moved = std::process::Command::new("zellij")
+            .args(["action", "move-pane", "left", "--pane-id", pane_id])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !moved {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+}
+
+/// Strip the agent's logo/spinner glyphs from a zellij pane title, leaving
+/// the reported topic. `None` for generic or nibble-owned panes. Only known
+/// prefix glyphs are removed, so non-ASCII topic text survives.
+fn clean_pane_title(title: &str) -> Option<String> {
+    let cleaned = title
+        .trim()
+        .trim_start_matches(|c: char| {
+            c.is_whitespace()
+                || matches!(
+                    c,
+                    '\u{2800}'
+                        ..='\u{28FF}' // braille spinner frames
+                    | 'π' | '✳' | '✻' | '✱' | '⚡'
+                    | '◐' | '◑' | '◒' | '◓' | '○' | '●' | '·'
+                )
+        })
+        .trim();
+    if cleaned.is_empty()
+        || cleaned.starts_with("Pane #")
+        || cleaned == SIDEBAR_PANE_NAME
+        || cleaned == "agents"
+    {
+        None
+    } else {
+        Some(cleaned.to_string())
+    }
+}
+
+/// Topics reported by agent pane titles, keyed two ways: by task id through
+/// `AGENT_TASK_ID` in the pane command (attach panes), and by pane id (host
+/// agents, matched through the task's recorded pane). Best-effort: empty
+/// outside zellij.
+pub(crate) fn zellij_pane_topics() -> (HashMap<String, String>, HashMap<u32, String>) {
+    let mut by_task = HashMap::new();
+    let mut by_pane = HashMap::new();
+    let Ok(panes) = zellij_panes() else {
+        return (by_task, by_pane);
+    };
+    for pane in panes.iter().filter(|p| !p.is_plugin) {
+        let Some(title) = clean_pane_title(&pane.title) else {
+            continue;
+        };
+        if let Some(cmd) = pane.pane_command.as_deref() {
+            if let Some(task_id) = status::extract_task_id(cmd) {
+                by_task.insert(task_id, title.clone());
+            }
+        }
+        by_pane.insert(pane.id, title);
+    }
+    (by_task, by_pane)
+}
+
+/// Run a zellij action, surfacing failures instead of swallowing them.
+fn zellij_action(args: &[String]) -> Result<()> {
+    let status = std::process::Command::new("zellij")
+        .arg("action")
+        .args(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .context("zellij not available")?;
+    if !status.success() {
+        anyhow::bail!("zellij action {} failed", args.join(" "));
+    }
+    Ok(())
+}
+
+fn create_sidebar(target: u16) -> Result<String> {
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("nibble"));
+    let opened = std::process::Command::new("zellij")
+        .args([
+            "action",
+            "new-pane",
+            "--direction",
+            "right",
+            "--name",
+            SIDEBAR_PANE_NAME,
+            "--close-on-exit",
+            "--no-focus",
+            "--",
+        ])
+        .arg(&exe)
+        .args(["status", "--watch"])
+        .output()
+        .context("zellij not available. Run `nibble status --watch` in a narrow pane.")?;
+    if !opened.status.success() {
+        let err = String::from_utf8_lossy(&opened.stderr);
+        let detail = err.trim();
+        anyhow::bail!(
+            "Could not open the sidebar{}. Run `nibble status --watch` in a pane you size yourself.",
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {detail}")
+            }
+        );
+    }
+    let pane_id = String::from_utf8_lossy(&opened.stdout).trim().to_string();
+    if pane_id.is_empty() {
+        anyhow::bail!("zellij opened a pane but did not return its id");
+    }
+    move_pane_leftmost(&pane_id);
+    shrink_sidebar(&pane_id, target);
+    Ok(pane_id)
+}
+
+fn open_sidebar_pane() -> Result<()> {
+    let panes = zellij_panes()?;
+    let tab = current_tab_id(&panes)
+        .context("Not inside zellij. Run `nibble status --watch` in a pane you size yourself.")?;
+    let target = sidebar_target_cols(tab_columns(&panes, tab));
+    if let Some(existing) = sidebar_in_tab(&panes, tab) {
+        let id = pane_ref(existing.id);
+        if existing.title != SIDEBAR_PANE_NAME {
+            let _ = std::process::Command::new("zellij")
+                .args(["action", "rename-pane", "--pane-id", &id, SIDEBAR_PANE_NAME])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+        if existing.pane_columns > target.saturating_add(8) {
+            shrink_sidebar(&id, target);
+        }
+        println!(
+            "Sidebar already open. Press q in that pane to close it, or run `nibble sidebar --close`."
+        );
+        return Ok(());
+    }
+    create_sidebar(target)?;
+    println!("Sidebar open. Press q in that pane to close it, or run `nibble sidebar --close`.");
+    Ok(())
+}
+
+/// Jump to the sidebar. Focus it in this tab, jump to its tab if it lives
+/// elsewhere in the session, or open it first when it is not open.
+///
+/// Invoked from inside a zellij pane (the Alt-a keybind wrapper), this
+/// detaches first: zellij 0.45 scopes focus actions issued from within a
+/// pane to that pane's focus group, and restores the pre-wrapper focus when
+/// the wrapper pane closes. The detached copy acts once the wrapper is gone.
+fn focus_sidebar_pane() -> Result<()> {
+    if std::env::var_os("ZELLIJ_PANE_ID").is_some()
+        && std::env::var_os("NIBBLE_SIDEBAR_DETACHED").is_none()
+    {
+        use std::os::unix::process::CommandExt;
+        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("nibble"));
+        let mut cmd = std::process::Command::new(exe);
+        cmd.args(["sidebar", "--focus"])
+            .env("NIBBLE_SIDEBAR_DETACHED", "1")
+            .env_remove("ZELLIJ_PANE_ID")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        cmd.spawn().context("could not detach sidebar focus")?;
+        return Ok(());
+    }
+    if std::env::var_os("NIBBLE_SIDEBAR_DETACHED").is_some() {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
+    let panes = zellij_panes()?;
+    let tab = current_tab_id(&panes)
+        .context("Not inside zellij. Run `nibble sidebar` from a zellij pane instead.")?;
+    if let Some(p) = sidebar_in_tab(&panes, tab) {
+        focus_pane_by_id(&panes, p.id)?;
+        return Ok(());
+    }
+    if let Some(p) = panes
+        .iter()
+        .find(|p| !p.is_plugin && is_sidebar_pane(&p.title, p.pane_command.as_deref()))
+    {
+        let id = p.id;
+        zellij_action(&["go-to-tab-by-id".into(), p.tab_id.to_string()])?;
+        focus_pane_by_id(&panes, id)?;
+        return Ok(());
+    }
+    let target = sidebar_target_cols(tab_columns(&panes, tab));
+    let id = create_sidebar(target)?;
+    let id_n = id
+        .strip_prefix("terminal_")
+        .and_then(|n| n.parse::<u32>().ok())
+        .context("zellij returned an unexpected pane id")?;
+    focus_pane_by_id(&zellij_panes()?, id_n)?;
+    Ok(())
+}
+
+/// Jump to an agent's pane from the sidebar's digit keys. The pane is found
+/// through `AGENT_TASK_ID` in its command (attach panes carry it); the
+/// task's recorded pane id is the fallback. Crosses tabs when needed.
+pub(crate) fn focus_agent_pane(task_id: &str, recorded_pane: Option<u32>) -> Result<()> {
+    let panes = zellij_panes()?;
+    let needle = format!("AGENT_TASK_ID={task_id}");
+    let target = panes
+        .iter()
+        .find(|p| {
+            !p.is_plugin
+                && p.pane_command
+                    .as_deref()
+                    .is_some_and(|c| c.contains(&needle))
+        })
+        .map(|p| p.id)
+        .or_else(|| recorded_pane.filter(|id| panes.iter().any(|p| !p.is_plugin && p.id == *id)));
+    let Some(id) = target else {
+        anyhow::bail!("no live pane for this agent");
+    };
+    let pane_tab = panes.iter().find(|p| p.id == id).map(|p| p.tab_id);
+    if let (Some(target_tab), Some(current)) = (pane_tab, current_tab_id(&panes)) {
+        if target_tab != current {
+            zellij_action(&["go-to-tab-by-id".into(), target_tab.to_string()])?;
+        }
+    }
+    focus_pane_by_id(&panes, id)
+}
+
+fn close_sidebar_pane() -> Result<()> {
+    let panes = zellij_panes()?;
+    let tab = current_tab_id(&panes).context(
+        "Not inside zellij. Focus the sidebar pane and press q, or close that pane from zellij.",
+    )?;
+    let hits: Vec<u32> = panes
+        .iter()
+        .filter(|p| {
+            !p.is_plugin && p.tab_id == tab && is_sidebar_pane(&p.title, p.pane_command.as_deref())
+        })
+        .map(|p| p.id)
+        .collect();
+    if hits.is_empty() {
+        println!("No sidebar in this tab.");
+        return Ok(());
+    }
+    for id in hits {
+        let status = std::process::Command::new("zellij")
+            .args(["action", "close-pane", "--pane-id", &pane_ref(id)])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .context("zellij not available")?;
+        if !status.success() {
+            anyhow::bail!("Failed to close sidebar pane {}", pane_ref(id));
+        }
+    }
+    println!("Sidebar closed.");
+    Ok(())
+}
+
 fn cmd_sandbox_kill(db: &Database, task_id: String) -> Result<()> {
     let mut task = db
         .get_task_by_id(&task_id)?
@@ -3982,7 +4586,7 @@ pub(crate) fn prune_stale_tasks(db: &Database) -> Result<usize> {
         ),
         Err(e) => eprintln!("[prune] GC warning: {e:#}"),
     }
-
+    pruned += status::reconcile(db)?;
     Ok(pruned)
 }
 
@@ -4337,6 +4941,7 @@ fn agent_display(agent_type: &AgentType) -> (&'static str, String) {
         AgentType::ClaudeCode => ("🤖", "Claude Code".to_string()),
         AgentType::Hermes => ("🧠", "Hermes".to_string()),
         AgentType::Pi => ("🥧", "Pi".to_string()),
+        AgentType::Omp => ("⬡", "omp".to_string()),
         AgentType::Unknown(s) => ("🔧", s.clone()),
     }
 }
@@ -4440,6 +5045,8 @@ mod notification_tests {
             agent_display(&AgentType::Hermes),
             ("🧠", "Hermes".to_string())
         );
+        assert_eq!(agent_display(&AgentType::Omp), ("⬡", "omp".to_string()));
+        assert_eq!(agent_display(&AgentType::Pi), ("🥧", "Pi".to_string()));
     }
 
     #[test]
@@ -4447,6 +5054,17 @@ mod notification_tests {
         let (emoji, label) = agent_display(&AgentType::Unknown("my_custom_agent".to_string()));
         assert_eq!(emoji, "🔧");
         assert_eq!(label, "my_custom_agent".to_string());
+    }
+
+    #[test]
+    fn test_attach_resumes_stored_omp_not_pi() {
+        let omp = resolve_attach_agent(&AgentType::Omp, false, false, false, false).unwrap();
+        assert_eq!(omp, SelectedAgent::Omp);
+        let pi = resolve_attach_agent(&AgentType::Pi, false, false, false, false).unwrap();
+        assert_eq!(pi, SelectedAgent::Pi);
+        let overridden = resolve_attach_agent(&AgentType::Pi, false, false, true, false).unwrap();
+        assert_eq!(overridden, SelectedAgent::Omp);
+        assert_eq!(agent_type_of(overridden), AgentType::Omp);
     }
 
     #[test]
@@ -4808,7 +5426,10 @@ mod pi_family_tests {
     #[test]
     fn candidates_unrelated_path_passes_through() {
         let cands = pi_session_path_candidates("/opt/elsewhere/s.jsonl", &[".omp", ".pi"]);
-        assert_eq!(cands, vec![std::path::PathBuf::from("/opt/elsewhere/s.jsonl")]);
+        assert_eq!(
+            cands,
+            vec![std::path::PathBuf::from("/opt/elsewhere/s.jsonl")]
+        );
     }
 }
 
@@ -4896,5 +5517,63 @@ mod session_recovery_tests {
         let sessions = list_pi_sessions_for_cwd_with_home(home, "/nibble", ".pi");
         assert_eq!(sessions.len(), 1);
         assert!(sessions[0].0.ends_with("legacy.jsonl"));
+    }
+}
+
+#[cfg(test)]
+mod sidebar_tests {
+    use super::*;
+
+    #[test]
+    fn sidebar_resize_uses_positional_direction() {
+        let args = shrink_args("terminal_4", "left");
+        assert_eq!(
+            args,
+            [
+                "action",
+                "resize",
+                "decrease",
+                "left",
+                "--pane-id",
+                "terminal_4"
+            ]
+        );
+        assert!(!args.iter().any(|arg| arg == "--direction"));
+        assert_eq!(shrink_args("terminal_0", "right")[3], "right");
+    }
+
+    #[test]
+    fn sidebar_target_stays_a_narrow_strip() {
+        assert_eq!(sidebar_target_cols(448), 48);
+        assert_eq!(sidebar_target_cols(80), 28);
+        assert!(sidebar_target_cols(40) <= 16);
+    }
+
+    #[test]
+    fn pane_title_strips_agent_glyphs() {
+        assert_eq!(
+            clean_pane_title("π ⠸ Fix Nibble Sidebar Resize Error"),
+            Some("Fix Nibble Sidebar Resize Error".to_string())
+        );
+        assert_eq!(
+            clean_pane_title("✳ Founder in residence proposal"),
+            Some("Founder in residence proposal".to_string())
+        );
+        assert_eq!(clean_pane_title("Pane #2"), None);
+        assert_eq!(clean_pane_title("nibble"), None);
+        assert_eq!(clean_pane_title("⠋"), None);
+        assert_eq!(clean_pane_title(""), None);
+    }
+
+    #[test]
+    fn sidebar_pane_match_includes_legacy_name_and_watch_command() {
+        assert!(is_sidebar_pane("nibble", None));
+        assert!(is_sidebar_pane("agents", None));
+        assert!(!is_sidebar_pane("Pane #1", None));
+        assert!(is_sidebar_pane(
+            "Pane #1",
+            Some("/usr/bin/nibble status --watch")
+        ));
+        assert!(!is_sidebar_pane("Pane #1", Some("nibble status")));
     }
 }

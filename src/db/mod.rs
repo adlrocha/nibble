@@ -663,6 +663,20 @@ impl Database {
         Ok(deleted > 0)
     }
 
+    /// Delete every exited task row. Live and detached rows stay.
+    pub fn delete_exited_tasks(&self) -> Result<usize> {
+        let deleted = self
+            .conn
+            .execute("DELETE FROM tasks WHERE status = 'exited'", [])?;
+        Ok(deleted)
+    }
+
+    /// Delete every task row. Caller must already have stopped containers.
+    pub fn delete_all_tasks(&self) -> Result<usize> {
+        let deleted = self.conn.execute("DELETE FROM tasks", [])?;
+        Ok(deleted)
+    }
+
     /// Delete sandbox tasks that have been exited for longer than `days`.
     /// Returns the number of tasks deleted.
     pub fn delete_exited_sandbox_tasks_older_than(&self, days: i64) -> Result<usize> {
