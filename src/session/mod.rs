@@ -863,7 +863,7 @@ pub fn last_assistant_message_for_task(task: &crate::models::Task) -> Option<Str
             let sesh = find_session_by_id_with_home(sid, &home)?;
             extract_last_assistant_message(&sesh)
         }
-        crate::models::AgentType::Pi => {
+        crate::models::AgentType::Pi | crate::models::AgentType::Omp => {
             let container_path = task
                 .context
                 .as_ref()?

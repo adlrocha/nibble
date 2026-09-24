@@ -92,6 +92,17 @@ else
     echo "    Install Claude Code and re-run this script to enable tracking."
 fi
 
+# omp (oh-my-pi)
+if check_agent "omp"; then
+    OMP_ORIGINAL=$(which omp)
+    if [ -n "$OMP_ORIGINAL" ]; then
+        ln -sf "$OMP_ORIGINAL" "$WRAPPER_DIR/omp.original" 2>/dev/null || true
+        add_alias "omp"
+    fi
+else
+    echo "  ⚠ 'omp' not found in PATH. Skipping wrapper setup."
+fi
+
 
 echo ""
 echo "============================================"
@@ -107,6 +118,9 @@ echo ""
 echo "Wrapped agents:"
 if check_agent "claude"; then
     echo "  • claude (Claude Code)"
+fi
+if check_agent "omp"; then
+    echo "  • omp (oh-my-pi)"
 fi
 echo ""
 echo "Test it:"

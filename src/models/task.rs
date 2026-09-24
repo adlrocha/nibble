@@ -18,6 +18,8 @@ pub enum AgentType {
     Hermes,
     /// Pi (pi.dev) — coding agent with multi-provider LLM support.
     Pi,
+    /// omp (oh-my-pi). Same session format as pi, tracked as its own agent.
+    Omp,
     /// Any agent type not yet known to this binary.  Stores the raw string so
     /// `as_str()` / serialization round-trips perfectly.
     Unknown(String),
@@ -30,6 +32,7 @@ impl AgentType {
             AgentType::ClaudeCode => "claude_code",
             AgentType::Hermes => "hermes",
             AgentType::Pi => "pi",
+            AgentType::Omp => "omp",
             AgentType::Unknown(s) => s.as_str(),
         }
     }
@@ -43,6 +46,7 @@ impl FromStr for AgentType {
             "claude_code" => AgentType::ClaudeCode,
             "hermes" => AgentType::Hermes,
             "pi" => AgentType::Pi,
+            "omp" => AgentType::Omp,
             other => AgentType::Unknown(other.to_string()),
         })
     }
@@ -483,7 +487,8 @@ mod tests {
     fn test_ac4_agent_type_as_str() {
         assert_eq!(AgentType::ClaudeCode.as_str(), "claude_code");
         assert_eq!(AgentType::Hermes.as_str(), "hermes");
-        assert_eq!(AgentType::Unknown("my_bot".to_string()).as_str(), "my_bot");
+        assert_eq!(AgentType::Pi.as_str(), "pi");
+        assert_eq!(AgentType::Omp.as_str(), "omp");
     }
 
     /// INV-1: from_str(as_str()) round-trips for all variants
@@ -493,6 +498,7 @@ mod tests {
             AgentType::ClaudeCode,
             AgentType::Hermes,
             AgentType::Pi,
+            AgentType::Omp,
             AgentType::Unknown("future_agent".to_string()),
         ];
         for v in &variants {
@@ -584,5 +590,15 @@ mod tests {
         assert_eq!(json, "\"pi\"");
         let back: AgentType = serde_json::from_str(&json).unwrap();
         assert_eq!(back, AgentType::Pi);
+    }
+
+    #[test]
+    fn test_omp_is_not_an_alias_of_pi() {
+        assert_eq!(AgentType::from_str("omp").unwrap(), AgentType::Omp);
+        assert_ne!(AgentType::from_str("omp").unwrap(), AgentType::Pi);
+        let json = serde_json::to_string(&AgentType::Omp).unwrap();
+        assert_eq!(json, "\"omp\"");
+        let back: AgentType = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, AgentType::Omp);
     }
 }

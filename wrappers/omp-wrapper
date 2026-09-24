@@ -1,0 +1,55 @@
+#!/bin/bash
+# Wrapper for omp (oh-my-pi) to track tasks in nibble.
+# Registers a task and exports AGENT_TASK_ID so the nibble-memory extension
+# reports status (working/idle) and session paths for host sessions.
+# Hooks handle: running (input), idle (turn_end), exited (process death).
+#
+# Usage: omp [args...] — all arguments are passed through unchanged.
+
+# nibble binary location
+AGENT_INBOX="${NIBBLE_BIN:-$HOME/.local/bin/nibble}"
+
+# Find the original omp binary
+OMP_BIN=$(which -a omp | grep -v "$(readlink -f "$0")" | head -n 1)
+
+if [ -z "$OMP_BIN" ]; then
+    echo "Error: Could not find original omp binary" >&2
+    exit 1
+fi
+
+# Generate unique task ID and export for the extension to use
+export AGENT_TASK_ID=$(uuidgen)
+
+# Get repo info if in a git repository
+REPO_NAME=""
+REPO_BRANCH=""
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    REPO_NAME=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null)
+    REPO_BRANCH=$(git branch --show-current 2>/dev/null)
+fi
+
+# Build task title with repo/directory info
+if [ -n "$REPO_NAME" ]; then
+    TASK_TITLE="[$REPO_NAME"
+    [ -n "$REPO_BRANCH" ] && TASK_TITLE="$TASK_TITLE:$REPO_BRANCH"
+    TASK_TITLE="$TASK_TITLE]"
+else
+    TASK_TITLE="[$(basename "$PWD")]"
+fi
+
+# Truncate to 100 chars
+TASK_TITLE="${TASK_TITLE:0:100}"
+
+# Pass zellij pane ID if running inside zellij
+EXTRA_FLAGS=""
+if [ -n "$ZELLIJ" ] && [ -n "$ZELLIJ_PANE_ID" ]; then
+    EXTRA_FLAGS="$EXTRA_FLAGS --zellij-pane-id $ZELLIJ_PANE_ID"
+fi
+
+# Register task as 'running'
+# shellcheck disable=SC2086
+nibble report start "$AGENT_TASK_ID" "omp" "$PWD" "$TASK_TITLE" \
+    --pid $$ --ppid $PPID $EXTRA_FLAGS 2>/dev/null || true
+
+# Run omp — the extension handles status updates
+exec "$OMP_BIN" "$@"
