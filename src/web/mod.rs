@@ -73,34 +73,34 @@ impl IndexCache {
         let mut live_paths = std::collections::HashSet::new();
         for root in roots {
             for path in sessions::find_session_files(root) {
-            live_paths.insert(path.clone());
-            let meta = std::fs::metadata(&path).ok();
-            let (mtime, len) = meta
-                .as_ref()
-                .map(|m| (m.modified().ok(), m.len()))
-                .unwrap_or((None, 0));
-            let cached = self.files.get(&path);
-            match cached {
-                Some(e) if e.mtime == mtime && e.len == len => {
-                    summaries.push(e.summary.clone());
-                }
-                _ => {
-                    if let Some(summary) = sessions::summarize_file(&path) {
-                        self.files.insert(
-                            path.clone(),
-                            FileCacheEntry {
-                                mtime,
-                                len,
-                                summary: summary.clone(),
-                            },
-                        );
-                        summaries.push(summary);
-                    } else {
-                        self.files.remove(&path);
+                live_paths.insert(path.clone());
+                let meta = std::fs::metadata(&path).ok();
+                let (mtime, len) = meta
+                    .as_ref()
+                    .map(|m| (m.modified().ok(), m.len()))
+                    .unwrap_or((None, 0));
+                let cached = self.files.get(&path);
+                match cached {
+                    Some(e) if e.mtime == mtime && e.len == len => {
+                        summaries.push(e.summary.clone());
+                    }
+                    _ => {
+                        if let Some(summary) = sessions::summarize_file(&path) {
+                            self.files.insert(
+                                path.clone(),
+                                FileCacheEntry {
+                                    mtime,
+                                    len,
+                                    summary: summary.clone(),
+                                },
+                            );
+                            summaries.push(summary);
+                        } else {
+                            self.files.remove(&path);
+                        }
                     }
                 }
             }
-        }
         }
         self.files.retain(|p, _| live_paths.contains(p));
         // INV-6: keep first occurrence on id collision.
@@ -248,10 +248,7 @@ fn authorized(req: &Request, token: &Option<String>) -> bool {
     }
     req.headers()
         .iter()
-        .any(|h| {
-            h.field.equiv("Authorization")
-                && h.value.as_str() == format!("Bearer {expected}")
-        })
+        .any(|h| h.field.equiv("Authorization") && h.value.as_str() == format!("Bearer {expected}"))
 }
 
 fn route(app: &App, req: &Request) -> Response<std::io::Cursor<Vec<u8>>> {
@@ -267,7 +264,11 @@ fn route(app: &App, req: &Request) -> Response<std::io::Cursor<Vec<u8>>> {
     if path == "/api/overview" {
         let sandboxes = app.live_sandboxes();
         return app.with_index(|idx| {
-            json_response(&stats::build_overview(&idx.summaries, sandboxes, ACTIVITY_DAYS))
+            json_response(&stats::build_overview(
+                &idx.summaries,
+                sandboxes,
+                ACTIVITY_DAYS,
+            ))
         });
     }
 
@@ -309,11 +310,8 @@ fn route(app: &App, req: &Request) -> Response<std::io::Cursor<Vec<u8>>> {
                 Ok(bytes) => {
                     let mut r = Response::from_data(bytes);
                     r.add_header(
-                        Header::from_bytes(
-                            &b"Content-Type"[..],
-                            &b"application/x-ndjson"[..],
-                        )
-                        .unwrap(),
+                        Header::from_bytes(&b"Content-Type"[..], &b"application/x-ndjson"[..])
+                            .unwrap(),
                     );
                     return r;
                 }
@@ -332,8 +330,7 @@ fn route(app: &App, req: &Request) -> Response<std::io::Cursor<Vec<u8>>> {
 /// Run the web server (blocks forever).
 pub fn serve(cfg: WebConfig) -> Result<()> {
     let addr = format!("{}:{}", cfg.host, cfg.port);
-    let server = Server::http(&addr)
-        .map_err(|e| anyhow::anyhow!("failed to bind {addr}: {e}"))?;
+    let server = Server::http(&addr).map_err(|e| anyhow::anyhow!("failed to bind {addr}: {e}"))?;
     eprintln!("nibble web listening on http://{addr}");
     run(server, cfg)
 }
@@ -386,13 +383,19 @@ mod tests {
     fn fixture_session(id: &str, cwd: &str, day: &str) -> String {
         format!(
             concat!(
-                r#"{{"type":"session","version":3,"id":"{id}","timestamp":"{day}T10:00:00.000Z","cwd":"{cwd}"}}"#, "\n",
-                r#"{{"type":"model_change","id":"a","parentId":null,"timestamp":"{day}T10:00:01.000Z","provider":"zai","modelId":"glm-5.1"}}"#, "\n",
-                r#"{{"type":"message","id":"m1","parentId":"a","timestamp":"{day}T10:01:00.000Z","message":{{"role":"user","content":[{{"type":"text","text":"fix the flaky test please"}}]}}}}"#, "\n",
-                r#"{{"type":"message","id":"m2","parentId":"m1","timestamp":"{day}T10:02:00.000Z","message":{{"role":"assistant","content":[{{"type":"thinking","thinking":"hmm"}},{{"type":"text","text":"looking into it"}},{{"type":"toolCall","id":"t1","name":"bash","arguments":{{"command":"cargo test"}}}}],"provider":"zai","model":"glm-5.1","usage":{{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"cost":{{"total":0.01}}}}}}}}"#, "\n",
-                r#"{{"type":"message","id":"m3","parentId":"m2","timestamp":"{day}T10:02:30.000Z","message":{{"role":"toolResult","toolCallId":"t1","toolName":"bash","content":[{{"type":"text","text":"test failed"}}],"isError":true}}}}"#, "\n",
+                r#"{{"type":"session","version":3,"id":"{id}","timestamp":"{day}T10:00:00.000Z","cwd":"{cwd}"}}"#,
+                "\n",
+                r#"{{"type":"model_change","id":"a","parentId":null,"timestamp":"{day}T10:00:01.000Z","provider":"zai","modelId":"glm-5.1"}}"#,
+                "\n",
+                r#"{{"type":"message","id":"m1","parentId":"a","timestamp":"{day}T10:01:00.000Z","message":{{"role":"user","content":[{{"type":"text","text":"fix the flaky test please"}}]}}}}"#,
+                "\n",
+                r#"{{"type":"message","id":"m2","parentId":"m1","timestamp":"{day}T10:02:00.000Z","message":{{"role":"assistant","content":[{{"type":"thinking","thinking":"hmm"}},{{"type":"text","text":"looking into it"}},{{"type":"toolCall","id":"t1","name":"bash","arguments":{{"command":"cargo test"}}}}],"provider":"zai","model":"glm-5.1","usage":{{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"cost":{{"total":0.01}}}}}}}}"#,
+                "\n",
+                r#"{{"type":"message","id":"m3","parentId":"m2","timestamp":"{day}T10:02:30.000Z","message":{{"role":"toolResult","toolCallId":"t1","toolName":"bash","content":[{{"type":"text","text":"test failed"}}],"isError":true}}}}"#,
+                "\n",
                 "this is not json\n",
-                r#"{{"type":"message","id":"m4","parentId":"m3","timestamp":"{day}T10:03:00.000Z","message":{{"role":"assistant","content":[{{"type":"text","text":"fixed it"}}],"provider":"zai","model":"glm-5.1","usage":{{"input":200,"output":80,"cacheRead":0,"cacheWrite":0,"cost":{{"total":0.02}}}}}}}}"#, "\n",
+                r#"{{"type":"message","id":"m4","parentId":"m3","timestamp":"{day}T10:03:00.000Z","message":{{"role":"assistant","content":[{{"type":"text","text":"fixed it"}}],"provider":"zai","model":"glm-5.1","usage":{{"input":200,"output":80,"cacheRead":0,"cacheWrite":0,"cost":{{"total":0.02}}}}}}}}"#,
+                "\n",
             ),
             id = id,
             cwd = cwd,
@@ -404,10 +407,24 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let proj = dir.path().join("--home-user-proj-a--");
         std::fs::create_dir_all(&proj).unwrap();
-        let mut f = std::fs::File::create(proj.join(format!("2026-08-01T10-00-00-000Z_{SID1}.jsonl"))).unwrap();
-        write!(f, "{}", fixture_session(SID1, "/home/user/proj-a", "2026-08-01")).unwrap();
-        let mut f = std::fs::File::create(proj.join(format!("2026-08-02T10-00-00-000Z_{SID2}.jsonl"))).unwrap();
-        write!(f, "{}", fixture_session(SID2, "/home/user/proj-a", "2026-08-02")).unwrap();
+        let mut f =
+            std::fs::File::create(proj.join(format!("2026-08-01T10-00-00-000Z_{SID1}.jsonl")))
+                .unwrap();
+        write!(
+            f,
+            "{}",
+            fixture_session(SID1, "/home/user/proj-a", "2026-08-01")
+        )
+        .unwrap();
+        let mut f =
+            std::fs::File::create(proj.join(format!("2026-08-02T10-00-00-000Z_{SID2}.jsonl")))
+                .unwrap();
+        write!(
+            f,
+            "{}",
+            fixture_session(SID2, "/home/user/proj-a", "2026-08-02")
+        )
+        .unwrap();
         // A corrupt file must be skipped, not fatal (INV-1).
         let mut f = std::fs::File::create(proj.join("garbage.jsonl")).unwrap();
         write!(f, "{{not json").unwrap();
@@ -431,7 +448,10 @@ mod tests {
         assert_eq!(s.models, vec!["glm-5.1"]);
         // INV-8: tool name counts sum to the tool call total.
         assert_eq!(s.tool_counts.get("bash"), Some(&1));
-        assert_eq!(s.tool_counts.values().sum::<u64>(), s.tool_call_count as u64);
+        assert_eq!(
+            s.tool_counts.values().sum::<u64>(),
+            s.tool_call_count as u64
+        );
         // 10:00:00 → 10:03:00.
         assert_eq!(s.duration_secs, 180);
         // INV-5: totals equal the sum of per-message usage.
@@ -461,7 +481,13 @@ mod tests {
             .collect();
         assert_eq!(
             kinds,
-            vec!["model_change", "user", "assistant", "tool_result", "assistant"]
+            vec![
+                "model_change",
+                "user",
+                "assistant",
+                "tool_result",
+                "assistant"
+            ]
         );
         match &d.events[2] {
             sessions::SessionEvent::Assistant {
@@ -501,7 +527,11 @@ mod tests {
         let s = &summaries[0];
         assert!(sessions::file_matches(&s.file_path, &s.title, "FLAKY")); // title
         assert!(sessions::file_matches(&s.file_path, &s.title, "Fixed It")); // body
-        assert!(!sessions::file_matches(&s.file_path, &s.title, "nonexistent-term"));
+        assert!(!sessions::file_matches(
+            &s.file_path,
+            &s.title,
+            "nonexistent-term"
+        ));
     }
 
     #[test]
@@ -639,7 +669,11 @@ mod tests {
 
         // AC-5: unknown ids and traversal attempts are 404, never touch fs.
         assert_eq!(
-            get(&format!("{}/api/session/99999999-9999-9999-9999-999999999999", srv.base)).status(),
+            get(&format!(
+                "{}/api/session/99999999-9999-9999-9999-999999999999",
+                srv.base
+            ))
+            .status(),
             404
         );
         assert_eq!(

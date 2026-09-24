@@ -108,12 +108,17 @@ fn parse_ts(ts: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 /// Current and longest streaks over a set of active YYYY-MM-DD days.
 /// The current streak is alive if today *or* yesterday had activity
 /// (GitHub semantics: today might just not have happened yet).
-pub fn streaks(active_days: &std::collections::HashSet<String>, today: chrono::NaiveDate) -> (u32, u32) {
-    let parse = |s: &str| chrono::NaiveDate::from_ymd_opt(
-        s.get(..4).and_then(|y| y.parse().ok()).unwrap_or(0),
-        s.get(5..7).and_then(|m| m.parse().ok()).unwrap_or(0),
-        s.get(8..10).and_then(|d| d.parse().ok()).unwrap_or(0),
-    );
+pub fn streaks(
+    active_days: &std::collections::HashSet<String>,
+    today: chrono::NaiveDate,
+) -> (u32, u32) {
+    let parse = |s: &str| {
+        chrono::NaiveDate::from_ymd_opt(
+            s.get(..4).and_then(|y| y.parse().ok()).unwrap_or(0),
+            s.get(5..7).and_then(|m| m.parse().ok()).unwrap_or(0),
+            s.get(8..10).and_then(|d| d.parse().ok()).unwrap_or(0),
+        )
+    };
     let mut days: Vec<chrono::NaiveDate> = active_days.iter().filter_map(|s| parse(s)).collect();
     days.sort();
     days.dedup();

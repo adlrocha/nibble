@@ -166,7 +166,11 @@ pub fn create_backup(output: Option<PathBuf>, include_sessions: bool) -> Result<
     let mut sources: Vec<(PathBuf, PathBuf, bool)> =
         vec![(source.clone(), PathBuf::from(".nibble"), true)];
     if include_sessions {
-        for rel in [".pi/agent/sessions", ".omp/agent/sessions", ".claude/projects"] {
+        for rel in [
+            ".pi/agent/sessions",
+            ".omp/agent/sessions",
+            ".claude/projects",
+        ] {
             let dir = home.join(rel);
             if dir.exists() {
                 sources.push((dir, PathBuf::from(rel), false));

@@ -610,7 +610,8 @@ chat_id = "456789"
         // Defaults are sourced from pi-extensions/external-packages.txt.
         let ext = Config::default().pi.extensions;
         assert!(
-            ext.iter().any(|e| e == "npm:@quintinshaw/pi-dynamic-workflows"),
+            ext.iter()
+                .any(|e| e == "npm:@quintinshaw/pi-dynamic-workflows"),
             "manifest default should include pi-dynamic-workflows, got {ext:?}"
         );
         // Comments and blank lines must not leak into the parsed list.
