@@ -2,7 +2,7 @@
 # Wrapper for omp (oh-my-pi) to track tasks in nibble.
 # Registers a task and exports AGENT_TASK_ID so the nibble-memory extension
 # reports status (working/idle) and session paths for host sessions.
-# Hooks handle: running (input), idle (turn_end), exited (process death).
+# Hooks handle: running (input), idle (agent_end), exited (process death).
 #
 # Usage: omp [args...] — all arguments are passed through unchanged.
 
