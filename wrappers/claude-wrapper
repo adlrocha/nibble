@@ -80,6 +80,9 @@ EXTRA_FLAGS=""
 # Pass zellij pane ID if running inside zellij
 if [ -n "$ZELLIJ" ] && [ -n "$ZELLIJ_PANE_ID" ]; then
     EXTRA_FLAGS="$EXTRA_FLAGS --zellij-pane-id $ZELLIJ_PANE_ID"
+    # Session name lets the quota-watch daemon target this pane from outside
+    # the session (`zellij --session <name> action write-chars --pane-id`).
+    [ -n "$ZELLIJ_SESSION_NAME" ] && EXTRA_FLAGS="$EXTRA_FLAGS --zellij-session $ZELLIJ_SESSION_NAME"
 fi
 
 # ── Session continuation ───────────────────────────────────────────────────────

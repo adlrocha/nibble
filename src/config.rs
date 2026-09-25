@@ -30,6 +30,81 @@ pub struct Config {
 
     #[serde(default)]
     pub lm: LmConfig,
+
+    #[serde(default)]
+    pub quota_watch: QuotaWatchConfig,
+}
+
+
+/// Quota auto-continue configuration.
+///
+/// When a Claude Code / pi / omp session dies on a subscription quota error
+/// ("usage limit reached", "You've hit your limit", out-of-credits, …), the
+/// `nibble quota-watch` daemon waits for the quota window to reset and then
+/// continues the task automatically.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuotaWatchConfig {
+    /// Master switch for the quota-watch daemon.
+    #[serde(default = "default_quota_watch_enabled")]
+    pub enabled: bool,
+
+    /// How often to re-scan session transcripts for new errors (seconds).
+    #[serde(default = "default_quota_watch_poll_secs")]
+    pub poll_secs: u64,
+
+    /// Message sent to the agent when continuing after a quota reset.
+    #[serde(default = "default_quota_watch_continue_message")]
+    pub continue_message: String,
+
+    /// Give up auto-continuing a task after this many attempts.
+    #[serde(default = "default_quota_watch_max_attempts")]
+    pub max_attempts: u32,
+
+    /// Re-try interval when the error carries no parseable reset time (seconds).
+    #[serde(default = "default_quota_watch_unknown_retry_secs")]
+    pub unknown_retry_secs: u64,
+
+    /// Extra delay after the stated reset time before continuing (seconds),
+    /// so providers have a moment to actually lift the limit.
+    #[serde(default = "default_quota_watch_reset_buffer_secs")]
+    pub reset_buffer_secs: u64,
+}
+
+fn default_quota_watch_enabled() -> bool {
+    true
+}
+
+fn default_quota_watch_poll_secs() -> u64 {
+    60
+}
+
+fn default_quota_watch_continue_message() -> String {
+    "continue".to_string()
+}
+
+fn default_quota_watch_max_attempts() -> u32 {
+    8
+}
+
+fn default_quota_watch_unknown_retry_secs() -> u64 {
+    1800
+}
+
+fn default_quota_watch_reset_buffer_secs() -> u64 {
+    120
+}
+
+impl Default for QuotaWatchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_quota_watch_enabled(),
+            poll_secs: default_quota_watch_poll_secs(),
+            continue_message: default_quota_watch_continue_message(),
+            max_attempts: default_quota_watch_max_attempts(),
+            unknown_retry_secs: default_quota_watch_unknown_retry_secs(),
+            reset_buffer_secs: default_quota_watch_reset_buffer_secs(),
+        }
+    }
 }
 
 /// AI Factory pipeline configuration.

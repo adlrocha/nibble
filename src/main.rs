@@ -9,6 +9,7 @@ mod memory;
 mod models;
 mod notifications;
 mod privacy_filter;
+mod quota_watch;
 mod sandbox;
 mod session;
 mod status;
@@ -88,6 +89,7 @@ fn main() -> Result<()> {
                 pid,
                 ppid,
                 zellij_pane_id,
+                zellij_session,
                 session_id,
             } => {
                 let mut task = Task::new(
@@ -102,6 +104,12 @@ fn main() -> Result<()> {
                     extra.insert(
                         "zellij_pane_id".to_string(),
                         serde_json::Value::Number(pane_id.into()),
+                    );
+                }
+                if let Some(session) = zellij_session {
+                    extra.insert(
+                        "zellij_session_name".to_string(),
+                        serde_json::Value::String(session),
                     );
                 }
                 task.context = Some(TaskContext {
@@ -1036,6 +1044,16 @@ fn main() -> Result<()> {
             let _ = prune_stale_tasks(&db);
 
             notifications::telegram_listener::run(&db, &cfg.telegram)?;
+        }
+
+        Commands::QuotaWatch { once } => {
+            let cfg = config::load().unwrap_or_default();
+            let db_path = db::default_db_path();
+            if once {
+                quota_watch::run_once(cfg.quota_watch, db_path)?;
+            } else {
+                quota_watch::run(cfg.quota_watch, db_path)?;
+            }
         }
 
         Commands::Lm { action } => {

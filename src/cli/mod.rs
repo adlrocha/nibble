@@ -67,6 +67,14 @@ pub enum Commands {
     /// Run the Telegram long-polling daemon (routes phone replies back to agents)
     Listen,
 
+    /// Run the quota auto-continue daemon (watch for subscription quota
+    /// errors in agent sessions and continue the tasks once the quota resets)
+    QuotaWatch {
+        /// Run one scan-and-attempt pass and exit (testing / manual trigger)
+        #[arg(long)]
+        once: bool,
+    },
+
     /// Send a Telegram notification (used by hooks and wrappers)
     Notify {
         /// Message body to send (agent last output or permission request)
@@ -221,6 +229,9 @@ pub enum ReportAction {
         /// Zellij pane ID
         #[arg(long)]
         zellij_pane_id: Option<u32>,
+        /// Zellij session name (needed to target panes from outside the session)
+        #[arg(long)]
+        zellij_session: Option<String>,
         /// Session ID (if already known at startup)
         #[arg(long)]
         session_id: Option<String>,
