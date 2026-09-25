@@ -268,6 +268,20 @@ if systemctl --user is-active --quiet nibble-web.service 2>/dev/null; then
     ok "Stopped nibble-web.service for upgrade"
 fi
 
+# Also stop the quota-watch daemon before overwriting the binary.
+QUOTA_WATCH_WAS_ACTIVE=false
+if systemctl --user is-active --quiet nibble-quota-watch.service 2>/dev/null; then
+    QUOTA_WATCH_WAS_ACTIVE=true
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 5 systemctl --user stop nibble-quota-watch.service 2>/dev/null || true
+    else
+        systemctl --user stop --no-block nibble-quota-watch.service 2>/dev/null || true
+        sleep 2
+        systemctl --user kill --signal=SIGKILL nibble-quota-watch.service 2>/dev/null || true
+    fi
+    ok "Stopped nibble-quota-watch.service for upgrade"
+fi
+
 cp "$REPO_DIR/target/release/nibble" "$BIN_DIR/nibble.new"
 chmod +x "$BIN_DIR/nibble.new"
 mv -f "$BIN_DIR/nibble.new" "$BIN_DIR/nibble"
@@ -278,6 +292,11 @@ ok "nibble"
 if [ "$LISTENER_WAS_ACTIVE" = true ]; then
     systemctl --user start nibble-listener.service 2>/dev/null || warn "Could not restart nibble-listener.service"
     ok "Restarted nibble-listener.service"
+fi
+
+if [ "$QUOTA_WATCH_WAS_ACTIVE" = true ]; then
+    systemctl --user start nibble-quota-watch.service 2>/dev/null || warn "Could not restart nibble-quota-watch.service"
+    ok "Restarted nibble-quota-watch.service"
 fi
 
 # Warn if BIN_DIR is not on PATH
@@ -592,6 +611,40 @@ if systemctl --user daemon-reload 2>/dev/null; then
         || warn "Could not enable nibble-usage.timer. Enable manually: systemctl --user enable --now nibble-usage.timer"
 else
     warn "systemd user session not available. Run scans manually: nibble usage scan"
+fi
+
+# ── 5e. Quota auto-continue daemon ────────────────────────────────────────────
+# Watches agent session transcripts for subscription quota errors and
+# continues the tasks once the quota window resets (host + sandbox sessions;
+# zellij keystroke for live panes, headless resume turn otherwise).
+step "Installing quota auto-continue daemon"
+
+mkdir -p "$HOME/.nibble/logs"
+cat > "$SYSTEMD_DIR/nibble-quota-watch.service" << UNIT
+[Unit]
+Description=Nibble — auto-continue agents after subscription quota reset
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=$BIN_DIR/nibble quota-watch
+Restart=on-failure
+RestartSec=30
+Environment=HOME=%h
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+StandardOutput=append:%h/.nibble/logs/quota-watch.log
+StandardError=append:%h/.nibble/logs/quota-watch.log
+
+[Install]
+WantedBy=default.target
+UNIT
+
+if systemctl --user daemon-reload 2>/dev/null; then
+    systemctl --user enable --now nibble-quota-watch.service 2>/dev/null \
+        && ok "Quota auto-continue daemon enabled (nibble-quota-watch.service)" \
+        || warn "Could not enable nibble-quota-watch.service. Enable manually: systemctl --user enable --now nibble-quota-watch.service"
+else
+    warn "systemd user session not available. Run manually: nibble quota-watch"
 fi
 
 # Seed the pricing override file if it doesn't exist.
