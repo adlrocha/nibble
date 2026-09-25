@@ -211,8 +211,11 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
-	// ── turn_end: agent finished responding, mark it idle ────────────────
-	pi.on("turn_end", async (_event, _ctx) => {
+	// ── agent_end: run finished, mark the agent idle ────────────────────
+	// turn_end fires at every model-turn boundary — tool follow-ups
+	// continue in a new turn — so reporting idle there shows working
+	// agents as idle between turns. agent_end is the true run boundary.
+	pi.on("agent_end", async (_event, _ctx) => {
 		const taskId = getTaskId();
 		if (!taskId) return;
 		pendingApprovals.clear();
