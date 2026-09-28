@@ -646,7 +646,6 @@ fn handle_spawn_command(
             false, // fresh
             None,  // session_id
             true,  // no_attach
-            false, // factory
             false, // hermes
             false, // pi
             false, // omp
@@ -1082,7 +1081,6 @@ fn find_or_spawn_for_cron(
         &format!("⚙️ Spawning sandbox for '{repo_label}' (cron trigger)…"),
     );
 
-    let cfg = crate::config::load().unwrap_or_default();
     let new_task_id = crate::cmd_sandbox_spawn(
         db,
         repo_path.to_string(),
@@ -1091,7 +1089,6 @@ fn find_or_spawn_for_cron(
         false,
         None,
         true,
-        cfg.factory.enabled,
         false,
         false,
         false,

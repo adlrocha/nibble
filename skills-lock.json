@@ -9,22 +9,6 @@
       "license": "proprietary",
       "computedHash": "1e6fcaec01028e5b0cb720bd444fa20b200a1136bf1b45995792f71500043795"
     },
-    "fable5-emulation": {
-      "source": "vendored:local",
-      "sourceType": "local",
-      "skillPath": "skills/fable5-emulation/SKILL.md",
-      "version": "unpinned",
-      "license": "proprietary",
-      "computedHash": "d44afe5e1970e09ebe074cf34ef7dd3921162e9049abfb90aefa7f29efee0d56"
-    },
-    "factory-pipeline": {
-      "source": "vendored:local",
-      "sourceType": "local",
-      "skillPath": "skills/factory-pipeline/SKILL.md",
-      "version": "unpinned",
-      "license": "proprietary",
-      "computedHash": "22169706e03b9480c0affd7b503d13a3687f20b8655fd35f8457fda3225ba9a0"
-    },
     "git-commit-pr": {
       "source": "we-are-singular/skills",
       "sourceType": "github",

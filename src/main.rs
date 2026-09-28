@@ -734,7 +734,6 @@ fn main() -> Result<()> {
                 fresh,
                 session_id,
                 branch,
-                factory,
                 hermes,
                 pi,
                 omp,
@@ -745,8 +744,6 @@ fn main() -> Result<()> {
                 } else {
                     repo_path
                 };
-                let cfg = config::load().unwrap_or_default();
-                let factory_enabled = factory.unwrap_or(cfg.factory.enabled);
                 cmd_sandbox_spawn(
                     &db,
                     effective_repo_path,
@@ -755,7 +752,6 @@ fn main() -> Result<()> {
                     fresh,
                     session_id,
                     false,
-                    factory_enabled,
                     hermes,
                     pi,
                     omp,
@@ -849,7 +845,6 @@ fn main() -> Result<()> {
                             "No running sandbox for '{}', spawning one...",
                             effective_path
                         );
-                        let cfg = config::load().unwrap_or_default();
                         cmd_sandbox_spawn(
                             &db,
                             effective_path,
@@ -858,7 +853,6 @@ fn main() -> Result<()> {
                             fresh,
                             None,
                             true,
-                            cfg.factory.enabled,
                             hermes,
                             pi,
                             omp,
@@ -1403,7 +1397,7 @@ fn mount_agent_config_dir(
 
 /// Ensure `~/<dir>/agent/skills` is a symlink pointing to `~/.claude/skills/`.
 ///
-/// Called at spawn time so the AI Factory pipeline skills are available to
+/// Called at spawn time so shared skills are available to
 /// pi-family agents without duplicating files. Non-fatal on failure — logs a
 /// warning and continues.
 fn ensure_agent_skills_symlink(home_dir: &std::path::Path, dir_name: &str) {
@@ -2157,7 +2151,6 @@ pub(crate) fn cmd_sandbox_spawn(
     fresh: bool,
     session_id: Option<String>,
     no_attach: bool,
-    factory_enabled: bool,
     hermes: bool,
     pi: bool,
     omp: bool,
@@ -2598,7 +2591,7 @@ pub(crate) fn cmd_sandbox_spawn(
 
         // Detect project toolchains and write AGENTS.md + CLAUDE.md into the container.
         let toolchains = detect_toolchains(&repo);
-        let agents_md = build_sandbox_agents_md(&repo_name, &toolchains, factory_enabled);
+        let agents_md = build_sandbox_agents_md(&repo_name, &toolchains);
         let container_cwd = container_working_dir(&repo);
         match inject_sandbox_claude_md(&info.id, &container_cwd, &agents_md) {
             Ok(()) => {
@@ -4714,21 +4707,16 @@ fn detect_toolchains(
 /// container.  This is the **primary** agent instruction file — Claude reads
 /// it natively and Claude Code reads it via the `@../AGENTS.md` import in CLAUDE.md.
 ///
-/// The content covers sandbox environment, toolchain setup, and (when factory is
-/// enabled) the full AI Factory pipeline instructions.
+/// The content covers sandbox environment, toolchain setup, and skills/lessons guidance.
 /// Static sandbox instruction fragments embedded at compile time.
 /// Edit the .md files under `src/sandbox_instructions/` — never edit here.
 mod sandbox_instructions {
     pub const BASE: &str = include_str!("sandbox_instructions/base.md");
     pub const GENERAL_PRINCIPLES: &str = include_str!("sandbox_instructions/general_principles.md");
-    pub const FACTORY: &str = include_str!("sandbox_instructions/factory.md");
+    pub const SKILLS: &str = include_str!("sandbox_instructions/skills.md");
 }
 
-fn build_sandbox_agents_md(
-    repo_name: &str,
-    toolchains: &[(&str, &str, &str)],
-    factory_enabled: bool,
-) -> String {
+fn build_sandbox_agents_md(repo_name: &str, toolchains: &[(&str, &str, &str)]) -> String {
     let mut out = String::new();
 
     // Header (repo name is dynamic, so it stays inline)
@@ -4771,11 +4759,9 @@ fn build_sandbox_agents_md(
     out.push('\n');
     out.push_str(sandbox_instructions::GENERAL_PRINCIPLES);
 
-    // Static: factory pipeline instructions (only when factory is enabled)
-    if factory_enabled {
-        out.push('\n');
-        out.push_str(sandbox_instructions::FACTORY);
-    }
+    // Static: skills/lessons guidance
+    out.push('\n');
+    out.push_str(sandbox_instructions::SKILLS);
 
     out
 }
@@ -5139,35 +5125,21 @@ mod notification_tests {
     // ── build_sandbox_agents_md tests ─────────────────────────────────────────
 
     #[test]
-    fn test_agents_md_factory_enabled_contains_pipeline() {
-        let out = build_sandbox_agents_md("myrepo", &[], true);
+    fn test_agents_md_has_skills_section_but_no_factory() {
+        let out = build_sandbox_agents_md("myrepo", &[]);
         assert!(
-            out.contains("AI Factory Pipeline"),
-            "factory section missing when factory_enabled=true"
+            out.contains("Skills & Lessons"),
+            "skills/lessons section should always be present"
         );
-        assert!(
-            out.contains("factory-pipeline"),
-            "the factory skill should be listed"
-        );
-        assert!(out.contains("QA Gate"), "QA Gate mention should be present");
-    }
-
-    #[test]
-    fn test_agents_md_factory_disabled_no_pipeline() {
-        let out = build_sandbox_agents_md("myrepo", &[], false);
         assert!(
             !out.contains("AI Factory Pipeline"),
-            "factory section must be absent when factory_enabled=false"
-        );
-        assert!(
-            !out.contains("factory-pipeline"),
-            "factory skills must not appear when disabled"
+            "factory pipeline must not appear"
         );
     }
 
     #[test]
     fn test_agents_md_contains_repo_name() {
-        let out = build_sandbox_agents_md("my-cool-project", &[], false);
+        let out = build_sandbox_agents_md("my-cool-project", &[]);
         assert!(
             out.contains("my-cool-project"),
             "repo name should appear in AGENTS.md header"
@@ -5177,7 +5149,7 @@ mod notification_tests {
     #[test]
     fn test_agents_md_toolchain_table_present() {
         let toolchains = [("Rust", "cargo build", "cargo test")];
-        let out = build_sandbox_agents_md("proj", &toolchains, false);
+        let out = build_sandbox_agents_md("proj", &toolchains);
         assert!(
             out.contains("cargo build"),
             "install command should be in toolchain table"
@@ -5190,7 +5162,7 @@ mod notification_tests {
 
     #[test]
     fn test_agents_md_no_toolchain_fallback_message() {
-        let out = build_sandbox_agents_md("proj", &[], false);
+        let out = build_sandbox_agents_md("proj", &[]);
         assert!(
             out.contains("No recognised dependency manifest"),
             "should show fallback message when no toolchain detected"
@@ -5206,7 +5178,7 @@ mod notification_tests {
     fn test_agents_md_contains_toolchain_info() {
         // Toolchain info must be in AGENTS.md (not duplicated in a CLAUDE.md block)
         let toolchains = [("Node.js", "npm install", "npm test")];
-        let out = build_sandbox_agents_md("proj", &toolchains, false);
+        let out = build_sandbox_agents_md("proj", &toolchains);
         assert!(
             out.contains("npm install"),
             "toolchain install command must be in AGENTS.md"
@@ -5221,7 +5193,7 @@ mod notification_tests {
     fn test_agents_md_is_single_source_of_truth() {
         // AGENTS.md must contain the repo name and environment info —
         // everything Claude Code needs is here, imported via @../AGENTS.md in CLAUDE.md
-        let out = build_sandbox_agents_md("my-cool-project", &[], false);
+        let out = build_sandbox_agents_md("my-cool-project", &[]);
         assert!(
             out.contains("my-cool-project"),
             "repo name must appear in AGENTS.md"

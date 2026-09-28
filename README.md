@@ -28,15 +28,14 @@ This section lists every feature area in the project. Use it to audit what's wor
 | 14 | **Telegram bot commands** | notifications | `/help`, `/sandboxes`, `/spawn`, `/cron list` — control nibble from phone |
 | 15 | **Cron jobs** | scheduling | Schedule prompts to run inside sandboxes on a cron expression; markdown file format; skip-if-running; expiry |
 | 16 | **Status line** | dx | Claude Code terminal status bar showing dir, branch, model, context %, 5h and 7d rate limit bars |
-| 17 | **AI Factory pipeline** | meta | 3-tier pipeline (Quick/Standard/Full) with 5 skills; `--factory` flag on spawn injects pipeline instructions into AGENTS.md; blueprints/reports stored under `.nibble/factory/` |
-| 18 | **Health checks** | ops | `SandboxHealth` enum (Healthy/Degraded/Dead); periodic prune in listen daemon; Telegram alert on unexpected container death |
-| 19 | **Auto-resume on reboot** | ops | systemd user service (`nibble-resume.service`) restarts containers after host reboot |
-| 20 | **Inject** | ops | `nibble inject <id> <msg>` — send a message directly to any sandbox agent, bypassing Telegram |
-| 21 | **Web session inspector** | dx | `nibble web` — dark-mode browser UI (port 7878) for browsing/searching pi sessions, usage dashboard, conversation viewer; runs as `nibble-web.service`, Tailscale-reachable with token auth. See [docs/web.md](docs/web.md) |
-| 22 | **omp (oh-my-pi) support** | core | `--pi` runs upstream pi, `--omp` runs omp. Tasks are stored as `omp` or `pi`, not collapsed. Sandboxes mount both `~/.pi` and `~/.omp`; sessions are format-compatible and cross-resumable. `scripts/migrate-pi-to-omp.sh` migrates host config |
-| 24 | **Live agent status** | core | `nibble status` shows only processes that are still alive. A killed process or a closed attach pane drops off on the next read. A running sandbox with nobody attached is not listed. Each row is marked `!` needs input (red — permission prompt or question, reason shown below, sorted first), `●` working (orange), or `●` ready for input (green — finished its turn, waiting for your next message); a legend sits above the footer. `nibble sidebar` opens that view as a left-edge zellij pane showing each agent's pane-reported topic; `q` or `nibble sidebar --close` removes it; `Alt a` (zellij keybind) jumps to it and opens it if needed. It does not replace zellij's bars |
+| 17 | **Health checks** | ops | `SandboxHealth` enum (Healthy/Degraded/Dead); periodic prune in listen daemon; Telegram alert on unexpected container death |
+| 18 | **Auto-resume on reboot** | ops | systemd user service (`nibble-resume.service`) restarts containers after host reboot |
+| 19 | **Inject** | ops | `nibble inject <id> <msg>` — send a message directly to any sandbox agent, bypassing Telegram |
+| 20 | **Web session inspector** | dx | `nibble web` — dark-mode browser UI (port 7878) for browsing/searching pi sessions, usage dashboard, conversation viewer; runs as `nibble-web.service`, Tailscale-reachable with token auth. See [docs/web.md](docs/web.md) |
+| 21 | **omp (oh-my-pi) support** | core | `--pi` runs upstream pi, `--omp` runs omp. Tasks are stored as `omp` or `pi`, not collapsed. Sandboxes mount both `~/.pi` and `~/.omp`; sessions are format-compatible and cross-resumable. `scripts/migrate-pi-to-omp.sh` migrates host config |
+| 22 | **Live agent status** | core | `nibble status` shows only processes that are still alive. A killed process or a closed attach pane drops off on the next read. A running sandbox with nobody attached is not listed. Each row is marked `!` needs input (red — permission prompt or question, reason shown below, sorted first), `●` working (orange), or `●` ready for input (green — finished its turn, waiting for your next message); a legend sits above the footer. `nibble sidebar` opens that view as a left-edge zellij pane showing each agent's pane-reported topic; `q` or `nibble sidebar --close` removes it; `Alt a` (zellij keybind) jumps to it and opens it if needed. It does not replace zellij's bars |
 | 23 | **Session recovery** | core | Eager task→session mapping via extension-reported `session-path`; interactive picker when attach finds multiple sessions for a repo; `session list` shows task links; runbook in [docs/session-recovery.md](docs/session-recovery.md) |
-| 25 | **Quota auto-continue** | ops | `nibble quota-watch` daemon detects subscription quota errors in claude/pi/omp transcripts, parks the task with a reset-time reason, and continues it automatically once the quota renews (zellij keystroke for live host panes, headless resume turn otherwise, sandbox containers restarted if down); `nibble-quota-watch.service`. See [docs/quota-watch.md](docs/quota-watch.md) |
+| 24 | **Quota auto-continue** | ops | `nibble quota-watch` daemon detects subscription quota errors in claude/pi/omp transcripts, parks the task with a reset-time reason, and continues it automatically once the quota renews (zellij keystroke for live host panes, headless resume turn otherwise, sandbox containers restarted if down); `nibble-quota-watch.service`. See [docs/quota-watch.md](docs/quota-watch.md) |
 
 ---
 
@@ -240,7 +239,7 @@ When a sandbox spawns, nibble writes agent instructions into two files inside th
 
 | File | Purpose |
 |------|---------|
-| `AGENTS.md` | Sandbox environment info, toolchain detection, and (if enabled) the AI Factory pipeline instructions |
+| `AGENTS.md` | Sandbox environment info, toolchain detection, and skills/lessons guidance |
 | `.claude/CLAUDE.md` | Claude Code entry point — first line is `@../AGENTS.md` which imports the file above |
 
 **How it works:**

@@ -11,9 +11,6 @@ pub struct Config {
     pub telegram: TelegramConfig,
 
     #[serde(default)]
-    pub factory: FactoryConfig,
-
-    #[serde(default)]
     pub hermes: HermesConfig,
 
     #[serde(default)]
@@ -34,7 +31,6 @@ pub struct Config {
     #[serde(default)]
     pub quota_watch: QuotaWatchConfig,
 }
-
 
 /// Quota auto-continue configuration.
 ///
@@ -103,31 +99,6 @@ impl Default for QuotaWatchConfig {
             max_attempts: default_quota_watch_max_attempts(),
             unknown_retry_secs: default_quota_watch_unknown_retry_secs(),
             reset_buffer_secs: default_quota_watch_reset_buffer_secs(),
-        }
-    }
-}
-
-/// AI Factory pipeline configuration.
-///
-/// When enabled, every sandboxed agent follows the structured development pipeline:
-/// Spec → Implement → TDD → Adversarial → Risk Score → QA Gate.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FactoryConfig {
-    /// Whether the AI Factory pipeline is enabled for new sandboxes.
-    #[serde(default = "default_factory_enabled")]
-    pub enabled: bool,
-}
-
-fn default_factory_enabled() -> bool {
-    // Opt-in: the full pipeline is noisy (token cost) for the common case.
-    // Enable per-spawn with `nibble sandbox spawn --factory` or [factory].enabled.
-    false
-}
-
-impl Default for FactoryConfig {
-    fn default() -> Self {
-        Self {
-            enabled: default_factory_enabled(),
         }
     }
 }
@@ -674,13 +645,6 @@ chat_id = "456789"
     }
 
     #[test]
-    fn test_factory_default_disabled() {
-        // Factory is opt-in by default to keep sandboxes low-noise.
-        let config = Config::default();
-        assert!(!config.factory.enabled);
-    }
-
-    #[test]
     fn test_pi_extensions_default_from_manifest() {
         // Defaults are sourced from pi-extensions/external-packages.txt.
         let ext = Config::default().pi.extensions;
@@ -694,36 +658,6 @@ chat_id = "456789"
             assert!(!e.is_empty(), "no empty entries: {ext:?}");
             assert!(!e.starts_with('#'), "no comment entries: {ext:?}");
         }
-    }
-
-    #[test]
-    fn test_parse_toml_with_factory_enabled() {
-        let toml_str = r#"
-[factory]
-enabled = true
-"#;
-        let config: Config = toml::from_str(toml_str).unwrap();
-        assert!(config.factory.enabled);
-    }
-
-    #[test]
-    fn test_parse_toml_with_factory_disabled() {
-        let toml_str = r#"
-[factory]
-enabled = false
-"#;
-        let config: Config = toml::from_str(toml_str).unwrap();
-        assert!(!config.factory.enabled);
-    }
-
-    #[test]
-    fn test_parse_toml_factory_absent_defaults_disabled() {
-        let toml_str = r#"
-[telegram]
-enabled = false
-"#;
-        let config: Config = toml::from_str(toml_str).unwrap();
-        assert!(!config.factory.enabled);
     }
 
     // ── Hermes config tests (from hermes-agent-sandbox blueprint) ──────────────

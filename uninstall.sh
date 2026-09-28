@@ -116,16 +116,6 @@ if [ -d "$WRAPPERS_DIR" ]; then
     ok "Removed $WRAPPERS_DIR/"
 fi
 
-# ── 7. Remove AI Factory skills ──────────────────────────────────────────────
-step "Removing AI Factory skills"
-
-CLAUDE_SKILLS_DIR="$HOME/.claude/skills"
-for skill_dir in "$CLAUDE_SKILLS_DIR"/factory-*/; do
-    [ -d "$skill_dir" ] || continue
-    rm -rf "$skill_dir"
-    ok "Removed $(basename "$skill_dir")"
-done
-
 # ── 8. Remove Claude Code hooks ──────────────────────────────────────────────
 step "Removing Claude Code hooks"
 
