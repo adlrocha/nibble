@@ -298,10 +298,6 @@ pub enum SandboxAction {
         /// The branch is auto-created from the repo's current HEAD if it doesn't exist.
         #[arg(long)]
         branch: Option<String>,
-        /// Enable the AI Factory development pipeline (spec → implement → TDD → adversarial → risk → QA).
-        /// Default is controlled by factory.enabled in ~/.nibble/config.toml.
-        #[arg(long)]
-        factory: Option<bool>,
         /// Use Hermes Agent instead of Claude Code.
         /// Spawns a dedicated Hermes container with gateway support.
         #[arg(long)]

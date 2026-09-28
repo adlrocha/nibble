@@ -312,7 +312,7 @@ cp "$REPO_DIR/wrappers/claude-wrapper" "$WRAPPERS_DIR/claude-wrapper"
 chmod +x "$WRAPPERS_DIR/claude-wrapper"
 ok "claude-wrapper"
 
-# ── 4a. Install AI Factory skills ─────────────────────────────────────────────
+# ── 4a. Install skills ────────────────────────────────────────────────────────
 # Skills are installed to ~/.claude/skills/ (Claude Code),
 # ~/.nibble/skills/ (internal), and ~/.pi/agent/skills/ (Pi harness).
 # Existing files are overwritten so updates always propagate.
@@ -344,13 +344,6 @@ for skill_dir in "$REPO_DIR/skills"/*/; do
     fi
 done
 
-# Remove factory stage skills that were consolidated into factory-pipeline/.
-# Targeted (not a blanket purge) so third-party skills in ~/.claude/skills are kept.
-for stale in factory-spec factory-verify factory-qa-gate factory-lessons; do
-    for dest in "$CLAUDE_SKILLS_DIR" "$NIBBLE_SKILLS_DIR" "$PI_SKILLS_DIR"; do
-        [ -d "$dest/$stale" ] && rm -rf "$dest/$stale" && ok "removed stale skill: $stale"
-    done
-done
 if [ ! -d "$HOME/.pi" ]; then
     warn "~/.pi/ not found — skills staged in ~/.nibble/skills/ only"
 fi

@@ -175,7 +175,10 @@ fn parse_time_of_day_utc(tod: &str, msg_ts: DateTime<Utc>) -> Option<DateTime<Ut
         return None;
     };
     let (h, m) = if let Some((hs, ms)) = clock.split_once(':') {
-        (hs.trim().parse::<u32>().ok()?, ms.trim().parse::<u32>().ok()?)
+        (
+            hs.trim().parse::<u32>().ok()?,
+            ms.trim().parse::<u32>().ok()?,
+        )
     } else {
         (clock.trim().parse::<u32>().ok()?, 0)
     };
@@ -444,10 +447,7 @@ impl Watcher {
         for task in tasks {
             let file = session_file_for(&task).expect("filtered above");
             if let Err(e) = self.scan_task_file(&db, &task, &file, now) {
-                eprintln!(
-                    "[quota-watch] {} scan: {e:#}",
-                    short(&task.task_id)
-                );
+                eprintln!("[quota-watch] {} scan: {e:#}", short(&task.task_id));
             }
         }
         Ok(())
@@ -509,11 +509,20 @@ impl Watcher {
                     error: err.text.clone(),
                 },
             };
-            self.put_pending(db, tid, &pending, "blocked", &blocked_reason(pending.reset_at))?;
+            self.put_pending(
+                db,
+                tid,
+                &pending,
+                "blocked",
+                &blocked_reason(pending.reset_at),
+            )?;
             eprintln!(
                 "[quota-watch] {} blocked by quota, reset at {}",
                 short(tid),
-                pending.reset_at.with_timezone(&chrono::Local).format("%a %H:%M")
+                pending
+                    .reset_at
+                    .with_timezone(&chrono::Local)
+                    .format("%a %H:%M")
             );
         }
 
@@ -544,8 +553,10 @@ impl Watcher {
         let db = Database::open(&self.db_path)?;
         for (tid, pending) in due {
             if pending.attempts >= self.cfg.max_attempts {
-                let reason =
-                    format!("quota: gave up after {} auto-continue attempts", pending.attempts);
+                let reason = format!(
+                    "quota: gave up after {} auto-continue attempts",
+                    pending.attempts
+                );
                 self.remove_pending(&db, &tid);
                 let _ = crate::status::apply_report(&db, &tid, "blocked", Some(&reason));
                 eprintln!("[quota-watch] {} {reason}", short(&tid));
@@ -582,11 +593,10 @@ impl Watcher {
                 let tx = self.done_tx.clone();
                 let task = task.clone();
                 std::thread::spawn(move || {
-                    let outcome =
-                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            continue_task(&task, &cfg)
-                        }))
-                        .unwrap_or_else(|_| Err(anyhow::anyhow!("continue thread panicked")));
+                    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        continue_task(&task, &cfg)
+                    }))
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("continue thread panicked")));
                     let _ = tx.send(AttemptDone {
                         task_id: task.task_id.clone(),
                         pending: bumped,
@@ -613,7 +623,10 @@ impl Watcher {
         let db = match Database::open(&self.db_path) {
             Ok(d) => d,
             Err(e) => {
-                eprintln!("[quota-watch] {} post-attempt db open failed: {e:#}", short(&task_id));
+                eprintln!(
+                    "[quota-watch] {} post-attempt db open failed: {e:#}",
+                    short(&task_id)
+                );
                 return;
             }
         };
@@ -701,9 +714,7 @@ impl Watcher {
 fn blocked_reason(reset_at: DateTime<Utc>) -> String {
     format!(
         "quota limit reached — auto-continue scheduled for {}",
-        reset_at
-            .with_timezone(&chrono::Local)
-            .format("%a %H:%M")
+        reset_at.with_timezone(&chrono::Local).format("%a %H:%M")
     )
 }
 
@@ -841,7 +852,14 @@ fn zellij_send(task: &Task, msg: &str) -> Result<Option<&'static str>> {
 
     // Is the pane still there?
     let out = Command::new("zellij")
-        .args(["--session", session, "action", "list-panes", "--all", "--json"])
+        .args([
+            "--session",
+            session,
+            "action",
+            "list-panes",
+            "--all",
+            "--json",
+        ])
         .output()
         .context("running zellij list-panes")?;
     if !out.status.success() {
@@ -851,7 +869,10 @@ fn zellij_send(task: &Task, msg: &str) -> Result<Option<&'static str>> {
         serde_json::from_slice(&out.stdout).context("parsing zellij pane list")?;
     let alive = panes.iter().any(|p| {
         p.get("id").and_then(|v| v.as_u64()) == Some(pane_id)
-            && !p.get("is_plugin").and_then(|v| v.as_bool()).unwrap_or(false)
+            && !p
+                .get("is_plugin")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
     });
     if !alive {
         return Ok(None);
@@ -859,7 +880,15 @@ fn zellij_send(task: &Task, msg: &str) -> Result<Option<&'static str>> {
 
     let pane = pane_id.to_string();
     let chars = Command::new("zellij")
-        .args(["--session", session, "action", "write-chars", msg, "--pane-id", &pane])
+        .args([
+            "--session",
+            session,
+            "action",
+            "write-chars",
+            msg,
+            "--pane-id",
+            &pane,
+        ])
         .status()
         .context("zellij write-chars")?;
     if !chars.success() {
@@ -867,7 +896,15 @@ fn zellij_send(task: &Task, msg: &str) -> Result<Option<&'static str>> {
     }
     // CR submits the TUI input line.
     let enter = Command::new("zellij")
-        .args(["--session", session, "action", "write", "13", "--pane-id", &pane])
+        .args([
+            "--session",
+            session,
+            "action",
+            "write",
+            "13",
+            "--pane-id",
+            &pane,
+        ])
         .status()
         .context("zellij write")?;
     if !enter.success() {
@@ -1076,9 +1113,7 @@ mod tests {
     fn classifies_transient_and_other_errors() {
         // Overloaded 429s are transient — the agent retries them itself.
         assert_eq!(
-            classify_error(
-                "429 The service may be temporarily overloaded, please try again later"
-            ),
+            classify_error("429 The service may be temporarily overloaded, please try again later"),
             ErrorClass::Transient
         );
         assert_eq!(
@@ -1088,7 +1123,10 @@ mod tests {
         assert_eq!(classify_error("Connection error."), ErrorClass::Transient);
         assert_eq!(classify_error("Request timed out."), ErrorClass::Transient);
         // Auth / plan-access problems are not renewable by waiting.
-        assert_eq!(classify_error("401 Authentication Failed"), ErrorClass::Other);
+        assert_eq!(
+            classify_error("401 Authentication Failed"),
+            ErrorClass::Other
+        );
         assert_eq!(
             classify_error(
                 "429 {\"error\":{\"message\":\"[1311][Your current subscription plan does not yet include access to GLM-5.3-FlashX]\"}}"
@@ -1102,7 +1140,10 @@ mod tests {
         let t = now();
         let text = "Usage limit reached for 5 hour. Your limit will reset at 2026-09-25 18:18:31";
         let reset = parse_reset(text, t, t).unwrap();
-        assert_eq!(reset, Utc.with_ymd_and_hms(2026, 9, 25, 18, 18, 31).unwrap());
+        assert_eq!(
+            reset,
+            Utc.with_ymd_and_hms(2026, 9, 25, 18, 18, 31).unwrap()
+        );
     }
 
     #[test]
@@ -1175,7 +1216,8 @@ mod tests {
     #[test]
     fn resolves_container_pi_path_to_host() {
         let dir = std::env::temp_dir().join("qw-test-pathmap");
-        let host_file = dir.join(".omp/agent/sessions/--repo--/2026-09-18T11-09-41-646Z_019x.jsonl");
+        let host_file =
+            dir.join(".omp/agent/sessions/--repo--/2026-09-18T11-09-41-646Z_019x.jsonl");
         std::fs::create_dir_all(host_file.parent().unwrap()).unwrap();
         std::fs::write(&host_file, b"{}").unwrap();
         let p = pi_session_file(

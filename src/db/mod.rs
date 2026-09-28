@@ -584,12 +584,15 @@ impl Database {
     /// List all keys in the key-value store that start with `prefix`.
     /// Used by the quota-watch daemon to recover pending state after restart.
     pub fn kv_keys_with_prefix(&self, prefix: &str) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT key FROM kv_store WHERE key LIKE ?1 ESCAPE '\\'",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT key FROM kv_store WHERE key LIKE ?1 ESCAPE '\\'")?;
         let pattern = format!(
             "{}%",
-            prefix.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+            prefix
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
         );
         let keys = stmt
             .query_map(params![pattern], |row| row.get::<_, String>(0))?
