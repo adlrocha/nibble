@@ -640,6 +640,46 @@ else
     warn "systemd user session not available. Run manually: nibble quota-watch"
 fi
 
+# ── 5f. Agent usage records (omarchy agents panel) ────────────────────────────
+# Writes Z.AI / Kimi / Grok subscription quota records into
+# ~/.local/state/omarchy/agents/usage/ every 10 minutes, where Omarchy's
+# omarchy.agents bar panel picks them up alongside Claude and Codex.
+step "Installing agent usage records timer"
+
+cp "$REPO_DIR/scripts/agent-usage/nibble-agent-usage" "$BIN_DIR/nibble-agent-usage"
+chmod +x "$BIN_DIR/nibble-agent-usage"
+ok "nibble-agent-usage"
+
+cat > "$SYSTEMD_DIR/nibble-agent-usage.service" << UNIT
+[Unit]
+Description=nibble agent usage records for the omarchy agents panel
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/nibble-agent-usage all --write
+UNIT
+
+cat > "$SYSTEMD_DIR/nibble-agent-usage.timer" << UNIT
+[Unit]
+Description=Refresh nibble agent usage records every 10 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+if systemctl --user daemon-reload 2>/dev/null; then
+    systemctl --user enable --now nibble-agent-usage.timer 2>/dev/null \
+        && ok "Agent usage timer enabled (every 10 min)" \
+        || warn "Could not enable nibble-agent-usage.timer. Enable manually: systemctl --user enable --now nibble-agent-usage.timer"
+else
+    warn "systemd user session not available. Run manually: nibble-agent-usage all --write"
+fi
+
 # Seed the pricing override file if it doesn't exist.
 PRICING_DIR="$HOME/.nibble"
 PRICING_FILE="$PRICING_DIR/pricing.toml"
