@@ -707,6 +707,47 @@ else
     warn "omarchy CLI not found. Panel plugin skipped; usage records still written."
 fi
 
+# ── 5h. Budget / market / self-host records ──────────────────────────────────
+# Two extra panel records (Budget, Market): monthly spend vs budget, effective
+# €/Mtok per subscription, market price pulse (models.dev + OpenRouter), and
+# the self-host break-even verdict. Config: ~/.nibble/budget.toml (seeded).
+step "Installing budget records timer"
+
+cp "$REPO_DIR/scripts/agent-usage/nibble-budget" "$BIN_DIR/nibble-budget"
+chmod +x "$BIN_DIR/nibble-budget"
+"$BIN_DIR/nibble-budget" --seed-config || true
+ok "nibble-budget"
+
+cat > "$SYSTEMD_DIR/nibble-budget.service" << UNIT
+[Unit]
+Description=nibble budget / market / self-host records for the omarchy agents panel
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/nibble-budget --write
+UNIT
+
+cat > "$SYSTEMD_DIR/nibble-budget.timer" << UNIT
+[Unit]
+Description=Refresh nibble budget records every 10 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=10min
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+if systemctl --user daemon-reload 2>/dev/null; then
+    systemctl --user enable --now nibble-budget.timer 2>/dev/null \
+        && ok "Budget timer enabled (every 10 min)" \
+        || warn "Could not enable nibble-budget.timer. Enable manually: systemctl --user enable --now nibble-budget.timer"
+else
+    warn "systemd user session not available. Run manually: nibble-budget --write"
+fi
+
 # Seed the pricing override file if it doesn't exist.
 PRICING_DIR="$HOME/.nibble"
 PRICING_FILE="$PRICING_DIR/pricing.toml"

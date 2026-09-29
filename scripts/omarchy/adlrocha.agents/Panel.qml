@@ -19,6 +19,10 @@ Panel {
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
   readonly property var providers: usage.enabledProviders
+  // Analysis cards (Budget, Market) are a different kind of data than
+  // subscription quotas; they get their own chip row and accent.
+  readonly property var quotaProviders: providers.filter(function(p) { return p.kind !== "analysis" })
+  readonly property var analysisProviders: providers.filter(function(p) { return p.kind === "analysis" })
   // The selection follows the provider, not the slot it happens to sit in: a
   // provider whose first scan lands while the panel is open would otherwise
   // shift the list underneath you and swap out what you were reading.
@@ -483,38 +487,83 @@ Panel {
           }
 
           // ---------- Provider switch ----------
-          Row {
-            id: providerSwitch
+          // Two rows: subscription quotas first, analysis cards (Budget,
+          // Market) below in the accent so the split reads at a glance.
+          Column {
             visible: root.providers.length > 1
             width: parent.width
-            spacing: Style.spacing.md
+            spacing: Style.spacing.sm
 
-            readonly property real cellWidth: root.providers.length > 0
-              ? (width - spacing * (root.providers.length - 1)) / root.providers.length
-              : 0
+            Row {
+              id: quotaSwitch
+              visible: root.quotaProviders.length > 0
+              width: parent.width
+              spacing: Style.spacing.md
 
-            Repeater {
-              model: root.providers
+              readonly property real cellWidth: root.quotaProviders.length > 0
+                ? (width - spacing * (root.quotaProviders.length - 1)) / root.quotaProviders.length
+                : 0
 
-              Button {
-                required property var modelData
-                required property int index
+              Repeater {
+                model: root.quotaProviders
 
-                width: providerSwitch.cellWidth
-                text: modelData.providerName
-                selected: index === root.providerIndex
-                hasCursor: root.cursorActive && index === root.providerIndex
-                bordered: true
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                // Four subscriptions already overflow the row at body size.
-                fontSize: root.providers.length > 3 ? Style.font.caption : Style.font.bodySmall
-                verticalPadding: Style.spacing.controlPaddingY
-                onClicked: {
-                  root.cursorActive = true
-                  root.selectProvider(index)
+                Button {
+                  required property var modelData
+                  property int flatIndex: root.providers.indexOf(modelData)
+
+                  width: quotaSwitch.cellWidth
+                  text: modelData.providerName
+                  selected: flatIndex === root.providerIndex
+                  hasCursor: root.cursorActive && flatIndex === root.providerIndex
+                  bordered: true
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  // Four subscriptions already overflow the row at body size.
+                  fontSize: root.quotaProviders.length > 3 ? Style.font.caption : Style.font.bodySmall
+                  verticalPadding: Style.spacing.controlPaddingY
+                  onClicked: {
+                    root.cursorActive = true
+                    root.selectProvider(flatIndex)
+                  }
+                  onHovered: function(isHovered) { if (isHovered) root.cursorActive = true }
                 }
-                onHovered: function(isHovered) { if (isHovered) root.cursorActive = true }
+              }
+            }
+
+            Row {
+              id: analysisSwitch
+              visible: root.analysisProviders.length > 0
+              width: parent.width
+              spacing: Style.spacing.md
+
+              readonly property real cellWidth: root.analysisProviders.length > 0
+                ? (width - spacing * (root.analysisProviders.length - 1)) / root.analysisProviders.length
+                : 0
+
+              Repeater {
+                model: root.analysisProviders
+
+                Button {
+                  required property var modelData
+                  property int flatIndex: root.providers.indexOf(modelData)
+
+                  width: analysisSwitch.cellWidth
+                  text: modelData.providerName
+                  selected: flatIndex === root.providerIndex
+                  hasCursor: root.cursorActive && flatIndex === root.providerIndex
+                  bordered: true
+                  // Accent while unselected; the selected fill restores the
+                  // normal foreground so the active chip stays readable.
+                  foreground: flatIndex === root.providerIndex ? root.foreground : Color.accent
+                  fontFamily: root.fontFamily
+                  fontSize: Style.font.caption
+                  verticalPadding: Style.spacing.controlPaddingY
+                  onClicked: {
+                    root.cursorActive = true
+                    root.selectProvider(flatIndex)
+                  }
+                  onHovered: function(isHovered) { if (isHovered) root.cursorActive = true }
+                }
               }
             }
           }

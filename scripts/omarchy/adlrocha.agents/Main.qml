@@ -268,6 +268,9 @@ Item {
     return {
       providerId: String(record.id),
       providerName: displayName(record.name) || record.id,
+      // Records may declare a kind ("analysis" for Budget/Market-style cards);
+      // the panel groups kinds into separate chip rows.
+      kind: String(record.kind || "quota"),
       ready: record.ready === true || synced,
       usageStatusText: String(record.usageStatusText || ""),
       authHelpText: String(record.authHelpText || ""),
