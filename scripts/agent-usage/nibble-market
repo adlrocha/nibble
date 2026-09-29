@@ -55,7 +55,8 @@ FAMILY_MATCHERS = {
         "exclude": (),
     },
     "flagship": {
-        "match": ("glm-5.", "kimi-k", "deepseek-v4-pro", "qwen3-max", "qwen3-plus", "minimax-m3"),
+        # "k3" alone: Kimi's CLI logs the model column as just "k3".
+        "match": ("glm-5.", "kimi-k", "k3", "deepseek-v4-pro", "qwen3-max", "qwen3-plus", "minimax-m3"),
         "exclude": ("flash", "flashx", "lite", "mini", "turbo"),
     },
     # The closed-model pulse: OpenAI, Anthropic, Grok, Google frontier tiers.
@@ -273,6 +274,7 @@ def usage_30d() -> dict:
     result = {
         "providers": {},       # api_provider → mtokens 30d
         "families": {},        # family → mtokens 30d
+        "models": {},          # model basename → mtokens 30d
         "in_ratio": 0.25, "out_ratio": 0.75, "cache_ratio": 0.0,  # fallback split
         "user_models": set(),
     }
@@ -304,7 +306,9 @@ def usage_30d() -> dict:
         model_name = str(model or "")
         result["providers"][provider or "unknown"] = result["providers"].get(provider or "unknown", 0.0) + mtok
         if model_name:
-            result["user_models"].add(model_name.strip().lower().split("/")[-1])
+            basename = model_name.strip().lower().split("/")[-1]
+            result["user_models"].add(basename)
+            result["models"][basename] = result["models"].get(basename, 0.0) + mtok
         total_in += tin or 0
         total_out += tout or 0
         total_cache += (cread or 0) + (cwrite or 0)
@@ -424,18 +428,26 @@ def family_rows(history_path: Path, family: str, in_ratio: float, out_ratio: flo
 
 
 def build_sections(history_path: Path, families: list[str], ratios: tuple[float, float, float],
-                   fx: float, user_models: set[str]) -> list[dict]:
-    """Analysis payload: per family, cheapest sources with relative bars."""
+                   fx: float, usage: dict) -> list[dict]:
+    """Analysis payload: per family, cheapest sources with relative bars and
+    the machine's own 30-day volume and cost at those rates."""
     in_ratio, out_ratio, cache_ratio = ratios
+    models = usage.get("models", {})
     sections = []
     for family in families:
-        rows = family_rows(history_path, family, in_ratio, out_ratio, cache_ratio, user_models)
+        rows = family_rows(history_path, family, in_ratio, out_ratio, cache_ratio, usage["user_models"])
         if not rows:
             continue
         worst = max(r["usd_per_mtok"] for r in rows)
+        family_you_eur = 0.0
         out_rows = []
         for i, row in enumerate(rows):
             eur = row["usd_per_mtok"] * fx
+            basename = row["model"].split("/")[-1].lower()
+            you_mtok = round(models.get(basename, 0.0), 1)
+            you_eur = round(models.get(basename, 0.0) * eur, 2)
+            if you_mtok > 0:
+                family_you_eur += you_eur
             out_rows.append({
                 "label": row["label"],
                 "value": f"{eur:.3f} €/M",
@@ -444,8 +456,12 @@ def build_sections(history_path: Path, families: list[str], ratios: tuple[float,
                 "ratio": round(row["usd_per_mtok"] / worst, 3) if worst > 0 else 0.0,
                 "delta": row["delta"],
                 "floor": i == 0,
+                "you_mtok": you_mtok,
+                "you_eur": you_eur,
             })
-        sections.append({"title": family, "rows": out_rows})
+        sections.append({"title": family, "rows": out_rows, "you_eur": round(family_you_eur, 2)})
+    # The family costing you the most at market rates leads the card.
+    sections.sort(key=lambda s: s["you_eur"], reverse=True)
     return sections
 
 
@@ -458,7 +474,7 @@ def compute() -> dict:
     ratios = (usage["in_ratio"], usage["out_ratio"], usage["cache_ratio"])
     history = state_dir() / "market-history.jsonl"
 
-    sections = build_sections(history, list(FAMILY_MATCHERS), ratios, fx, usage["user_models"])
+    sections = build_sections(history, list(FAMILY_MATCHERS), ratios, fx, usage)
     at_market_eur = 0.0
     for section in sections:
         mtok = usage["families"].get(section["title"], 0.0)

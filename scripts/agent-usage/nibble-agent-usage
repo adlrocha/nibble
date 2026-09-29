@@ -50,11 +50,13 @@ XAI_BALANCE_URL = "https://management-api.x.ai/v1/billing/teams/{team}/prepaid/b
 OPENCODE_GO_USAGE_URL = "https://opencode.ai/zen/go/v1/usage"
 
 # token_usage.api_provider values that belong to each subscription, for local
-# token stats out of nibble's ~/.nibble/tasks.db.
+# token stats out of nibble's ~/.nibble/tasks.db. Kimi logs under two ids
+# (kimi-coding = old, kimi-code = current CLI) and moonshot for raw API use;
+# Grok sessions log as xai-oauth when signed in via the Grok CLI OAuth.
 API_PROVIDERS = {
     "zai": ("zai",),
-    "kimi": ("kimi-coding", "kimi"),
-    "grok": ("xai", "grok"),
+    "kimi": ("kimi-coding", "kimi", "kimi-code", "moonshot"),
+    "grok": ("xai", "grok", "xai-oauth"),
     "opencode": ("opencode-go", "opencode-zen"),
 }
 
