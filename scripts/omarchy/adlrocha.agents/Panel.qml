@@ -622,6 +622,7 @@ Panel {
               PanelSectionHeader {
                 width: parent.width
                 text: modelData.title.toUpperCase()
+                  + (modelData.you_eur > 0 ? "  ·  ~" + modelData.you_eur.toFixed(2) + " €/30d" : "")
                 foreground: root.foreground
                 fontFamily: root.fontFamily
               }
@@ -666,15 +667,36 @@ Panel {
                     }
                   }
 
-                  // Two-sided spot quote: published input/output/cache rates.
-                  Text {
+                  // Two-sided spot quote left; this machine's 30-day volume
+                  // and cost at that rate right.
+                  Item {
                     width: parent.width
-                    textFormat: Text.PlainText
-                    text: priceRow.modelData.detail || ""
-                    visible: priceRow.modelData.detail !== ""
-                    color: root.alpha(root.dim, 0.9)
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
+                    implicitHeight: Math.max(spotQuote.implicitHeight, youCost.implicitHeight)
+
+                    Text {
+                      id: spotQuote
+                      anchors.left: parent.left
+                      anchors.right: youCost.visible ? youCost.left : parent.right
+                      anchors.rightMargin: Style.space(8)
+                      elide: Text.ElideRight
+                      textFormat: Text.PlainText
+                      text: priceRow.modelData.detail || ""
+                      visible: priceRow.modelData.detail !== ""
+                      color: root.alpha(root.dim, 0.9)
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
+                    Text {
+                      id: youCost
+                      anchors.right: parent.right
+                      textFormat: Text.PlainText
+                      visible: priceRow.modelData.you_eur > 0
+                      text: priceRow.modelData.you_mtok.toFixed(1) + "M → "
+                        + priceRow.modelData.you_eur.toFixed(2) + " €"
+                      color: priceRow.modelData.floor ? Color.accent : root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
                   }
 
                   // Relative-price bar: track = priciest source in the family,

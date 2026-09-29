@@ -26,7 +26,7 @@ omarchy.agents panel (alongside omarchy's own claude/codex/fireworks records)
   (Anthropic OAuth usage endpoint). This tool covers the rest.
 - **Local token stats** (Tokens by day / by model sections) are read from
   nibble's `token_usage` table in `~/.nibble/tasks.db`, grouped by
-  `api_provider` (`zai`, `kimi-coding`, `xai`/`grok`, `opencode-go`).
+  `api_provider` (`zai`, `kimi-coding`/`kimi-code`/`moonshot`, `xai`/`xai-oauth`, `opencode-go`).
 - Probe results are cached for 10 minutes in
   `~/.cache/omarchy/agent-usage/<id>-limits.json` and reused when a probe
   fails, but only while their reset window is still open — a stale percentage
