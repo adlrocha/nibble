@@ -707,30 +707,29 @@ else
     warn "omarchy CLI not found. Panel plugin skipped; usage records still written."
 fi
 
-# ── 5h. Budget / market / self-host records ──────────────────────────────────
-# Two extra panel records (Budget, Market): monthly spend vs budget, effective
-# €/Mtok per subscription, market price pulse (models.dev + OpenRouter), and
-# the self-host break-even verdict. Config: ~/.nibble/budget.toml (seeded).
-step "Installing budget records timer"
+# ── 5h. Market token-price record ────────────────────────────────────────────
+# One analysis card (Market): blended €/Mtok per model family across
+# models.dev + OpenRouter, the 30-day trend, and the last 30 days of tracked
+# usage priced at today's rates. Fully auto-fetched; no config file.
+step "Installing market record timer"
 
-cp "$REPO_DIR/scripts/agent-usage/nibble-budget" "$BIN_DIR/nibble-budget"
-chmod +x "$BIN_DIR/nibble-budget"
-"$BIN_DIR/nibble-budget" --seed-config || true
-ok "nibble-budget"
+cp "$REPO_DIR/scripts/agent-usage/nibble-market" "$BIN_DIR/nibble-market"
+chmod +x "$BIN_DIR/nibble-market"
+ok "nibble-market"
 
-cat > "$SYSTEMD_DIR/nibble-budget.service" << UNIT
+cat > "$SYSTEMD_DIR/nibble-market.service" << UNIT
 [Unit]
-Description=nibble budget / market / self-host records for the omarchy agents panel
+Description=nibble market token-price record for the omarchy agents panel
 After=graphical-session.target
 
 [Service]
 Type=oneshot
-ExecStart=%h/.local/bin/nibble-budget --write
+ExecStart=%h/.local/bin/nibble-market --write
 UNIT
 
-cat > "$SYSTEMD_DIR/nibble-budget.timer" << UNIT
+cat > "$SYSTEMD_DIR/nibble-market.timer" << UNIT
 [Unit]
-Description=Refresh nibble budget records every 10 minutes
+Description=Refresh nibble market record every 10 minutes
 
 [Timer]
 OnBootSec=3min
@@ -741,11 +740,11 @@ WantedBy=timers.target
 UNIT
 
 if systemctl --user daemon-reload 2>/dev/null; then
-    systemctl --user enable --now nibble-budget.timer 2>/dev/null \
-        && ok "Budget timer enabled (every 10 min)" \
-        || warn "Could not enable nibble-budget.timer. Enable manually: systemctl --user enable --now nibble-budget.timer"
+    systemctl --user enable --now nibble-market.timer 2>/dev/null \
+        && ok "Market timer enabled (every 10 min)" \
+        || warn "Could not enable nibble-market.timer. Enable manually: systemctl --user enable --now nibble-market.timer"
 else
-    warn "systemd user session not available. Run manually: nibble-budget --write"
+    warn "systemd user session not available. Run manually: nibble-market --write"
 fi
 
 # Seed the pricing override file if it doesn't exist.

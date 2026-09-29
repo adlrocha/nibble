@@ -1,0 +1,7 @@
+[Unit]
+Description=nibble market token-price record for the omarchy agents panel
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/nibble-market --write

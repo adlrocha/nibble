@@ -1,5 +1,5 @@
 [Unit]
-Description=Refresh nibble budget records every 10 minutes
+Description=Refresh nibble market record every 10 minutes
 
 [Timer]
 OnBootSec=3min
