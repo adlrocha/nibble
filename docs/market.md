@@ -27,9 +27,11 @@ frankfurter.app            USD→EUR rate (fallback 0.92 offline)
 - **banner** — what the last 30 days of tracked usage would cost at today's
   rates: `your 30d ≈ 84.77 € at market`.
 - **price sections** — one per family (`FLASH`, `FLAGSHIP`, `FRONTIER`),
-  each a stock-ticker-style list: model rows with €/Mtok on the right, a
-  relative-price bar (fill ∝ rate vs the priciest source shown), the
-  cheapest row painted in the accent color, and 30-day ▼/▲ deltas.
+  each a stock-ticker-style list: model rows with the blended €/Mtok on the
+  right, the two-sided spot quote under it (`in 0.023 · out 0.135 · cache
+  0.003 €/M`), a relative-price bar (fill ∝ rate vs the priciest source
+  shown), the cheapest row painted in the accent color, and 30-day ▼/▲
+  deltas.
   - **flash** — your open flash-tier models first (GLM-5.3-Flash, …),
     cheapest context models after.
   - **flagship** — GLM-5.3, Kimi K3, DeepSeek V4 Pro tier.

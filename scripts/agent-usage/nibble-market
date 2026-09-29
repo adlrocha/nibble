@@ -333,6 +333,7 @@ def family_rows(history_path: Path, family: str, in_ratio: float, out_ratio: flo
     excludes = family_excludes(family)
     cutoff_30 = (dt.datetime.now(dt.timezone.utc).date() - dt.timedelta(days=30)).isoformat()
     today: dict[tuple[str, str], float] = {}
+    today_entries: dict[tuple[str, str], tuple[float, float, float]] = {}
     past: dict[tuple[str, str], float] = {}
     if not history_path.is_file():
         return []
@@ -354,28 +355,34 @@ def family_rows(history_path: Path, family: str, in_ratio: float, out_ratio: flo
         # Cache reads dominate coding workloads and cost ~10x less than fresh
         # input; price them at the cache rate so rates match reality. Rows
         # without a cache price default it to the full input price (conservative).
-        cache_price = float(entry.get("cache_read") or 0) or float(entry.get("input") or 0)
-        blended = (float(entry.get("input") or 0) * in_ratio
-                   + float(entry.get("output") or 0) * out_ratio
+        raw_in = float(entry.get("input") or 0)
+        raw_out = float(entry.get("output") or 0)
+        raw_cache = float(entry.get("cache_read") or 0) or raw_in
+        cache_price = raw_cache
+        blended = (raw_in * in_ratio
+                   + raw_out * out_ratio
                    + cache_price * cache_ratio)
         if blended <= 0:
             continue
         key = (str(entry.get("provider")), model_id)
         if entry.get("date") == today_str():
             today[key] = blended
+            today_entries[key] = (raw_in, raw_out, raw_cache)
         elif str(entry.get("date", "")) <= cutoff_30:
             past[key] = blended
 
     # One row per model: the cheapest offer across providers wins, the rest
-    # are the same product at a different counter.
-    by_model: dict[str, tuple[tuple[str, str], float]] = {}
+    # are the same product at a different counter. Raw two-sided rates travel
+    # with the winner — input/output per-Mtok are the actual spot prices.
+    by_model: dict[str, tuple[tuple[str, str], float, float, float, float]] = {}
     for key, usd in today.items():
         basename = key[1].split("/")[-1].lower()
         if basename not in by_model or usd < by_model[basename][1]:
-            by_model[basename] = (key, usd)
+            entry = today_entries[key]
+            by_model[basename] = (key, usd, entry[0], entry[1], entry[2])
 
     comparable = sorted(
-        (b for b, (key, _) in by_model.items()
+        (b for b, (key, _, _, _, _) in by_model.items()
          if any(u and (u in b or b.endswith(u)) for u in user_models)),
         key=lambda b: by_model[b][1])
     fillers = sorted((b for b in by_model if b not in comparable),
@@ -398,12 +405,15 @@ def family_rows(history_path: Path, family: str, in_ratio: float, out_ratio: flo
     chosen = (leads + [b for b in fillers if b not in leads])[:limit]
     rows = []
     for basename in chosen:
-        (provider, model), usd = by_model[basename]
+        (provider, model), usd, raw_in, raw_out, raw_cache = by_model[basename]
         row = {
             "provider": provider,
             "model": model,
             "label": f"{short_provider(provider)} · {model.split('/')[-1]}",
             "usd_per_mtok": round(usd, 4),
+            "usd_in": round(raw_in, 4),
+            "usd_out": round(raw_out, 4),
+            "usd_cache": round(raw_cache, 4),
             "delta": None,
         }
         previous = [v for k, v in past.items() if k == (provider, model)]
@@ -429,6 +439,7 @@ def build_sections(history_path: Path, families: list[str], ratios: tuple[float,
             out_rows.append({
                 "label": row["label"],
                 "value": f"{eur:.3f} €/M",
+                "detail": f"in {row['usd_in'] * fx:.3f} · out {row['usd_out'] * fx:.3f} · cache {row['usd_cache'] * fx:.3f} €/M",
                 "usd_per_mtok": row["usd_per_mtok"],
                 "ratio": round(row["usd_per_mtok"] / worst, 3) if worst > 0 else 0.0,
                 "delta": row["delta"],
