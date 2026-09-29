@@ -607,6 +607,85 @@ Panel {
             }
           }
 
+          // ---------- Analysis rows (Market-style cards) ----------
+          // Structured price rows: cheapest source first with the accent bar,
+          // relative-price bars for the rest, 30-day deltas on the right.
+          Repeater {
+            model: !!root.provider && root.provider.kind === "analysis" && root.provider.analysis
+              ? (root.provider.analysis.sections || []) : []
+
+            Column {
+              required property var modelData
+              width: parent.width
+              spacing: Style.space(6)
+
+              PanelSectionHeader {
+                width: parent.width
+                text: modelData.title.toUpperCase()
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+              }
+
+              Repeater {
+                model: modelData.rows || []
+
+                Column {
+                  id: priceRow
+                  required property var modelData
+                  width: parent.width
+                  spacing: Style.space(3)
+
+                  Item {
+                    width: parent.width
+                    implicitHeight: Math.max(priceLabel.implicitHeight, priceValue.implicitHeight)
+
+                    Text {
+                      id: priceLabel
+                      anchors.left: parent.left
+                      anchors.right: priceValue.left
+                      anchors.rightMargin: Style.space(8)
+                      elide: Text.ElideRight
+                      textFormat: Text.PlainText
+                      text: priceRow.modelData.label
+                      color: priceRow.modelData.floor ? root.foreground : root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
+                    Text {
+                      id: priceValue
+                      anchors.right: parent.right
+                      textFormat: Text.PlainText
+                      text: priceRow.modelData.value
+                        + (priceRow.modelData.delta === null || priceRow.modelData.delta === undefined ? ""
+                        : (priceRow.modelData.delta < 0
+                          ? "  ▼" + Math.round(Math.abs(priceRow.modelData.delta) * 100) + "%"
+                          : "  ▲" + Math.round(priceRow.modelData.delta * 100) + "%"))
+                      color: priceRow.modelData.floor ? Color.accent : root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
+                  }
+
+                  // Relative-price bar: track = priciest source in the family,
+                  // fill = this row's rate. The floor row paints in accent.
+                  Rectangle {
+                    width: parent.width
+                    height: 3
+                    radius: 1.5
+                    color: root.alpha(root.dim, 0.25)
+
+                    Rectangle {
+                      width: parent.width * Math.max(0.05, priceRow.modelData.ratio)
+                      height: parent.height
+                      radius: parent.radius
+                      color: priceRow.modelData.floor ? Color.accent : root.alpha(root.foreground, 0.45)
+                    }
+                  }
+                }
+              }
+            }
+          }
+
           // ---------- Balance / limits ----------
           PanelSeparator {
             visible: balanceSection.visible || limitsSection.visible
