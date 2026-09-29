@@ -509,12 +509,11 @@ Panel {
 
                 Button {
                   required property var modelData
-                  property int flatIndex: root.providers.indexOf(modelData)
 
                   width: quotaSwitch.cellWidth
                   text: modelData.providerName
-                  selected: flatIndex === root.providerIndex
-                  hasCursor: root.cursorActive && flatIndex === root.providerIndex
+                  selected: modelData.flatIndex === root.providerIndex
+                  hasCursor: root.cursorActive && modelData.flatIndex === root.providerIndex
                   bordered: true
                   foreground: root.foreground
                   fontFamily: root.fontFamily
@@ -523,7 +522,7 @@ Panel {
                   verticalPadding: Style.spacing.controlPaddingY
                   onClicked: {
                     root.cursorActive = true
-                    root.selectProvider(flatIndex)
+                    root.selectProvider(modelData.flatIndex)
                   }
                   onHovered: function(isHovered) { if (isHovered) root.cursorActive = true }
                 }
@@ -545,22 +544,21 @@ Panel {
 
                 Button {
                   required property var modelData
-                  property int flatIndex: root.providers.indexOf(modelData)
 
                   width: analysisSwitch.cellWidth
                   text: modelData.providerName
-                  selected: flatIndex === root.providerIndex
-                  hasCursor: root.cursorActive && flatIndex === root.providerIndex
+                  selected: modelData.flatIndex === root.providerIndex
+                  hasCursor: root.cursorActive && modelData.flatIndex === root.providerIndex
                   bordered: true
                   // Accent while unselected; the selected fill restores the
                   // normal foreground so the active chip stays readable.
-                  foreground: flatIndex === root.providerIndex ? root.foreground : Color.accent
+                  foreground: modelData.flatIndex === root.providerIndex ? root.foreground : Color.accent
                   fontFamily: root.fontFamily
                   fontSize: Style.font.caption
                   verticalPadding: Style.spacing.controlPaddingY
                   onClicked: {
                     root.cursorActive = true
-                    root.selectProvider(flatIndex)
+                    root.selectProvider(modelData.flatIndex)
                   }
                   onHovered: function(isHovered) { if (isHovered) root.cursorActive = true }
                 }

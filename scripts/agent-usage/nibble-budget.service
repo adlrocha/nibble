@@ -1,7 +1,0 @@
-[Unit]
-Description=nibble budget / market / self-host records for the omarchy agents panel
-After=graphical-session.target
-
-[Service]
-Type=oneshot
-ExecStart=%h/.local/bin/nibble-budget --write

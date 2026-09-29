@@ -215,6 +215,10 @@ Item {
       localIds[id] = true
       if (!providerEnabled(id)) continue
       var display = displayProvider(record)
+      // Flat index into enabledProviders: chips live in kind-grouped rows but
+      // select by flat position; object identity is not stable across
+      // re-evaluations, so the index travels on the object itself.
+      display.flatIndex = result.length
       if (providerHasData(display)) result.push(display)
     }
     // An agent that only ever ran on another machine has no local record, but
@@ -238,7 +242,9 @@ Item {
   // All-time keeps a quiet day from hiding an agent; today's counts admit a
   // machine whose only source is history.jsonl, which knows nothing older.
   function providerHasData(p) {
-    return numberValue(p.totalPrompts) > 0 || numberValue(p.totalSessions) > 0
+    // Analysis cards (Budget, Market) carry their verdict in the record
+    // itself rather than token stats or meters: ready means "has data".
+    return p.ready === true || numberValue(p.totalPrompts) > 0 || numberValue(p.totalSessions) > 0
       || numberValue(p.activeDays) > 0 || numberValue(p.todayPrompts) > 0
       || numberValue(p.todaySessions) > 0 || (p.limits && p.limits.length > 0)
       || !!p.balance
