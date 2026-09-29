@@ -1,11 +1,11 @@
 # AI subscription dashboard (`nibble-agent-usage`)
 
-All four coding subscriptions — Claude Code, Z.AI GLM, Kimi Code, Grok Code —
-show live quota state in the Omarchy **agents** bar panel
+All five coding subscriptions — Claude Code, Z.AI GLM, Kimi Code, Grok Code,
+OpenCode Go — show live quota state in the Omarchy **agents** bar panel
 (`omarchy.agents`, shipped with Omarchy 4.x): limit meters, reset countdowns,
 plan name, and per-day/per-model token burn. The panel renders whatever JSON
 records appear in `~/.local/state/omarchy/agents/usage/`; this feature writes
-the records for the three providers Omarchy has no collector for.
+the records for the four providers Omarchy has no collector for.
 
 ## How it works
 
@@ -16,7 +16,7 @@ the records for the three providers Omarchy has no collector for.
 ~/.local/bin/nibble-agent-usage all --write     (systemd user timer, every 10 min)
         │ probes each provider's usage endpoint, merges local token stats
         ▼
-~/.local/state/omarchy/agents/usage/{zai,kimi,grok}.json
+~/.local/state/omarchy/agents/usage/{zai,kimi,grok,opencode}.json
         │ file watcher
         ▼
 omarchy.agents panel (alongside omarchy's own claude/codex/fireworks records)
@@ -26,7 +26,7 @@ omarchy.agents panel (alongside omarchy's own claude/codex/fireworks records)
   (Anthropic OAuth usage endpoint). This tool covers the rest.
 - **Local token stats** (Tokens by day / by model sections) are read from
   nibble's `token_usage` table in `~/.nibble/tasks.db`, grouped by
-  `api_provider` (`zai`, `kimi-coding`, `xai`/`grok`).
+  `api_provider` (`zai`, `kimi-coding`, `xai`/`grok`, `opencode-go`).
 - Probe results are cached for 10 minutes in
   `~/.cache/omarchy/agent-usage/<id>-limits.json` and reused when a probe
   fails, but only while their reset window is still open — a stale percentage
@@ -39,11 +39,13 @@ omarchy.agents panel (alongside omarchy's own claude/codex/fireworks records)
 | Z.AI GLM Coding | `GET https://api.z.ai/api/monitor/usage/quota/limit` | `Authorization: <key>` — bare key, no `Bearer` |
 | Kimi for Coding | `GET https://api.kimi.com/coding/v1/usages` | `Authorization: Bearer <key>` |
 | Grok Code | `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits` + `GET https://grok.com/rest/subscriptions` | `Authorization: Bearer <grok CLI OAuth token>` |
+| OpenCode Go | `GET https://opencode.ai/zen/go/v1/usage` | `Authorization: Bearer <key>` + `x-opencode-session: <stable id>` (UA required too) |
 | xAI prepaid credits | `GET https://management-api.x.ai/v1/teams/{team}/prepaid/balance` | `Authorization: Bearer <Management API key>` (optional) |
 
-None of these are in official docs (xAI's Management API is). A provider API
-change can break a collector without notice; the panel will show the error in
-the status card rather than silently vanishing.
+None of these are in official docs (xAI's Management API is; OpenCode Go's
+usage route is first-party but undocumented and mirrors what omp probes). A
+provider API change can break a collector without notice; the panel will show
+the error in the status card rather than silently vanishing.
 
 ## Credentials (checked in order)
 
@@ -52,6 +54,7 @@ the status card rather than silently vanishing.
 | Z.AI | `ZAI_API_KEY` | `~/.config/zsh/.zsh_secrets` | `zai-coding-plan` entry |
 | Kimi | `KIMI_API_KEY` | same file | `kimi-for-coding` entry |
 | Grok | — | — | `~/.grok/auth.json` (grok CLI login) |
+| OpenCode Go | `OPENCODE_API_KEY` | same file | `opencode-go` entry (falls back to the `opencode`/Zen entry — same console key) |
 
 The secrets-file step exists because systemd timers and the omarchy shell
 never source `~/.zshrc`; keys living only there are invisible to the timer.
@@ -72,6 +75,10 @@ When a subscription's status card shows an auth problem, the panel shows an
 | Z.AI | `opencode auth login --provider zai-coding-plan` |
 | Kimi | `opencode auth login --provider kimi-for-coding` |
 | Grok | `grok login` |
+| OpenCode Go | `opencode auth login --provider opencode-go` |
+
+The same console key also works in omp: run `omp login opencode-go` and paste
+it (or export `OPENCODE_API_KEY`).
 
 The button is a small patch on a user-owned clone of the agents plugin at
 `~/.config/omarchy/plugins/adlrocha.agents/` (created with
@@ -84,6 +91,7 @@ teaches the panel's refresh (`r`, Enter, or IPC `refresh`) to run
 
 ```bash
 nibble-agent-usage zai                    # print one record as JSON
+nibble-agent-usage opencode               # OpenCode Go quota as JSON
 nibble-agent-usage all --write            # write all records (what the timer runs)
 nibble-agent-usage all --write --force    # ignore the 10-min probe cache
 ```

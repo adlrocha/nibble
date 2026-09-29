@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Collect Z.AI / Kimi / Grok coding-subscription usage into omarchy agents-panel records.
+"""Collect Z.AI / Kimi / Grok / OpenCode coding-subscription usage into omarchy agents-panel records.
 
 The Omarchy `omarchy.agents` bar panel renders one JSON record per AI coding
 subscription from `~/.local/state/omarchy/agents/usage/<id>.json` (the same
@@ -34,6 +34,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 PROBE_MIN_INTERVAL_SECONDS = 600
@@ -44,6 +45,9 @@ KIMI_USAGE_URL = "https://api.kimi.com/coding/v1/usages"
 GROK_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
 GROK_SUBSCRIPTIONS_URL = "https://grok.com/rest/subscriptions"
 XAI_BALANCE_URL = "https://management-api.x.ai/v1/billing/teams/{team}/prepaid/balance"
+# Undocumented first-party route (same one omp probes): per-window percent
+# for the OpenCode Go subscription. 401 = bad key, 403 = no active Go plan.
+OPENCODE_GO_USAGE_URL = "https://opencode.ai/zen/go/v1/usage"
 
 # token_usage.api_provider values that belong to each subscription, for local
 # token stats out of nibble's ~/.nibble/tasks.db.
@@ -51,12 +55,14 @@ API_PROVIDERS = {
     "zai": ("zai",),
     "kimi": ("kimi-coding", "kimi"),
     "grok": ("xai", "grok"),
+    "opencode": ("opencode-go", "opencode-zen"),
 }
 
 AUTH_HELP = {
     "zai": "Set ZAI_API_KEY or sign in to the Z.AI coding plan in opencode.",
     "kimi": "Set KIMI_API_KEY or sign in to Kimi for Coding in opencode.",
     "grok": "Sign in with the grok CLI (writes ~/.grok/auth.json), or set XAI_MANAGEMENT_KEY and XAI_TEAM_ID for prepaid balance.",
+    "opencode": "Paste your OpenCode Go key in opencode (`opencode auth login -p opencode-go`), in omp (`omp login opencode-go`), or set OPENCODE_API_KEY.",
 }
 
 
@@ -160,16 +166,17 @@ def store_limits(agent_id: str, limits: list, tier: str = "") -> None:
     })
 
 
-def http_get_json(url: str, headers: dict) -> tuple[dict | None, str]:
-    """Returns (payload, error). Exactly one is None/empty."""
+def http_get_json(url: str, headers: dict) -> tuple[dict | None, str, int | None]:
+    """Returns (payload, error, status). Exactly one of payload/error is None/empty;
+    status is the HTTP code when the server answered, else None."""
     request = urllib.request.Request(url, headers={"Accept": "application/json", **headers})
     try:
         with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT) as response:
-            return json.loads(response.read().decode("utf-8", errors="replace")), ""
+            return json.loads(response.read().decode("utf-8", errors="replace")), "", response.status
     except urllib.error.HTTPError as error:
-        return None, f"endpoint returned status {error.code}"
+        return None, f"endpoint returned status {error.code}", error.code
     except Exception:
-        return None, "couldn't reach the endpoint"
+        return None, "couldn't reach the endpoint", None
 
 
 def base_record(agent_id: str) -> dict:
@@ -328,7 +335,7 @@ def zai_limits(force: bool) -> dict:
     if cached and not force and time.time() - fetched_at < PROBE_MIN_INTERVAL_SECONDS:
         return result
 
-    payload, error = http_get_json(ZAI_QUOTA_URL, {"Authorization": key})
+    payload, error, _ = http_get_json(ZAI_QUOTA_URL, {"Authorization": key})
     if payload is None:
         result["usageStatusText"] = f"Z.AI limits unavailable ({error})"
         return result
@@ -390,7 +397,7 @@ def kimi_limits(force: bool) -> dict:
     if cached and not force and time.time() - fetched_at < PROBE_MIN_INTERVAL_SECONDS:
         return result
 
-    payload, error = http_get_json(KIMI_USAGE_URL, {"Authorization": "Bearer " + key})
+    payload, error, _ = http_get_json(KIMI_USAGE_URL, {"Authorization": "Bearer " + key})
     if payload is None:
         result["usageStatusText"] = f"Kimi limits unavailable ({error})"
         return result
@@ -453,6 +460,81 @@ def kimi_limits(force: bool) -> dict:
     return result
 
 
+# -------------------------------------------------------------------- OpenCode Go
+
+
+def opencode_session_id() -> str:
+    """Stable per-install id for the x-opencode-session header (required by Go)."""
+    path = cache_root() / "opencode-session-id"
+    if not path.is_file():
+        session_id = uuid.uuid4().hex
+        path.write_text(session_id + "\n", encoding="utf-8")
+        path.chmod(0o600)
+        return session_id
+    return path.read_text(encoding="utf-8").strip()
+
+
+def opencode_limits(force: bool) -> dict:
+    cached, fetched_at, cached_tier = cached_limits("opencode", force)
+    key = (os.environ.get("OPENCODE_API_KEY")
+           or secrets_file_key("OPENCODE_API_KEY")
+           # Same console key whether stored for the Go or the Zen provider.
+           or opencode_auth_key("opencode-go")
+           or opencode_auth_key("opencode"))
+    result: dict = {"limits": cached, "tierLabel": cached_tier, "usageStatusText": "", "authHelpText": AUTH_HELP["opencode"]}
+    if not key:
+        result["usageStatusText"] = "Waiting for auth"
+        return result
+    if cached and not force and time.time() - fetched_at < PROBE_MIN_INTERVAL_SECONDS:
+        return result
+
+    payload, error, status = http_get_json(OPENCODE_GO_USAGE_URL, {
+        "Authorization": "Bearer " + key,
+        # Go requires a client-identifying UA and a stable session header;
+        # generic library UAs get flagged as abuse.
+        "User-Agent": "nibble-agent-usage/1.0",
+        "x-opencode-session": opencode_session_id(),
+    })
+    if payload is None:
+        # 401 (bad key) and 403 (no active Go subscription) get specific copy.
+        if status == 401:
+            result["usageStatusText"] = "OpenCode key rejected"
+        elif status == 403:
+            result["usageStatusText"] = "No active OpenCode Go subscription"
+        else:
+            result["usageStatusText"] = f"OpenCode limits unavailable ({error})"
+        return result
+
+    usage = payload.get("usage") if isinstance(payload, dict) else None
+    if not isinstance(usage, dict):
+        result["usageStatusText"] = "OpenCode returned an unreadable usage payload"
+        return result
+
+    # Per window: percent is a clamped int 0-100, status is "ok" |
+    # "rate-limited", resetsAt a server-side ISO timestamp. The monthly
+    # window anchors on the subscription anniversary. Malformed windows are
+    # skipped; only fail when nothing readable is left.
+    limits = []
+    for key_name, label in (("rolling", "Session (5-hour)"), ("weekly", "Weekly (7-day)"), ("monthly", "Monthly")):
+        window = usage.get(key_name)
+        if not isinstance(window, dict):
+            continue
+        percent = number(window.get("percent"))
+        if percent < 0 or percent > 100 or not str(window.get("resetsAt") or ""):
+            continue
+        limits.append({"label": label, "percent": clamp_fraction(percent), "resetsAt": normalize_reset(window.get("resetsAt"))})
+
+    if not limits:
+        result["usageStatusText"] = "OpenCode returned no readable quota windows"
+        return result
+    limits.sort(key=lambda e: 0 if e["label"].startswith("Session") else 1 if e["label"].startswith("Weekly") else 2)
+    result["limits"] = limits
+    result["tierLabel"] = "OpenCode Go"
+    result["ok"] = True
+    store_limits("opencode", limits, result["tierLabel"])
+    return result
+
+
 # -------------------------------------------------------------------------- Grok
 
 
@@ -494,7 +576,7 @@ def grok_tier_label(subscriptions) -> str:
 
 
 def grok_billing_limits(token: str) -> tuple[list, str]:
-    billing, error = http_get_json(GROK_BILLING_URL, {
+    billing, error, _ = http_get_json(GROK_BILLING_URL, {
         "Authorization": "Bearer " + token,
         "x-grok-client-mode": "build",
         "x-grok-client-surface": "grok-build",
@@ -527,7 +609,7 @@ def grok_prepaid_balance() -> dict | None:
     team = os.environ.get("XAI_TEAM_ID")
     if not key or not team:
         return None
-    payload, error = http_get_json(XAI_BALANCE_URL.format(team=team), {"Authorization": "Bearer " + key})
+    payload, error, _ = http_get_json(XAI_BALANCE_URL.format(team=team), {"Authorization": "Bearer " + key})
     if payload is None:
         return None
     total = (payload or {}).get("total") or {}
@@ -550,7 +632,7 @@ def grok_prepaid_balance() -> dict | None:
 
 def grok_record(force: bool) -> dict:
     record = base_record("grok")
-    record["name"] = "Grok Code"
+    record["name"] = "Grok"
     record.update(local_stats("grok"))
     record["hasPromptStats"] = record["totalPrompts"] > 0
 
@@ -564,7 +646,7 @@ def grok_record(force: bool) -> dict:
     elif token:
         limits, error = grok_billing_limits(token)
         if limits:
-            subs, _ = http_get_json(GROK_SUBSCRIPTIONS_URL, {"Authorization": "Bearer " + token})
+            subs, _, _ = http_get_json(GROK_SUBSCRIPTIONS_URL, {"Authorization": "Bearer " + token})
             tier = grok_tier_label(subs) or "Grok"
             record["limits"] = limits
             record["tierLabel"] = tier
@@ -609,7 +691,7 @@ def collect(agent_id: str, force: bool) -> dict:
         return record
     if agent_id == "kimi":
         record = base_record("kimi")
-        record["name"] = "Kimi Code"
+        record["name"] = "Kimi"
         record.update(local_stats("kimi"))
         record["hasPromptStats"] = record["totalPrompts"] > 0
         limits = kimi_limits(force)
@@ -620,17 +702,28 @@ def collect(agent_id: str, force: bool) -> dict:
         return record
     if agent_id == "grok":
         return grok_record(force)
+    if agent_id == "opencode":
+        record = base_record("opencode")
+        record["name"] = "OpenCode"
+        record.update(local_stats("opencode"))
+        record["hasPromptStats"] = record["totalPrompts"] > 0
+        limits = opencode_limits(force)
+        record["limits"] = limits["limits"]
+        record["tierLabel"] = limits["tierLabel"]
+        record["usageStatusText"] = "" if limits.get("ok") else limits["usageStatusText"]
+        record["ready"] = bool(limits["limits"])
+        return record
     raise ValueError(f"unknown agent {agent_id}")
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Write Z.AI / Kimi / Grok usage records for the omarchy agents panel")
-    parser.add_argument("agents", nargs="+", choices=["zai", "kimi", "grok", "all"])
+    parser = argparse.ArgumentParser(description="Write Z.AI / Kimi / Grok / OpenCode usage records for the omarchy agents panel")
+    parser.add_argument("agents", nargs="+", choices=["zai", "kimi", "grok", "opencode", "all"])
     parser.add_argument("--write", action="store_true", help="write records to ~/.local/state/omarchy/agents/usage/ instead of printing")
     parser.add_argument("--force", action="store_true", help="re-probe the endpoints, ignoring the reuse window")
     args = parser.parse_args()
 
-    agents = ["zai", "kimi", "grok"] if "all" in args.agents else args.agents
+    agents = ["zai", "kimi", "grok", "opencode"] if "all" in args.agents else args.agents
     for agent_id in agents:
         try:
             record = collect(agent_id, args.force)
