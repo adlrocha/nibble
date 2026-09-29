@@ -666,6 +666,17 @@ Panel {
                     }
                   }
 
+                  // Two-sided spot quote: published input/output/cache rates.
+                  Text {
+                    width: parent.width
+                    textFormat: Text.PlainText
+                    text: priceRow.modelData.detail || ""
+                    visible: priceRow.modelData.detail !== ""
+                    color: root.alpha(root.dim, 0.9)
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
                   // Relative-price bar: track = priciest source in the family,
                   // fill = this row's rate. The floor row paints in accent.
                   Rectangle {
