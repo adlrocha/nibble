@@ -680,6 +680,33 @@ else
     warn "systemd user session not available. Run manually: nibble-agent-usage all --write"
 fi
 
+# ── 5g. Agents panel plugin (patched omarchy.agents clone) ───────────────────
+# The bar runs a user-owned clone of omarchy.agents with the Auth button,
+# chip sizing, nibble refresh hook, and the display-name strip. The patched
+# plugin is vendored in the repo so any Omarchy machine gets the same panel.
+step "Installing agents panel plugin"
+
+if command -v omarchy >/dev/null 2>&1; then
+    PLUGIN_DIR="$HOME/.config/omarchy/plugins/adlrocha.agents"
+    if [ ! -d "$PLUGIN_DIR" ]; then
+        omarchy plugin clone omarchy.agents >/dev/null 2>&1 \
+            && ok "Cloned omarchy.agents panel plugin" \
+            || warn "Could not clone omarchy.agents. Run manually: omarchy plugin clone omarchy.agents"
+    fi
+    if [ -d "$PLUGIN_DIR" ]; then
+        # The vendored copy is the source of truth; hand-edits in the live
+        # clone are overwritten here. Sync from the clone back into the repo
+        # instead if you changed something on a machine.
+        cp "$REPO_DIR"/scripts/omarchy/adlrocha.agents/*.qml "$PLUGIN_DIR"/
+        cp "$REPO_DIR"/scripts/omarchy/adlrocha.agents/manifest.json "$PLUGIN_DIR"/
+        mkdir -p "$PLUGIN_DIR/assets"
+        cp "$REPO_DIR"/scripts/omarchy/adlrocha.agents/assets/*.svg "$PLUGIN_DIR"/assets/
+        ok "Agents panel plugin synced (run omarchy-restart-shell to apply)"
+    fi
+else
+    warn "omarchy CLI not found. Panel plugin skipped; usage records still written."
+fi
+
 # Seed the pricing override file if it doesn't exist.
 PRICING_DIR="$HOME/.nibble"
 PRICING_FILE="$PRICING_DIR/pricing.toml"

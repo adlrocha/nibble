@@ -110,10 +110,35 @@ systemctl --user disable --now nibble-agent-usage.timer   # turn it off
 omarchy-shell adlrocha.agents open|close|toggle|refresh|next
 ```
 
+## Fresh Omarchy machine setup
+
+Everything the panel needs is in this repo:
+
+1. **Collector + timer** — run `./install.sh` (sections 5f/5g) or by hand:
+   copy `scripts/agent-usage/nibble-agent-usage` to `~/.local/bin/` and
+   enable `scripts/agent-usage/nibble-agent-usage.{service,timer}`.
+2. **Panel plugin** — `omarchy plugin clone omarchy.agents` (switches the bar
+   to the clone), then overlay the vendored patched files:
+   ```bash
+   cp ~/path/to/nibble/scripts/omarchy/adlrocha.agents/*.qml \
+      ~/path/to/nibble/scripts/omarchy/adlrocha.agents/manifest.json \
+      ~/.config/omarchy/plugins/adlrocha.agents/
+   cp ~/path/to/nibble/scripts/omarchy/adlrocha.agents/assets/*.svg \
+      ~/.config/omarchy/plugins/adlrocha.agents/assets/
+   ```
+   `install.sh` does this overlay automatically (section 5g). The vendored
+   copy is the source of truth — sync live-clone edits back into the repo.
+3. **Load it** — `omarchy-restart-shell`. Omarchy ships quickshell with
+   hot-reload disabled (`QS_DISABLE_FILE_WATCHER=1` in `omarchy-launch-shell`),
+   so QML changes only apply after a shell restart.
+4. **Credentials** — per-provider keys in `~/.config/zsh/.zsh_secrets`
+   (the systemd timer never sees your interactive shell).
+
 ## Files
 
 | File | Purpose |
 |---|---|
 | `scripts/agent-usage/nibble-agent-usage` | the collector (installed to `~/.local/bin`) |
 | `scripts/agent-usage/nibble-agent-usage.{service,timer}` | systemd user units |
-| `~/.config/omarchy/plugins/adlrocha.agents/` | panel clone: Auth button, chip sizing, nibble refresh hook |
+| `scripts/omarchy/adlrocha.agents/` | vendored patched panel clone: Auth button, chip sizing, nibble refresh hook, display-name strip |
+| `~/.config/omarchy/plugins/adlrocha.agents/` | live install of the vendored clone |
