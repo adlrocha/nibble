@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Market token-price records for the omarchy agents panel.
 
-One analysis card ("Market", accent row): best blended €/Mtok per model
-family across public price sources, the 30-day trend, and what the last 30
-days of nibble-tracked usage would cost at today's rates. Everything is
+One analysis card ("Market", accent row): blended €/Mtok per model family
+across public price sources, the 30-day trend, and what the last 30 days of
+nibble-tracked usage would cost at today's rates. Everything is
 auto-fetched; there is no config file and nothing to maintain.
 
 Inputs (all public, no auth):
@@ -40,13 +40,14 @@ PROBE_MIN_INTERVAL_SECONDS = 600
 HISTORY_MAX_DAYS = 365
 HTTP_TIMEOUT = 15
 FALLBACK_USD_EUR = 0.92
+ROWS_PER_FAMILY = 5
 
 MODELSDEV_URL = "https://models.dev/api.json"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/models"
 FX_URL = "https://api.frankfurter.app/latest?from=USD&to=EUR"
 
 # Model-id fragments → family. Families are the unit of comparison: a price
-# pulse per tier (flash / flagship), not per vendor SKU. `exclude` wins:
+# pulse per tier, not per vendor SKU. `exclude` wins as a whole-id check:
 # GLM-5.3-Flash must not price as flagship just because it contains "glm-5.".
 FAMILY_MATCHERS = {
     "flash": {
@@ -57,11 +58,26 @@ FAMILY_MATCHERS = {
         "match": ("glm-5.", "kimi-k", "deepseek-v4-pro", "qwen3-max", "qwen3-plus", "minimax-m3"),
         "exclude": ("flash", "flashx", "lite", "mini", "turbo"),
     },
+    # The closed-model pulse: OpenAI, Anthropic, Grok, Google frontier tiers.
+    "frontier": {
+        "match": ("claude-opus", "claude-sonnet", "gpt-5", "gpt-6", "grok-4", "gemini-3"),
+        "exclude": ("flash", "flashx", "lite", "mini", "turbo", "nano", "small"),
+    },
 }
 
 # Routing variants are not the price of interactive traffic; keep them out of
-# every floor.
+# every list.
 VARIANT_MARKERS = (":free", ":batch", ":nitro", ":floor", ":exacto", "promo")
+
+PROVIDER_SHORT = {
+    "fireworks-ai": "fireworks",
+    "togetherai": "together",
+    "moonshotai": "moonshot",
+}
+
+# When the machine never touches closed models, the frontier pulse still
+# shows these families instead of the cheapest unknown listing.
+NOTABLE_FRONTIER = ("gpt-6", "gpt-5", "claude-opus", "claude-sonnet", "grok-4", "gemini-3")
 
 
 # ------------------------------------------------------------------ paths/io
@@ -123,6 +139,10 @@ def family_pattern(family: str) -> re.Pattern | None:
 def family_excludes(family: str) -> tuple[str, ...]:
     spec = FAMILY_MATCHERS.get(family)
     return spec["exclude"] if spec else ()
+
+
+def short_provider(provider: str) -> str:
+    return PROVIDER_SHORT.get(provider, provider)
 
 
 # ------------------------------------------------------------- market fetching
@@ -302,18 +322,20 @@ def usage_30d() -> dict:
 # ---------------------------------------------------------------- computation
 
 
-def family_floor(history_path: Path, family: str, in_ratio: float, out_ratio: float, cache_ratio: float,
-                 user_models: set[str]) -> dict | None:
-    """Best blended rate across sources for a family, now vs 30 days ago."""
+def family_rows(history_path: Path, family: str, in_ratio: float, out_ratio: float, cache_ratio: float,
+                user_models: set[str], limit: int = ROWS_PER_FAMILY) -> list[dict]:
+    """Market pulse for a family: one row per model (cheapest source), with
+    30-day deltas. Models this machine actually runs win the slots; a family
+    the machine never touches falls back to its notable tier."""
     pattern = family_pattern(family)
     if not pattern:
-        return None
+        return []
     excludes = family_excludes(family)
     cutoff_30 = (dt.datetime.now(dt.timezone.utc).date() - dt.timedelta(days=30)).isoformat()
     today: dict[tuple[str, str], float] = {}
     past: dict[tuple[str, str], float] = {}
     if not history_path.is_file():
-        return None
+        return []
     for line in history_path.read_text(encoding="utf-8").splitlines():
         try:
             entry = json.loads(line)
@@ -330,36 +352,90 @@ def family_floor(history_path: Path, family: str, in_ratio: float, out_ratio: fl
         if any(v in lowered for v in VARIANT_MARKERS):
             continue
         # Cache reads dominate coding workloads and cost ~10x less than fresh
-        # input; price them at the cache rate so floors match reality. Rows
+        # input; price them at the cache rate so rates match reality. Rows
         # without a cache price default it to the full input price (conservative).
         cache_price = float(entry.get("cache_read") or 0) or float(entry.get("input") or 0)
         blended = (float(entry.get("input") or 0) * in_ratio
                    + float(entry.get("output") or 0) * out_ratio
                    + cache_price * cache_ratio)
-        key = (str(entry.get("provider")), model_id)
         if blended <= 0:
             continue
+        key = (str(entry.get("provider")), model_id)
         if entry.get("date") == today_str():
             today[key] = blended
         elif str(entry.get("date", "")) <= cutoff_30:
             past[key] = blended
-    if not today:
-        return None
-    # The honest comparator is the rate of the models this machine actually
-    # runs, not the global promo minimum. Prefer market ids covering the
-    # user's 30-day model set; fall back to the family min.
-    comparable = [k for k in today
-                  if any(u and (u in k[1].lower() or k[1].lower().endswith(u)) for u in user_models)]
-    pool = comparable or list(today)
-    best_key = min(pool, key=today.get)
-    floor = today[best_key]
-    result = {"provider": best_key[0], "model": best_key[1], "usd_per_mtok": round(floor, 4)}
-    comparable_past = {k: v for k, v in past.items() if k[1] == best_key[1]}
-    if comparable_past:
-        past_best = min(comparable_past.values())
-        if past_best > 0:
-            result["change_30d"] = round((floor - past_best) / past_best, 3)
-    return result
+
+    # One row per model: the cheapest offer across providers wins, the rest
+    # are the same product at a different counter.
+    by_model: dict[str, tuple[tuple[str, str], float]] = {}
+    for key, usd in today.items():
+        basename = key[1].split("/")[-1].lower()
+        if basename not in by_model or usd < by_model[basename][1]:
+            by_model[basename] = (key, usd)
+
+    comparable = sorted(
+        (b for b, (key, _) in by_model.items()
+         if any(u and (u in b or b.endswith(u)) for u in user_models)),
+        key=lambda b: by_model[b][1])
+    fillers = sorted((b for b in by_model if b not in comparable),
+                     key=lambda b: by_model[b][1])
+    if family == "frontier" and len(comparable) < 3:
+        # The frontier pulse is the notable closed models (OpenAI, Anthropic,
+        # Grok, Google): one row per notable prefix, not five of the same
+        # family nor the cheapest unknown listing.
+        leads = []
+        for notable in NOTABLE_FRONTIER:
+            matches = sorted((b for b in by_model if b.startswith(notable)),
+                             key=lambda b: by_model[b][1])
+            if matches:
+                leads.append(matches[0])
+        leads.sort(key=lambda b: by_model[b][1])
+    else:
+        leads = comparable
+
+    # User-run models occupy slots first; the cheapest rest are context.
+    chosen = (leads + [b for b in fillers if b not in leads])[:limit]
+    rows = []
+    for basename in chosen:
+        (provider, model), usd = by_model[basename]
+        row = {
+            "provider": provider,
+            "model": model,
+            "label": f"{short_provider(provider)} · {model.split('/')[-1]}",
+            "usd_per_mtok": round(usd, 4),
+            "delta": None,
+        }
+        previous = [v for k, v in past.items() if k == (provider, model)]
+        if previous and previous[0] > 0:
+            row["delta"] = round((usd - previous[0]) / previous[0], 3)
+        rows.append(row)
+    return rows
+
+
+def build_sections(history_path: Path, families: list[str], ratios: tuple[float, float, float],
+                   fx: float, user_models: set[str]) -> list[dict]:
+    """Analysis payload: per family, cheapest sources with relative bars."""
+    in_ratio, out_ratio, cache_ratio = ratios
+    sections = []
+    for family in families:
+        rows = family_rows(history_path, family, in_ratio, out_ratio, cache_ratio, user_models)
+        if not rows:
+            continue
+        worst = max(r["usd_per_mtok"] for r in rows)
+        out_rows = []
+        for i, row in enumerate(rows):
+            eur = row["usd_per_mtok"] * fx
+            out_rows.append({
+                "label": row["label"],
+                "value": f"{eur:.3f} €/M",
+                "usd_per_mtok": row["usd_per_mtok"],
+                "ratio": round(row["usd_per_mtok"] / worst, 3) if worst > 0 else 0.0,
+                "delta": row["delta"],
+                "floor": i == 0,
+            })
+        sections.append({"title": family, "rows": out_rows})
+    return sections
 
 
 def compute() -> dict:
@@ -368,42 +444,29 @@ def compute() -> dict:
     if market:
         append_history(market)
     usage = usage_30d()
-    in_ratio, out_ratio = usage["in_ratio"], usage["out_ratio"]
-    cache_ratio = usage["cache_ratio"]
+    ratios = (usage["in_ratio"], usage["out_ratio"], usage["cache_ratio"])
     history = state_dir() / "market-history.jsonl"
 
-    families_out = []
-    floor_lines = []
+    sections = build_sections(history, list(FAMILY_MATCHERS), ratios, fx, usage["user_models"])
     at_market_eur = 0.0
-    for family, mtok in sorted(usage["families"].items(), key=lambda kv: -kv[1]):
-        floor = family_floor(history, family, in_ratio, out_ratio, cache_ratio, usage["user_models"])
-        if not floor:
-            continue
-        floor_eur = floor["usd_per_mtok"] * fx
-        at_market_eur += mtok * floor_eur
+    for section in sections:
+        mtok = usage["families"].get(section["title"], 0.0)
+        if section["rows"] and mtok > 0:
+            at_market_eur += mtok * section["rows"][0]["usd_per_mtok"] * fx
+
+    banner = (f"your 30d ≈ {at_market_eur:.2f} € at market"
+              if at_market_eur > 0 else
+              "Collecting prices — floors appear after the first two snapshots")
+
+    flash_section = next((s for s in sections if s["title"] == "flash"), None)
+    flash_row = flash_section["rows"][0] if flash_section and flash_section["rows"] else None
+    tier_label = "no market data yet"
+    if flash_row:
         trend = ""
-        if floor.get("change_30d") is not None:
-            arrow = "▼" if floor["change_30d"] < 0 else "▲"
-            trend = f" {arrow}{abs(floor['change_30d']) * 100:.0f}%"
-        families_out.append({
-            "family": family,
-            "mtok_30d": round(mtok, 1),
-            "floor": {**floor, "eur_per_mtok": round(floor_eur, 4)},
-            "change_30d": floor.get("change_30d"),
-        })
-        short_model = floor["model"].split("/")[-1]
-        floor_lines.append(f"{family} {floor_eur:.3f} €/Mtok ({short_model} @ {floor['provider']}){trend}")
-
-    total_mtok = sum(usage["families"].values())
-    banner = " · ".join(floor_lines)
-    if at_market_eur > 0:
-        banner += f" · your 30d ≈ {at_market_eur:.2f} € at market"
-
-    flash = next((f for f in families_out if f["family"] == "flash"), None)
-    trend_label = ""
-    if flash and flash.get("change_30d") is not None:
-        arrow = "▼" if flash["change_30d"] < 0 else "▲"
-        trend_label = f" {arrow}{abs(flash['change_30d']) * 100:.0f}%/30d"
+        if flash_row["delta"] is not None:
+            arrow = "▼" if flash_row["delta"] < 0 else "▲"
+            trend = f" {arrow}{abs(flash_row['delta']) * 100:.0f}%/30d"
+        tier_label = f"flash {flash_row['usd_per_mtok'] * fx:.3f} €/Mtok{trend}"
 
     return {
         "schemaVersion": 1,
@@ -411,20 +474,20 @@ def compute() -> dict:
         "name": "Market",
         "kind": "analysis",
         "updatedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
-        "ready": bool(families_out),
+        "ready": bool(sections),
         "hasLocalStats": False,
-        "tierLabel": (f"flash {flash['floor']['eur_per_mtok']:.3f} €/Mtok{trend_label}"
-                      if flash else "no market data yet"),
-        "usageStatusText": banner or "Collecting prices — the first snapshots land within a day",
+        "tierLabel": tier_label,
+        "usageStatusText": banner,
         # The panel's status banner body renders authHelpText (usageStatusText
-        # only gates visibility), so the pulse lives here.
-        "authHelpText": banner or "Prices auto-fetched from models.dev and OpenRouter.",
+        # only gates visibility), so the digest lives here.
+        "authHelpText": banner,
         "limits": [],
         "balance": None,
+        # Structured price rows the panel renders as bar sections.
+        "analysis": {"sections": sections},
         "market": {
             "sources": ["models.dev", "openrouter"],
             "usd_to_eur": fx,
-            "families": families_out,
             "mtok_30d_at_market_eur": round(at_market_eur, 2),
         },
     }

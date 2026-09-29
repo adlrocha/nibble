@@ -277,6 +277,7 @@ Item {
       // Records may declare a kind ("analysis" for Budget/Market-style cards);
       // the panel groups kinds into separate chip rows.
       kind: String(record.kind || "quota"),
+      analysis: record.analysis || null,
       ready: record.ready === true || synced,
       usageStatusText: String(record.usageStatusText || ""),
       authHelpText: String(record.authHelpText || ""),

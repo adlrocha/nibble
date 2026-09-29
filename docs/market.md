@@ -24,17 +24,24 @@ frankfurter.app            USD→EUR rate (fallback 0.92 offline)
 ## What the card shows
 
 - **tier line** — flash-family floor, e.g. `flash 0.031 €/Mtok ▼8%/30d`.
-- **banner** — per-family floors with the cheapest provider for *the models
-  this machine actually runs*, plus the 30-day usage priced at today's rates:
-  `flash 0.031 €/Mtok (glm-5.3-flash @ openrouter) · flagship 0.185 €/Mtok
-  (kimi-k2.7-code @ moonshotai) · your 30d ≈ 21.40 € at market`.
+- **banner** — what the last 30 days of tracked usage would cost at today's
+  rates: `your 30d ≈ 84.77 € at market`.
+- **price sections** — one per family (`FLASH`, `FLAGSHIP`, `FRONTIER`),
+  each a stock-ticker-style list: model rows with €/Mtok on the right, a
+  relative-price bar (fill ∝ rate vs the priciest source shown), the
+  cheapest row painted in the accent color, and 30-day ▼/▲ deltas.
+  - **flash** — your open flash-tier models first (GLM-5.3-Flash, …),
+    cheapest context models after.
+  - **flagship** — GLM-5.3, Kimi K3, DeepSeek V4 Pro tier.
+  - **frontier** — the closed pulse: Claude Opus/Sonnet, GPT-5/6, Grok 4,
+    Gemini 3 — one row per notable prefix when the machine doesn't run them.
 
 Rates blend the real input/output/**cache** split from `token_usage` — cache
 reads dominate coding workloads and cost ~10x less than fresh input, so they
-are priced at the cache rate. Floors prefer the models this machine ran in
-the last 30 days over global promo minimums, and skip `:free`/`:batch`/
-`:nitro` routing variants. Prices are snapshotted daily (365 days) so the
-trend line survives reboots.
+are priced at the cache rate. Rows prefer the models this machine ran in the
+last 30 days over global promo minimums, one row per model at its cheapest
+source, skipping `:free`/`:batch`/`:nitro` routing variants. Prices are
+snapshotted daily (365 days) so the trend line survives reboots.
 
 ## CLI
 
