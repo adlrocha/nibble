@@ -91,9 +91,7 @@ fn main() -> Result<()> {
                 task_id,
                 session_id,
             } => {
-                let mut task = db
-                    .get_task_by_id(&task_id)?
-                    .ok_or_else(|| anyhow::anyhow!("Task not found: {}", task_id))?;
+                let mut task = db.ensure_task_or_create(&task_id)?;
                 let ctx = task.context.get_or_insert_with(|| TaskContext {
                     url: None,
                     project_path: None,
@@ -119,9 +117,7 @@ fn main() -> Result<()> {
                 db.update_task(&task)?;
             }
             ReportAction::SessionPath { task_id, path } => {
-                let mut task = db
-                    .get_task_by_id(&task_id)?
-                    .ok_or_else(|| anyhow::anyhow!("Task not found: {}", task_id))?;
+                let mut task = db.ensure_task_or_create(&task_id)?;
                 let ctx = task.context.get_or_insert_with(|| TaskContext {
                     url: None,
                     project_path: None,
@@ -142,27 +138,30 @@ fn main() -> Result<()> {
                 state,
                 message,
             } => {
-                // Unknown task IDs are a warning, not an error: hooks fire
-                // racing task registration and must never fail the agent.
-                // An invalid *state* is a programming error: fail loudly
-                // (hook callers use `|| true`).
-                match db.get_task_by_id(&task_id)? {
-                    Some(mut task) => {
-                        if status::apply_status_transition(&mut task, &state, message.as_deref()) {
-                            db.update_task(&task)?;
-                        } else {
-                            anyhow::bail!(
-                                "Invalid status state: '{state}' \
-                                 (expected running|blocked|completed|exited)"
-                            );
-                        }
-                    }
-                    None => {
+                // Self-heal: an unknown task is auto-registered so the
+                // agent stays visible even if its `report start` was lost
+                // to a transient failure (INV-3). `exited` is the
+                // exception — reporting the death of an unknown task must
+                // not create a row. An invalid *state* remains a loud
+                // error (hook callers use `|| true`).
+                let mut task = match db.get_task_by_id(&task_id)? {
+                    Some(t) => t,
+                    None if state == "exited" => {
                         eprintln!(
-                            "report status: unknown task {}",
+                            "report status: unknown task {} (exited — ignored)",
                             &task_id[..8.min(task_id.len())]
                         );
+                        return Ok(());
                     }
+                    None => db.ensure_task_or_create(&task_id)?,
+                };
+                if status::apply_status_transition(&mut task, &state, message.as_deref()) {
+                    db.update_task(&task)?;
+                } else {
+                    anyhow::bail!(
+                        "Invalid status state: '{state}' \
+                         (expected running|blocked|completed|exited)"
+                    );
                 }
             }
         },

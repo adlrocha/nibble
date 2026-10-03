@@ -277,6 +277,23 @@ pub(crate) fn cmd_hermes_attach(db: &Database, fresh: bool) -> Result<()> {
         "hermes --continue 2>/dev/null || hermes".to_string()
     };
 
+    // Per-window task: this attach gets its own sidebar row; AGENT_TASK_ID
+    // points at the window, and the exec'd podman pid retires the row via
+    // liveness reconcile when the window closes.
+    let pane_id = std::env::var("ZELLIJ_PANE_ID")
+        .ok()
+        .and_then(|p| p.parse::<u32>().ok());
+    let children = crate::commands::child_window_tasks(db, &task.task_id)?;
+    let window_task = crate::commands::build_window_task(
+        &task,
+        crate::commands::SelectedAgent::Hermes,
+        pane_id,
+        std::process::id() as i32,
+        children.len() + 1,
+        false,
+    );
+    db.insert_task(&window_task)?;
+    crate::status::rename_current_pane(&window_task.title);
     let podman_args: Vec<String> = vec![
         "exec".into(),
         "-it".into(),
@@ -287,7 +304,7 @@ pub(crate) fn cmd_hermes_attach(db: &Database, fresh: bool) -> Result<()> {
         "-e".into(),
         "CLAUDE_CONFIG_DIR=/home/node/.claude".into(),
         "-e".into(),
-        format!("AGENT_TASK_ID={}", task.task_id),
+        format!("AGENT_TASK_ID={}", window_task.task_id),
         "-w".into(),
         "/home/node".into(),
         container_id.clone(),

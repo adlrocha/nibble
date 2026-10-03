@@ -31,10 +31,19 @@ else
     TASK_TITLE="${TASK_TITLE:0:100}"
 fi
 
-# Register task as 'running' with process tracking
-nibble report start "$TASK_ID" "$AGENT_TYPE" "$PWD" "$TASK_TITLE" --pid $$ --ppid $PPID 2>/dev/null || {
-    echo "Warning: Failed to register task with nibble" >&2
-}
+# Register task as 'running' with process tracking. Retry: concurrent
+# sidebar watchers can hold the DB lock briefly; never fatal, never silent.
+REGISTERED=false
+for _attempt in 1 2 3; do
+    if nibble report start "$TASK_ID" "$AGENT_TYPE" "$PWD" "$TASK_TITLE" --pid $$ --ppid $PPID 2>/dev/null; then
+        REGISTERED=true
+        break
+    fi
+    sleep 1
+done
+if [ "$REGISTERED" = false ]; then
+    echo "Warning: Failed to register task with nibble after 3 attempts" >&2
+fi
 
 # Start background monitor to detect attention needs
 # The monitor will detect if the process is waiting for input or stalled

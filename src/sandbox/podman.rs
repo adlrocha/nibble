@@ -383,9 +383,11 @@ impl PodmanSandbox {
             args.push(format!("{}={}", key, value));
         }
 
-        // Standard env vars
-        args.push("-e".to_string());
-        args.push(format!("AGENT_TASK_ID={}", task_id));
+        // Standard env vars. AGENT_TASK_ID is deliberately NOT set at the
+        // container level: every agent window (attach) injects its own
+        // per-window task ID via `podman exec -e`, and an ambient ID would
+        // make agents started in `nibble sandbox bash` shells report
+        // against (and flap) the sandbox row.
         args.push("-e".to_string());
         args.push("AGENT_INBOX_VERSION=1".to_string());
         args.push("-e".to_string());
