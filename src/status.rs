@@ -126,7 +126,18 @@ pub(crate) fn render_status(tasks: &[&Task], width: usize, numbered: bool) -> St
             .container_name
             .as_deref()
             .map(|c| format!("sandbox {}", &c[..12.min(c.len())]))
-            .unwrap_or_else(|| "host".to_string());
+            .unwrap_or_else(|| {
+                if task
+                    .context
+                    .as_ref()
+                    .and_then(|c| c.extra.get("parent_task_id"))
+                    .is_some()
+                {
+                    "sandbox window".to_string()
+                } else {
+                    "host".to_string()
+                }
+            });
 
         let key = if numbered && i < 9 {
             format!("{}\u{1b}[2m)\u{1b}[0m", i + 1)
@@ -547,6 +558,8 @@ pub(crate) fn cmd_sidebar(install: bool, uninstall: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::TaskContext;
+    use std::collections::HashMap;
     use crate::models::AgentType;
     use std::str::FromStr;
 
@@ -611,6 +624,32 @@ mod tests {
         assert!(out.contains("Pi"), "agent label present");
         // truncation must not split a multibyte char (would panic or garble)
         assert!(lines[0].chars().count() <= 30 + 4, "respects width");
+    }
+
+    #[test]
+    fn render_window_task_shows_sandbox_location() {
+        let mut t = task();
+        let ctx = t.context.get_or_insert_with(|| TaskContext {
+            url: None,
+            project_path: None,
+            session_id: None,
+            claude_session_id: None,
+            extra: HashMap::new(),
+        });
+        ctx.extra.insert(
+            "parent_task_id".to_string(),
+            serde_json::Value::String("parent-1".to_string()),
+        );
+        let out = render_status(&[&t], 40, false);
+        assert!(out.contains("sandbox window"), "window rows locate in the sandbox: {out}");
+        assert!(!out.contains("host"), "window rows must not claim host: {out}");
+    }
+
+    #[test]
+    fn render_plain_task_shows_host_location() {
+        let t = task();
+        let out = render_status(&[&t], 40, false);
+        assert!(out.contains("host"), "plain rows keep the host location: {out}");
     }
 
     #[test]

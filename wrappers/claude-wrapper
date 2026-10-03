@@ -126,10 +126,23 @@ if [ "$KIMI_MODE" = true ]; then
     export ANTHROPIC_API_KEY="$KIMI_API_KEY"
 fi
 
-# Register task as 'running'
-# shellcheck disable=SC2086
-nibble report start "$AGENT_TASK_ID" "claude_code" "$PWD" "$TASK_TITLE" \
-    --pid $$ --ppid $PPID $EXTRA_FLAGS 2>/dev/null || true
+# Register task as 'running'. Retry: concurrent sidebar watchers can hold
+# the DB lock briefly, and a lost registration makes the session invisible
+# (`nibble report status` self-heals a row, but without pid/pane). Never
+# fatal — but never silent either (INV-5).
+REGISTERED=false
+for _attempt in 1 2 3; do
+    # shellcheck disable=SC2086
+    if "$AGENT_INBOX" report start "$AGENT_TASK_ID" "claude_code" "$PWD" "$TASK_TITLE" \
+        --pid $$ --ppid $PPID $EXTRA_FLAGS 2>/dev/null; then
+        REGISTERED=true
+        break
+    fi
+    sleep 1
+done
+if [ "$REGISTERED" = false ]; then
+    echo "nibble: task registration failed after 3 attempts — this session won't show in the status sidebar" >&2
+fi
 
 # Run claude - hooks handle status updates
 if [ "$REMOTE_MODE" = true ]; then

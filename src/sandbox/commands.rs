@@ -371,7 +371,10 @@ pub(crate) fn cmd_sandbox_spawn(db: &Database, opts: SpawnOptions) -> Result<Str
     if is_worktree {
         task.worktree_path = Some(abs_repo_path.clone());
     }
-
+    // The sandbox row mirrors the container: idle from spawn, retired by
+    // prune/kill. Live per-session status belongs to window tasks.
+    task.status = TaskStatus::Completed;
+    task.completed_at = Some(chrono::Utc::now());
     db.insert_task(&task)?;
 
     let short_id = &task_id[..task_id.len().min(8)];
@@ -1209,9 +1212,8 @@ pub(crate) fn prune_stale_tasks(db: &Database) -> Result<usize> {
 
     Ok(pruned)
 }
-
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum SelectedAgent {
+pub(crate) enum SelectedAgent {
     Claude,
     Pi,
     Omp,
@@ -1307,6 +1309,98 @@ fn resolve_attach_agent(
     Ok(agent)
 }
 
+
+/// Whether this task is a `--btw` side-session window.
+pub(crate) fn is_btw_window(task: &Task) -> bool {
+    task.context
+        .as_ref()
+        .and_then(|c| c.extra.get("btw"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// Child window tasks of a sandbox task (any status), newest first.
+pub(crate) fn child_window_tasks(db: &Database, parent_id: &str) -> Result<Vec<Task>> {
+    let mut tasks = db.list_tasks()?;
+    tasks.retain(|t| {
+        t.context
+            .as_ref()
+            .and_then(|c| c.extra.get("parent_task_id"))
+            .and_then(|v| v.as_str())
+            == Some(parent_id)
+    });
+    Ok(tasks) // list_tasks is already updated_at DESC (newest first)
+}
+
+/// The most recent main (non-btw) child window's value, so a new attach
+/// resumes the conversation the last main window was in (INV-4: btw
+/// sessions never feed this).
+pub(crate) fn latest_main_child_value(
+    db: &Database,
+    parent_id: &str,
+    get: impl Fn(&TaskContext) -> Option<String>,
+) -> Result<Option<String>> {
+    Ok(child_window_tasks(db, parent_id)?
+        .into_iter()
+        .filter(|t| !is_btw_window(t))
+        .find_map(|t| t.context.as_ref().and_then(&get)))
+}
+
+/// Build the per-window task for one attach invocation. Every window —
+/// including `--btw` side sessions — gets its own sidebar row; the pid is
+/// this process, which `exec`s into podman and therefore lives exactly as
+/// long as the window, letting the sidebar's liveness reconcile retire the
+/// row when the window closes (INV-1, INV-2).
+pub(crate) fn build_window_task(
+    parent: &Task,
+    agent: SelectedAgent,
+    pane_id: Option<u32>,
+    pid: i32,
+    window_num: usize,
+    btw: bool,
+) -> Task {
+    let agent_type = match agent {
+        SelectedAgent::Claude => AgentType::ClaudeCode,
+        SelectedAgent::Pi => AgentType::Pi,
+        SelectedAgent::Omp => AgentType::Unknown("omp".to_string()),
+        SelectedAgent::Hermes => AgentType::Hermes,
+    };
+    let mut extra = HashMap::new();
+    extra.insert(
+        "parent_task_id".to_string(),
+        serde_json::Value::String(parent.task_id.clone()),
+    );
+    extra.insert("window".to_string(), serde_json::Value::Bool(true));
+    if let Some(pane) = pane_id {
+        extra.insert(
+            "zellij_pane_id".to_string(),
+            serde_json::Value::Number(pane.into()),
+        );
+    }
+    if btw {
+        extra.insert("btw".to_string(), serde_json::Value::Bool(true));
+    }
+    let mut task = Task::new(
+        Uuid::new_v4().to_string(),
+        agent_type,
+        format!("{} · {} #{}", parent.title, agent, window_num),
+        Some(pid),
+        None,
+    );
+    task.repo_path = parent.repo_path.clone();
+    task.context = Some(TaskContext {
+        url: None,
+        project_path: parent
+            .context
+            .as_ref()
+            .and_then(|c| c.project_path.clone()),
+        session_id: None,
+        claude_session_id: None,
+        extra,
+    });
+    task
+}
+
 /// Attach to the Claude session inside a running sandbox.
 ///
 /// Resumes the session UUID stored on the task (derived deterministically from the repo
@@ -1333,16 +1427,13 @@ pub(crate) fn cmd_sandbox_attach(
     }
 
     // Remember which zellij pane this agent is attached in, so
-    // `nibble status --watch` / `nibble goto` can jump back to it.
-    if let Ok(pane) = std::env::var("ZELLIJ_PANE_ID") {
-        if let Ok(pane) = pane.parse::<u32>() {
-            let ctx = task.context.get_or_insert_with(|| TaskContext {
-                url: None,
-                project_path: None,
-                session_id: None,
-                claude_session_id: None,
-                extra: std::collections::HashMap::new(),
-            });
+    // `nibble status --watch` / `nibble goto` can jump back to it. The
+    // pane is also stamped on the per-window task below.
+    let pane_id = std::env::var("ZELLIJ_PANE_ID")
+        .ok()
+        .and_then(|p| p.parse::<u32>().ok());
+    if let Some(pane) = pane_id {
+        if let Some(ctx) = task.context.as_mut() {
             ctx.extra.insert(
                 "zellij_pane_id".to_string(),
                 serde_json::Value::Number(pane.into()),
@@ -1351,9 +1442,6 @@ pub(crate) fn cmd_sandbox_attach(
         }
     }
 
-    // Name the pane after the task so it's recognisable in the frame border
-    // (no-op outside zellij).
-    crate::status::rename_current_pane(&task.title);
 
     let container_id = task
         .container_id
@@ -1408,13 +1496,35 @@ pub(crate) fn cmd_sandbox_attach(
 
     let agent = resolve_attach_agent(&task.agent_type, hermes, pi, omp, btw)?;
 
+    // Per-window task: every attach invocation gets its own sidebar row, so
+    // concurrent windows on one sandbox no longer share (and flap) the
+    // sandbox task's status. AGENT_TASK_ID below points at the window, not
+    // the sandbox (INV-1).
+    let children = child_window_tasks(db, &task.task_id)?;
+    let window_task = build_window_task(
+        &task,
+        agent,
+        pane_id,
+        std::process::id() as i32,
+        children.len() + 1,
+        btw,
+    );
+    db.insert_task(&window_task)?;
+
+    // Name the pane after the window so it's recognisable in the frame
+    // border (no-op outside zellij).
+    crate::status::rename_current_pane(&window_task.title);
+
     // Resolve the per-agent session IDs stored for this task.
     // Each agent writes its own field so they never clobber each other.
     // Legacy rows (pre-split) may only have the generic `session_id`; fall back to
     // that when the typed field is absent so existing sandboxes keep working.
-    let claude_session_id: Option<&str> = if let Some(ref sesh) = override_session {
+    // Hooks inside the window write session IDs to the *window* task now, so
+    // when the parent has nothing stored, resume from the most recent main
+    // child window (INV-4: btw windows are excluded).
+    let claude_session_id: Option<String> = if let Some(sesh) = &override_session {
         if sesh.agent == "claude" {
-            Some(&sesh.session_id)
+            Some(sesh.session_id.clone())
         } else if agent_override {
             // Agent was auto-derived from the session; don't warn about mismatches
             None
@@ -1426,7 +1536,7 @@ pub(crate) fn cmd_sandbox_attach(
             None
         }
     } else {
-        task.context.as_ref().and_then(|c| {
+        let stored = task.context.as_ref().and_then(|c| {
             let raw = c.claude_session_id.as_deref().or({
                 // Legacy fallback: use generic session_id for non-hermes tasks.
                 match task.agent_type {
@@ -1437,8 +1547,15 @@ pub(crate) fn cmd_sandbox_attach(
             // Guard: a ses_... value is a legacy session ID that was mistakenly stored
             // in claude_session_id by an older version of the session-id handler. Treat it
             // as absent so Claude never tries `--resume ses_...`.
-            raw.filter(|id| !id.starts_with("ses_"))
-        })
+            raw.filter(|id| !id.starts_with("ses_")).map(str::to_string)
+        });
+        match stored {
+            Some(id) => Some(id),
+            None => {
+                latest_main_child_value(db, &task.task_id, |c| c.claude_session_id.clone())?
+                    .filter(|id| !id.starts_with("ses_"))
+            }
+        }
     };
 
     let shell_cmd = match agent {
@@ -1495,15 +1612,34 @@ pub(crate) fn cmd_sandbox_attach(
                 // the most recent session inside this specific container.
                 // Using container-specific discovery avoids grabbing a session from a
                 // different sandbox when multiple pi-family sandboxes are active.
-                let stored_path = task
+                let stored_path: Option<String> = task
                     .context
                     .as_ref()
-                    .and_then(|c| c.extra.get("pi_session_path").and_then(|v| v.as_str()));
+                    .and_then(|c| {
+                        c.extra
+                            .get("pi_session_path")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                    })
+                    .or_else(|| {
+                        // Windows report their session path to their own
+                        // task; fall back to the latest main window's path
+                        // when the parent never stored one.
+                        latest_main_child_value(db, &task.task_id, |c| {
+                            c.extra
+                                .get("pi_session_path")
+                                .and_then(|v| v.as_str())
+                                .map(String::from)
+                        })
+                        .ok()
+                        .flatten()
+                    });
 
                 // Candidate container paths for the stored session, ordered by the
                 // implementation's config roots (omp prefers its ~/.omp twin of a
                 // stored ~/.pi session, falling back to the original path).
                 let candidates: Vec<std::path::PathBuf> = stored_path
+                    .as_deref()
                     .map(|p| pi_session_path_candidates(p, roots))
                     .unwrap_or_default();
 
@@ -1593,9 +1729,8 @@ pub(crate) fn cmd_sandbox_attach(
         }
         SelectedAgent::Claude => {
             let claude = "/home/node/.local/bin/claude --dangerously-skip-permissions";
-
             if fresh && !btw {
-                if let Some(sid) = claude_session_id {
+                if let Some(sid) = claude_session_id.as_deref() {
                     backup_session_file(sid);
                     eprintln!(
                         "  Session:   {} — previous history backed up, starting fresh",
@@ -1609,7 +1744,7 @@ pub(crate) fn cmd_sandbox_attach(
             if btw {
                 let side_id = uuid::Uuid::new_v4();
                 format!("cd {container_dir} && {claude} --session-id {side_id}")
-            } else if let Some(sid) = claude_session_id {
+            } else if let Some(sid) = claude_session_id.as_deref() {
                 format!(
                     "cd {container_dir} && {claude} --resume {sid} 2>&1 || {claude} --session-id {sid}"
                 )
@@ -1631,11 +1766,13 @@ pub(crate) fn cmd_sandbox_attach(
         "CLAUDE_CONFIG_DIR=/home/node/.claude".into(),
     ];
 
-    // --btw sessions are side sessions: omit AGENT_TASK_ID so hooks and epilogues
-    // inside the container no-op and don't overwrite the main task's stored session_id.
-    if !btw {
-        podman_args.extend(["-e".into(), format!("AGENT_TASK_ID={}", task_id)]);
-    }
+    // Every window — including --btw side sessions — reports as its own
+    // task; nothing inside the container writes the sandbox row any more,
+    // so side sessions can no longer clobber the main session mapping.
+    podman_args.extend([
+        "-e".into(),
+        format!("AGENT_TASK_ID={}", window_task.task_id),
+    ]);
 
     podman_args.extend([
         "-w".into(),
@@ -1694,4 +1831,128 @@ pub(crate) fn cmd_sandbox_attach(
         std::process::Command::new("podman").args(&podman_args),
     );
     anyhow::bail!("Failed to exec podman: {}", err)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::Database;
+
+    fn parent() -> Task {
+        let mut t = Task::new(
+            "parent-1".to_string(),
+            AgentType::Pi,
+            "[demo:sandbox]".to_string(),
+            None,
+            None,
+        );
+        t.container_name = Some("nibble-x".to_string());
+        t.context = Some(TaskContext {
+            url: None,
+            project_path: Some("/repos/demo".to_string()),
+            session_id: None,
+            claude_session_id: None,
+            extra: HashMap::new(),
+        });
+        t
+    }
+
+    fn window(parent_id: &str, extra_pairs: &[(&str, serde_json::Value)], updated: i64) -> Task {
+        let mut extra = HashMap::new();
+        extra.insert(
+            "parent_task_id".to_string(),
+            serde_json::Value::String(parent_id.to_string()),
+        );
+        for (k, v) in extra_pairs {
+            extra.insert(k.to_string(), v.clone());
+        }
+        let mut t = Task::new(
+            format!("w-{updated}"),
+            AgentType::Unknown("omp".to_string()),
+            "w".to_string(),
+            None,
+            None,
+        );
+        t.context = Some(TaskContext {
+            url: None,
+            project_path: None,
+            session_id: None,
+            claude_session_id: None,
+            extra,
+        });
+        t.updated_at = chrono::DateTime::from_timestamp(updated, 0).unwrap();
+        t
+    }
+
+    #[test]
+    fn build_window_task_maps_fields() {
+        let p = parent();
+        let w = build_window_task(&p, SelectedAgent::Omp, Some(7), 42, 2, false);
+        assert_eq!(w.agent_type, AgentType::Unknown("omp".to_string()));
+        assert_eq!(w.pid, Some(42));
+        assert_eq!(w.container_name, None, "window rows keep host-pid reconcile");
+        assert_eq!(w.repo_path, p.repo_path);
+        let ctx = w.context.as_ref().unwrap();
+        assert_eq!(
+            ctx.extra.get("parent_task_id").unwrap(),
+            &serde_json::Value::String("parent-1".to_string())
+        );
+        assert_eq!(ctx.extra.get("window"), Some(&serde_json::Value::Bool(true)));
+        assert_eq!(ctx.extra.get("btw"), None, "main windows are not btw");
+        assert_eq!(
+            ctx.extra.get("zellij_pane_id"),
+            Some(&serde_json::Value::Number(7.into()))
+        );
+        assert_eq!(w.title, "[demo:sandbox] · omp #2");
+        assert!(!w.task_id.is_empty() && w.task_id != "parent-1");
+    }
+
+    #[test]
+    fn build_window_task_btw_marker() {
+        let w = build_window_task(&parent(), SelectedAgent::Claude, None, 1, 1, true);
+        assert_eq!(
+            w.context.as_ref().unwrap().extra.get("btw"),
+            Some(&serde_json::Value::Bool(true))
+        );
+    }
+
+    #[test]
+    fn child_windows_lookup_and_btw_exclusion() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = Database::open(tmp.path().join("t.db")).unwrap();
+        db.insert_task(&parent()).unwrap();
+        // newest-first input order: newest main window has the session id
+        let mut newest = window(
+            "parent-1",
+            &[("pi_session_path", serde_json::json!("/h/.omp/s2.jsonl"))],
+            200,
+        );
+        newest.context.as_mut().unwrap().claude_session_id = Some("sid-new".to_string());
+        let btw = window(
+            "parent-1",
+            &[
+                ("btw", serde_json::Value::Bool(true)),
+                ("pi_session_path", serde_json::json!("/h/.omp/btw.jsonl")),
+            ],
+            300,
+        );
+        db.insert_task(&newest).unwrap();
+        db.insert_task(&btw).unwrap();
+        db.insert_task(&window("other", &[], 400)).unwrap();
+
+        let children = child_window_tasks(&db, "parent-1").unwrap();
+        assert_eq!(children.len(), 2, "only this parent's windows");
+        assert!(is_btw_window(&children[0]) || is_btw_window(&children[1]));
+
+        let claude = latest_main_child_value(&db, "parent-1", |c| c.claude_session_id.clone())
+            .unwrap()
+            .expect("main window session id found");
+        assert_eq!(claude, "sid-new", "btw never supplies resume state");
+        let pi = latest_main_child_value(&db, "parent-1", |c| {
+            c.extra.get("pi_session_path").and_then(|v| v.as_str()).map(String::from)
+        })
+        .unwrap()
+        .expect("main window session path found");
+        assert_eq!(pi, "/h/.omp/s2.jsonl", "btw session path excluded");
+    }
 }

@@ -877,6 +877,50 @@ impl Database {
 
         Ok((rows, window))
     }
+    /// Return the task for `task_id`, creating a placeholder when missing.
+    ///
+    /// Self-healing path for status/session reports whose `report start`
+    /// was lost (e.g. a transient DB failure swallowed by a wrapper): the
+    /// reporting agent stays visible instead of failing silently. The
+    /// agent type comes from `NIBBLE_AGENT_TYPE` when the producer exports
+    /// it (Claude hooks do); the title/location come from the reporting
+    /// process's cwd. No pid is recorded — the reporter may live in a
+    /// container pid namespace, and a wrong host pid would make the
+    /// sidebar's liveness reconcile retire the row immediately.
+    pub fn ensure_task_or_create(&self, task_id: &str) -> Result<Task> {
+        if let Some(task) = self.get_task_by_id(task_id)? {
+            return Ok(task);
+        }
+        let agent = match std::env::var("NIBBLE_AGENT_TYPE").as_deref() {
+            Ok("claude") => AgentType::ClaudeCode,
+            Ok("pi") => AgentType::Pi,
+            Ok("hermes") => AgentType::Hermes,
+            Ok(other) => AgentType::Unknown(other.to_string()),
+            Err(_) => AgentType::Unknown("agent".to_string()),
+        };
+        let cwd = std::env::current_dir()
+            .ok()
+            .map(|p| p.to_string_lossy().to_string());
+        let title = format!(
+            "[{}]",
+            cwd.as_deref()
+                .and_then(|c| Path::new(c).file_name())
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        );
+        let mut task = Task::new(task_id.to_string(), agent, title, None, None);
+        task.context = Some(TaskContext {
+            url: None,
+            project_path: cwd,
+            session_id: None,
+            claude_session_id: None,
+            extra: HashMap::new(),
+        });
+        self.insert_task(&task)?;
+        // Read back so callers see the persisted row (id, timestamps).
+        self.get_task_by_id(task_id)?
+            .ok_or_else(|| anyhow::anyhow!("inserted task {} not readable back", task_id))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -921,6 +965,48 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let db = Database::open(temp_file.path()).unwrap();
         (db, temp_file)
+    }
+
+    #[test]
+    fn ensure_task_or_create_registers_placeholder_and_passes_through() {
+        let (db, _tmp) = create_test_db();
+        // Existing task passes through untouched.
+        let existing = Task::new(
+            "known-id".to_string(),
+            AgentType::Pi,
+            "[repo]".to_string(),
+            Some(1),
+            None,
+        );
+        db.insert_task(&existing).unwrap();
+        let got = db.ensure_task_or_create("known-id").unwrap();
+        assert_eq!(got.task_id, "known-id");
+        assert_eq!(got.agent_type, AgentType::Pi);
+
+        // Unknown id: placeholder created, agent honoured from
+        // NIBBLE_AGENT_TYPE, located by cwd, no pid (container-namespace
+        // hazard).
+        std::env::set_var("NIBBLE_AGENT_TYPE", "claude");
+        let created = db.ensure_task_or_create("fresh-id").unwrap();
+        std::env::remove_var("NIBBLE_AGENT_TYPE");
+        assert_eq!(created.task_id, "fresh-id");
+        assert_eq!(created.agent_type, AgentType::ClaudeCode, "\"claude\" aliases to ClaudeCode");
+        assert_eq!(created.pid, None, "placeholders carry no pid");
+        assert!(created
+            .context
+            .as_ref()
+            .and_then(|c| c.project_path.as_deref())
+            .is_some(), "placeholder is locatable");
+        assert!(created.title.starts_with('[') && created.title.ends_with(']'));
+        // Second call returns the same row (no duplicate insert).
+        let again = db.ensure_task_or_create("fresh-id").unwrap();
+        assert_eq!(again.id, created.id);
+
+        // Unmapped agent strings round-trip as Unknown.
+        std::env::set_var("NIBBLE_AGENT_TYPE", "omp");
+        let omp = db.ensure_task_or_create("omp-id").unwrap();
+        std::env::remove_var("NIBBLE_AGENT_TYPE");
+        assert_eq!(omp.agent_type, AgentType::Unknown("omp".to_string()));
     }
 
     #[test]
