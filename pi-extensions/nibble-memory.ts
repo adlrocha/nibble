@@ -95,20 +95,6 @@ const summarize = (taskId: string): void => {
 };
 
 
-const reportStatus = (taskId: string, state: string): void => {
-	if (!taskId) return;
-
-	try {
-		execSync(`nibble report status '${taskId.replace(/'/g, "'\\''")}' '${state}'`, {
-			timeout: 5000,
-			stdio: "pipe",
-			env: { ...process.env, NIBBLE_AGENT_TYPE: agentType() },
-		});
-	} catch {
-		// Non-fatal: status reporting is best-effort. A missing task row is
-		// self-healed by nibble itself (ensure_task_or_create).
-	}
-};
 
 const reportSessionPath = (taskId: string, path: string): void => {
 	if (!taskId || !path) return;
@@ -138,12 +124,17 @@ const reportStatus = (taskId: string, state: string, message?: string): void => 
 	try {
 		execSync(
 			`nibble ${args.map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(" ")}`,
-			{ timeout: 5000, stdio: "pipe" },
+			{
+				timeout: 5000,
+				stdio: "pipe",
+				env: { ...process.env, NIBBLE_AGENT_TYPE: agentType() },
+			},
 		);
 	} catch {
 		// Non-fatal: status reporting is best-effort
 	}
 };
+
 
 // ─── Extension ───────────────────────────────────────────────────────────────
 
