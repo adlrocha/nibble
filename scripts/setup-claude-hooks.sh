@@ -18,22 +18,35 @@ mkdir -p "$CLAUDE_SETTINGS_DIR"
 # Hooks must be fast and never block the agent.  Capture and summarization
 # run asynchronously (backgrounded) so Claude is never waiting on us.
 
+# ── Task reference derivation ──────────────────────────────────────────────────
+# A wrapper (claude-wrapper) or sandbox attach exports AGENT_TASK_ID and the
+# hooks use it as-is. Anything launched without one — `claude -p` in a script,
+# a non-interactive shell, a `nibble sandbox bash` shell — is still tracked:
+# every hook payload carries Claude's own session_id, so a stable task ID is
+# derived as claude-<session_id>. nibble self-heals unknown rows
+# (ensure_task_or_create: agent type from NIBBLE_AGENT_TYPE, title/cwd from
+# the reporting process), so the derived row appears with no wrapper involved.
+
+# SessionStart — registers the task at launch so unwrapped sessions are
+# visible before the first prompt (wrapped sessions keep their wrapper UUID).
+SESSIONSTART_CMD='INPUT=$(cat); SID=""; if command -v jq >/dev/null 2>&1; then SID=$(printf "%s" "$INPUT" | jq -r ".sessionId // .session_id // empty"); fi; TID="${AGENT_TASK_ID:-claude-$SID}"; if [ -n "$TID" ]; then export NIBBLE_AGENT_TYPE=claude; nibble report status "$TID" running 2>/dev/null || true; [ -n "$SID" ] && nibble report session-id "$TID" "$SID" 2>/dev/null || true; fi'
+
 # UserPromptSubmit — captures user messages into the memory capture JSONL.
-USERPROMPT_CMD='if [ -n "$AGENT_TASK_ID" ]; then export NIBBLE_AGENT_TYPE=claude; nibble report status "$AGENT_TASK_ID" running 2>/dev/null || true; INPUT=$(cat); if command -v jq >/dev/null 2>&1; then MSG=$(printf "%s" "$INPUT" | jq -r ".message // empty"); [ -n "$MSG" ] && nibble memory capture "$AGENT_TASK_ID" "user" "$MSG" 2>/dev/null || true; fi; fi'
+USERPROMPT_CMD='INPUT=$(cat); SID=""; if command -v jq >/dev/null 2>&1; then SID=$(printf "%s" "$INPUT" | jq -r ".sessionId // .session_id // empty"); fi; TID="${AGENT_TASK_ID:-claude-$SID}"; if [ -n "$TID" ]; then export NIBBLE_AGENT_TYPE=claude; nibble report status "$TID" running 2>/dev/null || true; if command -v jq >/dev/null 2>&1; then MSG=$(printf "%s" "$INPUT" | jq -r ".message // empty"); [ -n "$MSG" ] && nibble memory capture "$TID" "user" "$MSG" 2>/dev/null || true; fi; fi'
 
 # PostToolUse — captures tool calls + results into the memory capture JSONL.
-POSTTOOL_CMD='if [ -n "$AGENT_TASK_ID" ]; then export NIBBLE_AGENT_TYPE=claude; nibble report status "$AGENT_TASK_ID" running 2>/dev/null || true; INPUT=$(cat); if command -v jq >/dev/null 2>&1; then TOOL=$(printf "%s" "$INPUT" | jq -r ".tool_name // empty"); TOOL_INPUT=$(printf "%s" "$INPUT" | jq -c ".tool_input // {}" | cut -c1-4096); TOOL_OUTPUT=$(printf "%s" "$INPUT" | jq -r ".tool_output // \"\"" | cut -c1-4096); [ -n "$TOOL" ] && nibble memory capture "$AGENT_TASK_ID" "tool" "" --tool-name "$TOOL" --tool-input "$TOOL_INPUT" --tool-output "$TOOL_OUTPUT" 2>/dev/null || true; fi; fi'
+POSTTOOL_CMD='INPUT=$(cat); SID=""; if command -v jq >/dev/null 2>&1; then SID=$(printf "%s" "$INPUT" | jq -r ".sessionId // .session_id // empty"); fi; TID="${AGENT_TASK_ID:-claude-$SID}"; if [ -n "$TID" ]; then export NIBBLE_AGENT_TYPE=claude; nibble report status "$TID" running 2>/dev/null || true; if command -v jq >/dev/null 2>&1; then TOOL=$(printf "%s" "$INPUT" | jq -r ".tool_name // empty"); TOOL_INPUT=$(printf "%s" "$INPUT" | jq -c ".tool_input // {}" | cut -c1-4096); TOOL_OUTPUT=$(printf "%s" "$INPUT" | jq -r ".tool_output // \"\"" | cut -c1-4096); [ -n "$TOOL" ] && nibble memory capture "$TID" "tool" "" --tool-name "$TOOL" --tool-input "$TOOL_INPUT" --tool-output "$TOOL_OUTPUT" 2>/dev/null || true; fi; fi'
 
 # Stop — captures session_id and last assistant message, and triggers
 # async session summarization.
-STOP_CMD='if [ -n "$AGENT_TASK_ID" ]; then export NIBBLE_AGENT_TYPE=claude; INPUT=$(cat); if command -v jq >/dev/null 2>&1; then SID=$(printf "%s" "$INPUT" | jq -r ".sessionId // .session_id // empty"); [ -n "$SID" ] && nibble report session-id "$AGENT_TASK_ID" "$SID" 2>/dev/null; MSG=$(printf "%s" "$INPUT" | jq -r ".last_assistant_message // \"(no message)\""); else MSG="(install jq to see last message)"; fi; nibble report status "$AGENT_TASK_ID" completed 2>/dev/null || true; nibble memory capture "$AGENT_TASK_ID" "assistant" "$MSG" 2>/dev/null || true; nibble memory summarize "$AGENT_TASK_ID" >/dev/null 2>&1 & fi'
+STOP_CMD='INPUT=$(cat); SID=""; if command -v jq >/dev/null 2>&1; then SID=$(printf "%s" "$INPUT" | jq -r ".sessionId // .session_id // empty"); fi; TID="${AGENT_TASK_ID:-claude-$SID}"; if [ -n "$TID" ]; then export NIBBLE_AGENT_TYPE=claude; [ -n "$SID" ] && nibble report session-id "$TID" "$SID" 2>/dev/null; if command -v jq >/dev/null 2>&1; then MSG=$(printf "%s" "$INPUT" | jq -r ".last_assistant_message // \"(no message)\""); else MSG="(install jq to see last message)"; fi; nibble report status "$TID" completed 2>/dev/null || true; nibble memory capture "$TID" "assistant" "$MSG" 2>/dev/null || true; nibble memory summarize "$TID" >/dev/null 2>&1 & fi'
 
 # Notification — permission prompts / attention requests: status → blocked
 # so the nibble status sidebar steers your attention.
-NOTIFY_CMD='if [ -n "$AGENT_TASK_ID" ]; then INPUT=$(cat); REASON=$(printf "%s" "$INPUT" | jq -r ".message // .notification_type // empty" 2>/dev/null | tr "\n" " " | cut -c1-160); nibble report status "$AGENT_TASK_ID" blocked ${REASON:+--message "$REASON"} 2>/dev/null || true; fi'
+NOTIFY_CMD='INPUT=$(cat); SID=""; if command -v jq >/dev/null 2>&1; then SID=$(printf "%s" "$INPUT" | jq -r ".sessionId // .session_id // empty"); fi; TID="${AGENT_TASK_ID:-claude-$SID}"; if [ -n "$TID" ]; then export NIBBLE_AGENT_TYPE=claude; REASON=$(printf "%s" "$INPUT" | jq -r ".message // .notification_type // empty" 2>/dev/null | tr "\n" " " | cut -c1-160); nibble report status "$TID" blocked ${REASON:+--message "$REASON"} 2>/dev/null || true; fi'
 
 # SessionEnd — marks the task exited so the status sidebar drops it.
-SESSIONEND_CMD='if [ -n "$AGENT_TASK_ID" ]; then nibble report status "$AGENT_TASK_ID" exited 2>/dev/null || true; fi'
+SESSIONEND_CMD='INPUT=$(cat); SID=""; if command -v jq >/dev/null 2>&1; then SID=$(printf "%s" "$INPUT" | jq -r ".sessionId // .session_id // empty"); fi; TID="${AGENT_TASK_ID:-claude-$SID}"; if [ -n "$TID" ]; then export NIBBLE_AGENT_TYPE=claude; nibble report status "$TID" exited 2>/dev/null || true; fi'
 
 # Session retention — Claude Code purges local transcripts older than
 # `cleanupPeriodDays` (default: 30 days). Nibble never deletes session data,
@@ -60,6 +73,7 @@ if [ -f "$CLAUDE_SETTINGS_FILE" ]; then
         fi
         echo "Merging hooks into existing settings..."
         HOOKS_JSON=$(jq -n \
+            --arg sessionstart "$SESSIONSTART_CMD" \
             --arg userprompt "$USERPROMPT_CMD" \
             --arg posttool "$POSTTOOL_CMD" \
             --arg stop   "$STOP_CMD" \
@@ -69,6 +83,7 @@ if [ -f "$CLAUDE_SETTINGS_FILE" ]; then
             '{
               cleanupPeriodDays: $cleanup,
               hooks: {
+                SessionStart:     [{hooks: [{type:"command", command:$sessionstart, timeout:5}]}],
                 UserPromptSubmit: [{hooks: [{type:"command", command:$userprompt, timeout:5}]}],
                 PostToolUse:      [{hooks: [{type:"command", command:$posttool, timeout:5}]}],
                 Stop:             [{hooks: [{type:"command", command:$stop, timeout:30}]}],
@@ -96,6 +111,7 @@ else
     fi
 
     jq -n \
+        --arg sessionstart "$SESSIONSTART_CMD" \
         --arg userprompt "$USERPROMPT_CMD" \
         --arg posttool "$POSTTOOL_CMD" \
         --arg stop   "$STOP_CMD" \
@@ -105,6 +121,7 @@ else
         '{
           cleanupPeriodDays: $cleanup,
           hooks: {
+            SessionStart:     [{hooks: [{type:"command", command:$sessionstart, timeout:5}]}],
             UserPromptSubmit: [{hooks: [{type:"command", command:$userprompt, timeout:5}]}],
             PostToolUse:      [{hooks: [{type:"command", command:$posttool, timeout:5}]}],
             Stop:             [{hooks: [{type:"command", command:$stop, timeout:30}]}],
@@ -117,6 +134,8 @@ fi
 echo ""
 echo "Claude Code hooks installed for nibble!"
 echo ""
+echo "  - SessionStart:     registers the task at launch (wrapper UUID or"
+echo "                      derived claude-<session_id> for unwrapped sessions)"
 echo "  - UserPromptSubmit: captures user messages + status → running"
 echo "  - PostToolUse:      captures tool calls + results + status → running"
 echo "  - Stop:             captures session_id + summarize + status → idle"

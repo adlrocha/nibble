@@ -24,7 +24,35 @@ import { execSync } from "child_process";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-const getTaskId = (): string => process.env.AGENT_TASK_ID ?? "";
+// Task reference: a wrapper (omp-wrapper) or sandbox attach exports
+// AGENT_TASK_ID and it is used as-is. Sessions launched without one —
+// `omp -p` in a script, a bare shell, a `nibble sandbox bash` shell — are
+// still tracked via a stable ID derived from the omp session file:
+// <agent>-<session_id>. nibble self-heals unknown rows
+// (ensure_task_or_create: agent type from NIBBLE_AGENT_TYPE, title/cwd from
+// this process), so the derived row appears with no wrapper involved.
+let seenSessionFile = "";
+let derivedTaskId = "";
+const noteSessionFile = (file: string): void => {
+	if (!file || file === seenSessionFile) return;
+	seenSessionFile = file;
+	// Session files are named <timestamp>_<session-id>.jsonl[.gz]
+	const base = file.split("/").pop() ?? "";
+	const sid = base.replace(/\.jsonl(\.gz)?$/, "").split("_").pop() ?? "";
+	if (sid) derivedTaskId = `${agentType()}-${sid}`;
+};
+const getTaskId = (): string => process.env.AGENT_TASK_ID || derivedTaskId;
+
+// Which pi-family host app is running this extension, so self-healed task
+// rows created by `nibble report status` carry the right agent label.
+// Check argv first (the host binary path contains "omp"/"oh-my-pi"), then
+// fall back to the config dir the session file lives under.
+const agentType = (): string => {
+	const argv = process.argv.join(" ");
+	if (/oh-my-pi|\bomp\b/.test(argv)) return "omp";
+	if (process.env.AGENT_TASK_SESSION?.includes("/.omp/")) return "omp";
+	return "pi";
+};
 
 const capture = (
 	taskId: string,
@@ -63,18 +91,6 @@ const summarize = (taskId: string): void => {
 	}
 };
 
-const reportSessionPath = (taskId: string, path: string): void => {
-	if (!taskId || !path) return;
-
-	try {
-		execSync(
-			`nibble report session-path '${taskId.replace(/'/g, "'\\''")}' '${path.replace(/'/g, "'\\''")}'`,
-			{ timeout: 5000, stdio: "pipe" },
-		);
-	} catch {
-		// Non-fatal: session-path reporting is best-effort
-	}
-};
 
 const reportStatus = (taskId: string, state: string): void => {
 	if (!taskId) return;
@@ -83,9 +99,28 @@ const reportStatus = (taskId: string, state: string): void => {
 		execSync(`nibble report status '${taskId.replace(/'/g, "'\\''")}' '${state}'`, {
 			timeout: 5000,
 			stdio: "pipe",
+			env: { ...process.env, NIBBLE_AGENT_TYPE: agentType() },
 		});
 	} catch {
-		// Non-fatal: status reporting is best-effort
+		// Non-fatal: status reporting is best-effort. A missing task row is
+		// self-healed by nibble itself (ensure_task_or_create).
+	}
+};
+
+const reportSessionPath = (taskId: string, path: string): void => {
+	if (!taskId || !path) return;
+
+	try {
+		execSync(
+			`nibble report session-path '${taskId.replace(/'/g, "'\\''")}' '${path.replace(/'/g, "'\\''")}'`,
+			{
+				timeout: 5000,
+				stdio: "pipe",
+				env: { ...process.env, NIBBLE_AGENT_TYPE: agentType() },
+			},
+		);
+	} catch {
+		// Non-fatal: session-path reporting is best-effort
 	}
 };
 
@@ -165,14 +200,19 @@ export default function (pi: ExtensionAPI) {
 	// ── session_start: report the session file path to nibble ────────────
 	// Fires on both fresh and resumed sessions (also when the user switches
 	// sessions mid-run via /resume), so the DB mapping always tracks the
-	// session this task is actually in. --btw side sessions have no
-	// AGENT_TASK_ID and correctly no-op here.
+	// session this task is actually in. Wrapped sessions report under their
+	// AGENT_TASK_ID; unwrapped ones adopt the derived <agent>-<session_id>.
 	const reportCurrentSession = (ctx: unknown): void => {
-		const taskId = getTaskId();
-		if (!taskId) return;
-		const file = (ctx as any)?.sessionManager?.getSessionFile?.();
+		// Structural access — the extension ctx type doesn't export this
+		// field, so narrow without `any`.
+		const sm = (
+			ctx as { sessionManager?: { getSessionFile?: () => unknown } } | null
+		)?.sessionManager;
+		const file = sm?.getSessionFile?.();
 		if (typeof file === "string" && file) {
-			reportSessionPath(taskId, file);
+			noteSessionFile(file);
+			const taskId = getTaskId();
+			if (taskId) reportSessionPath(taskId, file);
 		}
 	};
 	// ── agent_settled: status → completed (only when truly idle) ───────────
@@ -194,11 +234,12 @@ export default function (pi: ExtensionAPI) {
 
 	// Fallback for agents whose session_start fires before the session file
 	// path is known: retry on the first agent turn. Also flips live status to
-	// running for the nibble status sidebar.
+	// running for the nibble status sidebar. Session file is noted first so
+	// unwrapped sessions already have their derived task ID here.
 	pi.on("agent_start", async (_event, ctx) => {
+		reportCurrentSession(ctx);
 		const taskId = getTaskId();
 		if (taskId) reportStatus(taskId, "running");
-		reportCurrentSession(ctx);
 	});
 	pi.on("session_shutdown", async (_event, _ctx) => {
 		const taskId = getTaskId();
