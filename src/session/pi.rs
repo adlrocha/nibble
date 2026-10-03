@@ -50,7 +50,33 @@ pub(crate) fn mount_agent_config_dir(
             .with_context(|| format!("Failed to create ~/{dir_name}/agent/extensions"))?;
         extra_volumes.push(format!("{}:/home/node/{dir_name}:rw", pi_dir.display()));
     }
+    mount_sessions_overlay(home_dir, dir_name, extra_volumes);
     Ok(())
+}
+
+/// Session transcripts may live behind a symlink (the consolidated
+/// `~/.nibble/sessions/<dir>` layout keeps the corpus in nibble's data dir
+/// with symlinks back at the agent paths). A symlink resolves against its
+/// *physical* parent, which can differ between host and container (e.g. a
+/// stow-managed `~/.pi/agent` lives deeper in a dotfiles repo than the
+/// container's `/home/node/.pi/agent`), so the link can dangle in the
+/// sandbox even when it resolves on the host. Overlay the resolved target
+/// over the container's sessions path — same pattern as the agent-dir
+/// overlay above — so transcripts are reachable from both namespaces.
+fn mount_sessions_overlay(
+    home_dir: &std::path::Path,
+    dir_name: &str,
+    extra_volumes: &mut Vec<String>,
+) {
+    let sessions = home_dir.join(dir_name).join("agent").join("sessions");
+    if sessions.is_symlink() {
+        if let Ok(resolved) = sessions.canonicalize() {
+            extra_volumes.push(format!(
+                "{}:/home/node/{dir_name}/agent/sessions:rw",
+                resolved.display()
+            ));
+        }
+    }
 }
 
 /// Ensure `~/<dir>/agent/skills` is a symlink pointing to `~/.claude/skills/`.
@@ -290,6 +316,42 @@ pub(crate) fn pi_session_path_candidates(stored: &str, roots: &[&str]) -> Vec<st
 #[cfg(test)]
 mod tests {
     use super::{list_pi_sessions_for_cwd_with_home, pi_session_path_candidates};
+    use super::mount_agent_config_dir;
+    use std::path::PathBuf;
+
+    #[test]
+    fn sessions_symlink_gets_container_overlay() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let corpus = home.join(".nibble/sessions/omp");
+        std::fs::create_dir_all(&corpus).unwrap();
+        std::fs::create_dir_all(home.join(".omp/agent")).unwrap();
+        std::os::unix::fs::symlink(&corpus, home.join(".omp/agent/sessions")).unwrap();
+
+        let mut volumes = Vec::new();
+        mount_agent_config_dir(&PathBuf::from(home), ".omp", &mut volumes).unwrap();
+
+        let overlay = format!("{}:/home/node/.omp/agent/sessions:rw", corpus.display());
+        assert!(
+            volumes.contains(&overlay),
+            "symlinked sessions must be overlaid in the container, got {volumes:?}"
+        );
+    }
+
+    #[test]
+    fn plain_sessions_dir_gets_no_overlay() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        std::fs::create_dir_all(home.join(".omp/agent/sessions")).unwrap();
+
+        let mut volumes = Vec::new();
+        mount_agent_config_dir(&PathBuf::from(home), ".omp", &mut volumes).unwrap();
+
+        assert!(
+            !volumes.iter().any(|v| v.ends_with("/agent/sessions:rw")),
+            "real sessions dir needs no overlay, got {volumes:?}"
+        );
+    }
 
     #[test]
     fn candidates_pi_root_returns_pi_path() {
