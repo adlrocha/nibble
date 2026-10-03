@@ -80,3 +80,27 @@ identity when `AGENT_TASK_ID` is absent:
   `.tool_output` on PostToolUse) may not match current Claude Code payload
   keys (`.prompt`, `.tool_response`); status reporting is unaffected.
   Left unchanged pending ground truth.
+
+## Addendum: consolidated session corpus (~/.nibble/sessions)
+
+A parallel migration moved all transcripts into
+`~/.nibble/sessions/{omp,pi,claude/projects}` with symlinks back at the
+agent paths. Audit of that move and the final design:
+
+- Absolute symlinks dangled inside sandboxes (container home is
+  `/home/node`, and `~/.pi/agent` itself is a dotfiles symlink at a
+  different depth) → omp/pi sessions were unreadable in new containers.
+- `nibble backup --sessions` walked with `follow_links(false)`, so a
+  symlinked source archived as an empty dir — silent total backup loss.
+- Final layout: corpus stays in `~/.nibble/sessions` (one place); agent
+  paths keep **relative** symlinks (omp/claude resolve identically in
+  host and container); `mount_agent_config_dir` overlays a symlinked
+  sessions dir into the container (same pattern as the agent-dir
+  overlay), making pi's dotfiles-depth link work in sandboxes too.
+- `nibble backup` now canonicalizes symlinked sources and **always**
+  includes the corpus (~/.nibble/sessions lives inside the backed-up
+  tree); `--sessions` skips agent paths that resolve into the corpus so
+  nothing is archived twice.
+- Verified: fresh sandbox read+write through the overlay lands in the
+  host corpus; unwrapped `omp -p`/`claude -p` tracked end-to-end on the
+  new layout; real backup inspected entry-by-entry.

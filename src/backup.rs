@@ -163,11 +163,25 @@ pub fn create_backup(output: Option<PathBuf>, include_sessions: bool) -> Result<
 
     // Source subtrees: (absolute dir, zip prefix, apply ~/.nibble skip-rules).
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Cannot find home directory"))?;
+    let corpus_root = source.join("sessions");
     let mut sources: Vec<(PathBuf, PathBuf, bool)> =
         vec![(source.clone(), PathBuf::from(".nibble"), true)];
     if include_sessions {
         for rel in [".pi/agent/sessions", ".omp/agent/sessions", ".claude/projects"] {
             let dir = home.join(rel);
+            // The consolidated layout symlinks these paths into
+            // ~/.nibble/sessions, which the base source above already
+            // archives — adding them again would duplicate every
+            // transcript in the zip. Only include paths that still hold
+            // data outside the corpus (e.g. a not-yet-migrated machine).
+            let in_corpus = dir
+                .canonicalize()
+                .ok()
+                .map(|c| c.starts_with(&corpus_root))
+                .unwrap_or(false);
+            if in_corpus {
+                continue;
+            }
             if dir.exists() {
                 sources.push((dir, PathBuf::from(rel), false));
             } else {
@@ -176,16 +190,25 @@ pub fn create_backup(output: Option<PathBuf>, include_sessions: bool) -> Result<
         }
     }
 
-    for (src, zip_prefix, apply_skip) in &sources {
-        println!("Backing up {} ...", src.display());
+    for (src_raw, zip_prefix, apply_skip) in &sources {
+        println!("Backing up {} ...", src_raw.display());
+
+        // Resolve a symlinked source root (the consolidated session layout
+        // symlinks ~/.omp/agent/sessions & co. into ~/.nibble/sessions):
+        // WalkDir with follow_links(false) would yield the link itself and
+        // never descend, silently archiving an empty dir instead of the
+        // transcripts.
+        let src = src_raw
+            .canonicalize()
+            .unwrap_or_else(|_| src_raw.clone());
 
         // Walk the subtree and add every file / empty directory.
         // Use into_iter() so we can skip whole subtrees (e.g. cache/).
-        let mut walker = WalkDir::new(src).follow_links(false).into_iter();
+        let mut walker = WalkDir::new(&src).follow_links(false).into_iter();
         while let Some(entry) = walker.next() {
             let entry = entry?;
             let path = entry.path();
-            let rel = path.strip_prefix(src).with_context(|| {
+            let rel = path.strip_prefix(&src).with_context(|| {
                 format!(
                     "Failed to strip prefix {} from {}",
                     src.display(),
@@ -193,12 +216,9 @@ pub fn create_backup(output: Option<PathBuf>, include_sessions: bool) -> Result<
                 )
             })?;
 
-            if *apply_skip && should_skip(rel) {
-                if path.is_dir() {
-                    walker.skip_current_dir();
-                }
-                continue;
-            }
+            // Note: the consolidated session corpus (~/.nibble/sessions) is
+            // intentionally INCLUDED in every backup — sessions are the
+            // irreplaceable data. Only cache dirs are skipped.
 
             let name_in_zip = zip_prefix.join(rel);
             let name_str = name_in_zip.to_string_lossy();
