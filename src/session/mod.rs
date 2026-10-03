@@ -851,6 +851,118 @@ pub fn format_workspace(ws: Option<&str>) -> String {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+// Last assistant message extraction (for Telegram safety-net)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// Best-effort extraction of the last assistant message for a task.
+/// Used by the Telegram listener safety-net to send actual output instead
+/// of a generic "Agent turn complete" message.
+pub fn last_assistant_message_for_task(task: &crate::models::Task) -> Option<String> {
+    let home = dirs::home_dir().unwrap_or_default();
+
+    match task.agent_type {
+        crate::models::AgentType::ClaudeCode => {
+            let sid = task.context.as_ref()?.claude_session_id.as_deref()?;
+            let sesh = find_session_by_id_with_home(sid, &home)?;
+            extract_last_assistant_message(&sesh)
+        }
+        crate::models::AgentType::Pi | crate::models::AgentType::Omp => {
+            let container_path = task
+                .context
+                .as_ref()?
+                .extra
+                .get("pi_session_path")?
+                .as_str()?;
+            // Convert container path to host path
+            let host_path = if container_path.starts_with("/home/node/") {
+                home.join(container_path.strip_prefix("/home/node/")?)
+            } else {
+                std::path::PathBuf::from(container_path)
+            };
+            if !host_path.exists() {
+                return None;
+            }
+            let content = read_session_text(&host_path)?;
+            extract_last_assistant_from_pi_content(&content)
+        }
+        _ => None,
+    }
+}
+
+/// Extract the last assistant message text from a session file.
+pub fn extract_last_assistant_message(session: &SessionInfo) -> Option<String> {
+    let content = fs::read_to_string(&session.path).ok()?;
+    match session.agent.as_str() {
+        "claude" => extract_last_assistant_from_claude_content(&content),
+        _ => None,
+    }
+}
+
+fn extract_last_assistant_from_claude_content(content: &str) -> Option<String> {
+    // Scan lines in reverse to find the most recent assistant turn.
+    for line in content.lines().rev() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let val: serde_json::Value = serde_json::from_str(line).ok()?;
+        if val.get("type").and_then(|v| v.as_str()) != Some("assistant") {
+            continue;
+        }
+        let msg = val.get("message")?;
+        let text_parts = msg
+            .get("content")
+            .and_then(|c| c.as_array())?
+            .iter()
+            .filter_map(|item| {
+                if item.get("type").and_then(|v| v.as_str()) == Some("text") {
+                    item.get("text").and_then(|v| v.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        let text = text_parts.join("\n").trim().to_string();
+        if !text.is_empty() {
+            return Some(text);
+        }
+    }
+    None
+}
+
+fn extract_last_assistant_from_pi_content(content: &str) -> Option<String> {
+    // Pi JSONL: scan in reverse for {"type":"message","message":{"role":"assistant",...}}
+    for line in content.lines().rev() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let val: serde_json::Value = serde_json::from_str(line).ok()?;
+        if val.get("type").and_then(|v| v.as_str()) != Some("message") {
+            continue;
+        }
+        let msg = val.get("message")?;
+        if msg.get("role").and_then(|v| v.as_str()) != Some("assistant") {
+            continue;
+        }
+        let text = if let Some(arr) = msg.get("content").and_then(|c| c.as_array()) {
+            arr.iter()
+                .filter_map(|item| item.get("text").and_then(|v| v.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            msg.get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
+        let text = text.trim().to_string();
+        if !text.is_empty() {
+            return Some(text);
+        }
+    }
+    None
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 // Tests
 // ══════════════════════════════════════════════════════════════════════════════
 

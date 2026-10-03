@@ -37,6 +37,12 @@ pub enum Commands {
         /// Include exited tasks (dimmed at the bottom)
         #[arg(short, long)]
         all: bool,
+        /// Delete exited task rows. Does not stop containers.
+        #[arg(long)]
+        clear: bool,
+        /// Stop every sandbox and delete every task row.
+        #[arg(long)]
+        scratch: bool,
     },
 
     /// Open the agent-status side panel in the current zellij session
@@ -48,6 +54,55 @@ pub enum Commands {
         /// Remove the nibble-managed zellij layout files
         #[arg(long)]
         uninstall: bool,
+        /// Focus the sidebar pane, opening it first if it is not open.
+        #[arg(long, conflicts_with = "close")]
+        focus: bool,
+        /// Close the sidebar pane in this tab.
+        #[arg(long)]
+        close: bool,
+    },
+
+    /// Inject a message into a running sandbox agent (bypasses Telegram)
+    Inject {
+        /// Task ID of the agent to inject into
+        task_id: String,
+        /// Message to send
+        message: String,
+    },
+    /// Run the Telegram long-polling daemon (routes phone replies back to agents)
+    Listen,
+
+    /// Run the quota auto-continue daemon (watch for subscription quota
+    /// errors in agent sessions and continue the tasks once the quota resets)
+    QuotaWatch {
+        /// Run one scan-and-attempt pass and exit (testing / manual trigger)
+        #[arg(long)]
+        once: bool,
+    },
+    /// Send a Telegram notification (used by hooks and wrappers)
+    Notify {
+        /// Message body to send (agent last output or permission request)
+        #[arg(short, long)]
+        message: String,
+
+        /// Optional task ID to attach context (agent type, title, elapsed time)
+        #[arg(short, long)]
+        task_id: Option<String>,
+
+        /// Mark this as an attention-required notification (permission request, question, etc.)
+        /// Uses a distinct visual style so it stands out from regular completion notifications.
+        #[arg(long)]
+        attention: bool,
+    },
+    /// Manage scheduled cron jobs for sandboxes
+    Cron {
+        #[command(subcommand)]
+        action: CronAction,
+    },
+    /// List and manage local LLM model files
+    Lm {
+        #[command(subcommand)]
+        action: LmAction,
     },
 
     /// Jump to the zellij pane hosting an agent (task ID or unique prefix)
@@ -160,6 +215,9 @@ pub enum ReportAction {
         /// Zellij pane ID
         #[arg(long)]
         zellij_pane_id: Option<u32>,
+        /// Zellij session name (needed to target panes from outside the session)
+        #[arg(long)]
+        zellij_session: Option<String>,
         /// Session ID (if already known at startup)
         #[arg(long)]
         session_id: Option<String>,
@@ -599,5 +657,114 @@ pub enum SessionAction {
         /// Output raw JSON/JSONL instead of formatted transcript
         #[arg(long)]
         raw: bool,
+    },
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum CronAction {
+    /// Add a new cron job targeting a repo path.
+    /// At trigger time nibble will find or spawn a sandbox for that repo automatically.
+    Add {
+        /// Path to the repository this cron job targets.
+        /// If omitted, repo_path must be set in the --file markdown.
+        #[arg(short, long)]
+        repo: Option<String>,
+
+        /// Cron schedule expression (e.g., "0 9 * * 1-5" for 9am weekdays)
+        #[arg(short, long)]
+        schedule: Option<String>,
+
+        /// Prompt text to send (alternative to --file)
+        #[arg(short, long)]
+        prompt: Option<String>,
+
+        /// Path to markdown file with cron definition
+        #[arg(short, long)]
+        file: Option<String>,
+
+        /// Label/name for this cron job
+        #[arg(short, long)]
+        label: Option<String>,
+
+        /// Expiry datetime in RFC3339 format (e.g. "2026-04-01T00:00:00Z").
+        /// Job is auto-disabled after this time.
+        #[arg(long)]
+        expires: Option<String>,
+    },
+
+    /// List cron jobs (optionally filtered by repo path)
+    List {
+        /// Optional canonical repo path to filter by
+        repo_path: Option<String>,
+    },
+
+    /// Edit an existing cron job
+    Edit {
+        /// Cron job ID or label
+        id: String,
+
+        /// New schedule expression
+        #[arg(short, long)]
+        schedule: Option<String>,
+
+        /// New prompt text
+        #[arg(short, long)]
+        prompt: Option<String>,
+
+        /// New label
+        #[arg(short, long)]
+        label: Option<String>,
+
+        /// Enable the cron job
+        #[arg(long)]
+        enable: bool,
+
+        /// Disable the cron job
+        #[arg(long)]
+        disable: bool,
+
+        /// Set or update expiry datetime in RFC3339 format (e.g. "2026-04-01T00:00:00Z").
+        /// Pass "none" to remove an existing expiry.
+        #[arg(long)]
+        expires: Option<String>,
+    },
+
+    /// Disable a cron job without deleting it (can be re-enabled with start)
+    Stop {
+        /// Cron job ID or label
+        id: String,
+    },
+
+    /// Re-enable a previously stopped cron job
+    Start {
+        /// Cron job ID or label
+        id: String,
+    },
+
+    /// Delete a cron job
+    Kill {
+        /// Cron job ID or label
+        id: String,
+    },
+
+    /// Run a cron job immediately (for testing)
+    Run {
+        /// Cron job ID or label
+        id: String,
+    },
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum LmAction {
+    /// List all .gguf model files found in configured model directories
+    List,
+
+    /// Switch the active model and restart llama-server
+    ///
+    /// Accepts a partial model name (e.g. "gemma", "Qwen3").
+    /// Sampling parameters are read from profiles.toml in the model directory.
+    Use {
+        /// Partial or full filename of the .gguf model to activate
+        model: String,
     },
 }

@@ -1,0 +1,648 @@
+#!/usr/bin/env python3
+"""Collect Z.AI / Kimi / Grok coding-subscription usage into omarchy agents-panel records.
+
+The Omarchy `omarchy.agents` bar panel renders one JSON record per AI coding
+subscription from `~/.local/state/omarchy/agents/usage/<id>.json` (the same
+records `omarchy-agent-usage-update` writes for the packaged collectors). The
+packaged collector loop only scans `$OMARCHY_PATH/bin`, which is package-owned,
+so this script writes records into that directory itself — the panel picks up
+any record that appears there, no matter who wrote it.
+
+Record contract (mirrors omarchy-agent-usage-claude):
+  percent           0..1 fraction of the allowance used
+  resetsAt          ISO-8601 UTC timestamp, "" when unknown
+  balance           prepaid credit ledger {remaining, funded, spent, currency, estimated}
+  tierLabel         plan name
+  usageStatusText / authHelpText   status headline + how to fix auth problems
+
+Usage:
+  nibble-agent-usage zai                     # print one record as JSON
+  nibble-agent-usage zai kimi grok --write   # atomically write each record
+  nibble-agent-usage all --write --force     # all agents, ignore probe cache
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import sqlite3
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+PROBE_MIN_INTERVAL_SECONDS = 600
+HTTP_TIMEOUT = 10
+
+ZAI_QUOTA_URL = "https://api.z.ai/api/monitor/usage/quota/limit"
+KIMI_USAGE_URL = "https://api.kimi.com/coding/v1/usages"
+GROK_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
+GROK_SUBSCRIPTIONS_URL = "https://grok.com/rest/subscriptions"
+XAI_BALANCE_URL = "https://management-api.x.ai/v1/billing/teams/{team}/prepaid/balance"
+
+# token_usage.api_provider values that belong to each subscription, for local
+# token stats out of nibble's ~/.nibble/tasks.db.
+API_PROVIDERS = {
+    "zai": ("zai",),
+    "kimi": ("kimi-coding", "kimi"),
+    "grok": ("xai", "grok"),
+}
+
+AUTH_HELP = {
+    "zai": "Set ZAI_API_KEY or sign in to the Z.AI coding plan in opencode.",
+    "kimi": "Set KIMI_API_KEY or sign in to Kimi for Coding in opencode.",
+    "grok": "Sign in with the grok CLI (writes ~/.grok/auth.json), or set XAI_MANAGEMENT_KEY and XAI_TEAM_ID for prepaid balance.",
+}
+
+
+def state_dir() -> Path:
+    root = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "omarchy/agents/usage"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def cache_root() -> Path:
+    root = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "omarchy/agent-usage"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def write_json(path: Path, payload: dict) -> None:
+    # Atomic replace so the panel's file watcher never sees a partial record;
+    # a unique temp name because collectors can run concurrently.
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n")
+        tmp.chmod(0o600)
+        tmp.replace(path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def read_json(path: Path) -> dict | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def number(value) -> float:
+    try:
+        n = float(str(value).strip())
+        return n if n == n else 0.0
+    except Exception:
+        return 0.0
+
+
+def normalize_reset(value) -> str:
+    """Epoch seconds/milliseconds or ISO-8601 → ISO-8601 UTC string."""
+    if value is None:
+        return ""
+    raw = str(value).strip()
+    if raw == "":
+        return ""
+    if raw.isdigit():
+        ts = int(raw)
+        if ts < 1e12:
+            ts *= 1000
+        try:
+            return dt.datetime.fromtimestamp(ts / 1000, dt.timezone.utc).isoformat()
+        except Exception:
+            return raw
+    try:
+        return dt.datetime.fromisoformat(raw.replace("Z", "+00:00")).isoformat()
+    except Exception:
+        return raw
+
+
+def clamp_fraction(used_percent) -> float:
+    """A used-percentage figure → 0..1 fraction, -1 when unusable."""
+    n = number(used_percent)
+    if n < 0 or (n == 0 and str(used_percent).strip() in ("", "None")):
+        return -1.0
+    return max(0.0, min(1.0, n / 100.0))
+
+
+def limit_window_open(entry: dict, now: dt.datetime) -> bool:
+    raw = str(entry.get("resetsAt") or "")
+    if raw == "":
+        return True
+    try:
+        resets_at = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        return True
+    if resets_at.tzinfo is None:
+        resets_at = resets_at.replace(tzinfo=dt.timezone.utc)
+    return resets_at > now
+
+
+def cached_limits(agent_id: str, force: bool) -> tuple[list, float, str]:
+    """Last known limits (window-open entries only), fetch time, and plan label."""
+    cached = read_json(cache_root() / f"{agent_id}-limits.json") or {}
+    now = dt.datetime.now(dt.timezone.utc)
+    entries = [e for e in (cached.get("limits") or []) if isinstance(e, dict) and limit_window_open(e, now)]
+    return entries, number(cached.get("fetchedAtMs")) / 1000.0, str(cached.get("tierLabel") or "")
+
+
+def store_limits(agent_id: str, limits: list, tier: str = "") -> None:
+    write_json(cache_root() / f"{agent_id}-limits.json", {
+        "fetchedAtMs": round(time.time() * 1000),
+        "limits": limits,
+        "tierLabel": tier,
+    })
+
+
+def http_get_json(url: str, headers: dict) -> tuple[dict | None, str]:
+    """Returns (payload, error). Exactly one is None/empty."""
+    request = urllib.request.Request(url, headers={"Accept": "application/json", **headers})
+    try:
+        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT) as response:
+            return json.loads(response.read().decode("utf-8", errors="replace")), ""
+    except urllib.error.HTTPError as error:
+        return None, f"endpoint returned status {error.code}"
+    except Exception:
+        return None, "couldn't reach the endpoint"
+
+
+def base_record(agent_id: str) -> dict:
+    return {
+        "schemaVersion": 1,
+        "id": agent_id,
+        "updatedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "ready": False,
+        "hasLocalStats": True,
+        "tierLabel": "",
+        "usageStatusText": "",
+        "authHelpText": AUTH_HELP[agent_id],
+        "limits": [],
+        "balance": None,
+        "todayPrompts": 0,
+        "todaySessions": 0,
+        "todayTotalTokens": 0,
+        "todayTokensByModel": {},
+        "recentDays": [],
+        "totalPrompts": 0,
+        "totalSessions": 0,
+        "activeDays": 0,
+        "activeDates": [],
+        "modelUsage": {},
+    }
+
+
+# ------------------------------------------------------------ local token stats
+
+
+def local_stats(agent_id: str) -> dict:
+    """Token stats for this subscription from nibble's token_usage table."""
+    empty = {
+        "todayPrompts": 0, "todaySessions": 0, "todayTotalTokens": 0,
+        "todayTokensByModel": {}, "recentDays": [], "totalPrompts": 0,
+        "totalSessions": 0, "activeDays": 0, "activeDates": [], "modelUsage": {},
+    }
+    db_path = Path.home() / ".nibble" / "tasks.db"
+    if not db_path.exists():
+        return empty
+    providers = API_PROVIDERS[agent_id]
+    placeholders = ",".join("?" for _ in providers)
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=3)
+        try:
+            rows = con.execute(
+                f"""SELECT ts, model, session_id, input_tokens, output_tokens,
+                           cache_read_tokens, cache_write_tokens
+                    FROM token_usage WHERE api_provider IN ({placeholders})""",
+                providers,
+            ).fetchall()
+        finally:
+            con.close()
+    except Exception:
+        return empty
+
+    today = dt.datetime.now().astimezone().date()
+    recent: dict[str, int] = {}
+    by_model: dict[str, dict[str, int]] = {}
+    sessions: set[str] = set()
+    dates: set[str] = set()
+    today_total = 0
+    today_by_model: dict[str, int] = {}
+    today_sessions: set[str] = set()
+    today_rows = 0
+
+    for ts, model, session_id, tin, tout, cread, cwrite in rows:
+        day = dt.datetime.fromtimestamp(ts or 0, dt.timezone.utc).astimezone().date()
+        day_str = day.isoformat()
+        total = (tin or 0) + (tout or 0) + (cread or 0) + (cwrite or 0)
+        if total <= 0:
+            continue
+        model = model or "unknown"
+        dates.add(day_str)
+        sessions.add(str(session_id or ""))
+        bucket = by_model.setdefault(model, {
+            "inputTokens": 0, "outputTokens": 0,
+            "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0,
+        })
+        bucket["inputTokens"] += tin or 0
+        bucket["outputTokens"] += tout or 0
+        bucket["cacheReadInputTokens"] += cread or 0
+        bucket["cacheCreationInputTokens"] += cwrite or 0
+        if (today - day).days < 7:
+            recent[day_str] = recent.get(day_str, 0) + total
+        if day == today:
+            today_rows += 1
+            today_total += total
+            today_by_model[model] = today_by_model.get(model, 0) + total
+            today_sessions.add(str(session_id or ""))
+
+    days = [(today - dt.timedelta(days=o)).isoformat() for o in range(6, -1, -1)]
+    return {
+        "todayPrompts": today_rows,
+        "todaySessions": len(today_sessions),
+        "todayTotalTokens": today_total,
+        "todayTokensByModel": today_by_model,
+        "recentDays": [{"date": d, "messageCount": recent.get(d, 0)} for d in days],
+        "totalPrompts": len(rows),
+        "totalSessions": len(sessions),
+        "activeDays": len(dates),
+        "activeDates": sorted(dates),
+        "modelUsage": by_model,
+    }
+
+
+# ------------------------------------------------------------------- credentials
+
+
+def opencode_auth_key(record_key: str) -> str:
+    path = Path.home() / ".local/share/opencode/auth.json"
+    data = read_json(path)
+    if not isinstance(data, dict):
+        return ""
+    entry = data.get(record_key)
+    if isinstance(entry, dict):
+        return str(entry.get("key") or "")
+    return ""
+
+
+def secrets_file_key(var: str) -> str:
+    """Read `export VAR=value` from the user's zsh secrets file.
+
+    systemd timers and the omarchy shell don't source the interactive shell
+    config, so keys that only live there never reach the collector through
+    the process environment.
+    """
+    for path in (Path.home() / ".config/zsh/.zsh_secrets", Path.home() / ".zsh_secrets"):
+        if not path.is_file():
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except Exception:
+            continue
+        for line in lines:
+            match = re.match(rf"\s*(?:export\s+)?{var}=(.*)$", line)
+            if match:
+                value = match.group(1).strip().strip('"').strip("'")
+                if value:
+                    return value
+    return ""
+
+
+# ------------------------------------------------------------------------- Z.AI
+
+
+def zai_limits(force: bool) -> dict:
+    cached, fetched_at, cached_tier = cached_limits("zai", force)
+    key = (os.environ.get("ZAI_API_KEY") or os.environ.get("ZAI_CODING_PLAN_API_KEY")
+           or secrets_file_key("ZAI_API_KEY") or secrets_file_key("ZAI_CODING_PLAN_API_KEY")
+           or opencode_auth_key("zai-coding-plan"))
+    result: dict = {"limits": cached, "tierLabel": cached_tier, "usageStatusText": "", "authHelpText": AUTH_HELP["zai"]}
+    if not key:
+        result["usageStatusText"] = "Waiting for auth"
+        return result
+    if cached and not force and time.time() - fetched_at < PROBE_MIN_INTERVAL_SECONDS:
+        return result
+
+    payload, error = http_get_json(ZAI_QUOTA_URL, {"Authorization": key})
+    if payload is None:
+        result["usageStatusText"] = f"Z.AI limits unavailable ({error})"
+        return result
+
+    data = payload.get("data") if isinstance(payload, dict) else None
+    entries = data.get("limits") if isinstance(data, dict) else None
+    if not isinstance(entries, list) or not entries:
+        # The monitor endpoint answers auth problems with an error envelope
+        # ({"code": 1000, "msg": "Authentication Failed"}) rather than a 401.
+        code = payload.get("code") if isinstance(payload, dict) else None
+        if code not in (None, 200, "200"):
+            result["usageStatusText"] = "Z.AI key rejected (code {})".format(code)
+        else:
+            result["usageStatusText"] = "Z.AI returned no quota windows"
+        return result
+
+    level = str((data or {}).get("level") or "").strip()
+    limits = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        etype = str(entry.get("type") or "")
+        unit = entry.get("unit")
+        percent = clamp_fraction(entry.get("percentage"))
+        if percent < 0:
+            continue
+        if etype == "TOKENS_LIMIT":
+            # unit 3 = 5-hour window, unit 6 = weekly (per opencode-quota).
+            label = "Session (5-hour)" if unit == 3 else "Weekly (7-day)" if unit == 6 else "Token allowance"
+        elif etype == "TIME_LIMIT":
+            label = "Monthly credits"
+        else:
+            continue
+        limits.append({"label": label, "percent": percent, "resetsAt": normalize_reset(entry.get("nextResetTime"))})
+
+    if not limits:
+        result["usageStatusText"] = "Z.AI returned no readable quota windows"
+        return result
+    limits.sort(key=lambda e: 0 if e["label"].startswith("Session") else 1 if e["label"].startswith("Weekly") else 2)
+    result["limits"] = limits
+    result["tierLabel"] = "GLM Coding " + (level[:1].upper() + level[1:] if level else "")
+    result["ok"] = True
+    store_limits("zai", limits, result["tierLabel"])
+    return result
+
+
+# ------------------------------------------------------------------------- Kimi
+
+
+def kimi_limits(force: bool) -> dict:
+    cached, fetched_at, cached_tier = cached_limits("kimi", force)
+    key = (os.environ.get("KIMI_API_KEY") or os.environ.get("KIMI_CODE_API_KEY")
+           or secrets_file_key("KIMI_API_KEY") or secrets_file_key("KIMI_CODE_API_KEY")
+           or opencode_auth_key("kimi-for-coding"))
+    result: dict = {"limits": cached, "tierLabel": cached_tier, "usageStatusText": "", "authHelpText": AUTH_HELP["kimi"]}
+    if not key:
+        result["usageStatusText"] = "Waiting for auth"
+        return result
+    if cached and not force and time.time() - fetched_at < PROBE_MIN_INTERVAL_SECONDS:
+        return result
+
+    payload, error = http_get_json(KIMI_USAGE_URL, {"Authorization": "Bearer " + key})
+    if payload is None:
+        result["usageStatusText"] = f"Kimi limits unavailable ({error})"
+        return result
+    if not isinstance(payload, dict):
+        result["usageStatusText"] = "Kimi returned an unreadable usage payload"
+        return result
+
+    def window_entry(label: str, detail: dict) -> dict | None:
+        limit = number(detail.get("limit"))
+        used = number(detail.get("used"))
+        ratio = detail.get("used_ratio") or detail.get("usedRatio")
+        if ratio is not None:
+            try:
+                fraction = max(0.0, min(1.0, float(ratio)))
+            except Exception:
+                return None
+        elif limit > 0:
+            fraction = max(0.0, min(1.0, used / limit))
+        else:
+            return None
+        reset = detail.get("resetTime") or detail.get("reset_time") or detail.get("resetAt") or detail.get("reset_at") or ""
+        return {"label": label, "percent": fraction, "resetsAt": normalize_reset(reset)}
+
+    limits = []
+    usages = payload.get("usages")
+    if isinstance(usages, dict):
+        for key_name, label in (("limit_5h", "Session (5-hour)"), ("limit_7d", "Weekly (7-day)")):
+            block = usages.get(key_name)
+            if isinstance(block, dict):
+                entry = window_entry(label, block)
+                if entry:
+                    limits.append(entry)
+    if not limits:
+        # Fall back to the raw windows: `usage` is the period block, `limits[]`
+        # carries the 5-hour rolling window (duration 300 minutes).
+        usage = payload.get("usage")
+        if isinstance(usage, dict):
+            entry = window_entry("Weekly (7-day)", usage)
+            if entry:
+                limits.append(entry)
+        for block in payload.get("limits") or []:
+            window = block.get("window") if isinstance(block, dict) else None
+            detail = block.get("detail") if isinstance(block, dict) else None
+            if isinstance(window, dict) and isinstance(detail, dict) and window.get("timeUnit") == "TIME_UNIT_MINUTE" and window.get("duration") == 300:
+                entry = window_entry("Session (5-hour)", detail)
+                if entry:
+                    limits.append(entry)
+
+    if not limits:
+        result["usageStatusText"] = "Kimi returned no readable usage windows"
+        return result
+    limits.sort(key=lambda e: 0 if e["label"].startswith("Session") else 1)
+    result["limits"] = limits
+    user = payload.get("user")
+    membership = user.get("membership") if isinstance(user, dict) else None
+    level = membership.get("level") if isinstance(membership, dict) else ""
+    result["tierLabel"] = str(level).replace("_", " ").title() if level else "Kimi for Coding"
+    result["ok"] = True
+    store_limits("kimi", limits, result["tierLabel"])
+    return result
+
+
+# -------------------------------------------------------------------------- Grok
+
+
+def grok_cli_auth() -> tuple[str, int]:
+    """(access token, expires epoch seconds) from the grok CLI login file."""
+    path = Path.home() / ".grok" / "auth.json"
+    data = read_json(path)
+    if not isinstance(data, dict):
+        return "", 0
+    best = ("", 0.0)
+    for entry in data.values():
+        if not isinstance(entry, dict):
+            continue
+        token = str(entry.get("key") or "")
+        if not token:
+            continue
+        expires_at = 0.0
+        raw = entry.get("expires_at")
+        if raw:
+            try:
+                expires_at = dt.datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
+            except Exception:
+                expires_at = 0.0
+        if expires_at >= best[1]:
+            best = (token, expires_at)
+    return best[0], round(best[1])
+
+
+def grok_tier_label(subscriptions) -> str:
+    if not isinstance(subscriptions, list):
+        return ""
+    for entry in subscriptions:
+        if not isinstance(entry, dict):
+            continue
+        tier = str(entry.get("tier") or "")
+        if "SUBSCRIPTION_TIER_" in tier:
+            return tier.split("SUBSCRIPTION_TIER_")[-1].replace("_", " ").title()
+    return ""
+
+
+def grok_billing_limits(token: str) -> tuple[list, str]:
+    billing, error = http_get_json(GROK_BILLING_URL, {
+        "Authorization": "Bearer " + token,
+        "x-grok-client-mode": "build",
+        "x-grok-client-surface": "grok-build",
+    })
+    if billing is None:
+        return [], error
+    config = billing.get("config") if isinstance(billing.get("config"), dict) else billing
+    period = config.get("currentPeriod") if isinstance(config, dict) else None
+    percent_raw = config.get("creditUsagePercent") if isinstance(config, dict) else None
+    if percent_raw is None:
+        # Protobuf JSON omits zero values: a percentage absent alongside a
+        # period means an untouched allowance, not missing data.
+        if isinstance(period, dict) and period.get("end"):
+            percent_raw = "0"
+        else:
+            return [], "billing response had no usage percent"
+    percent = clamp_fraction(percent_raw)
+    if percent < 0:
+        return [], "billing response had an unreadable usage percent"
+    kind = str((period or {}).get("type") or "").upper()
+    label = ("Daily allowance" if "DAILY" in kind
+             else "Monthly allowance" if "MONTHLY" in kind
+             else "Weekly allowance")
+    return [{"label": label, "percent": percent, "resetsAt": normalize_reset((period or {}).get("end"))}], ""
+
+
+def grok_prepaid_balance() -> dict | None:
+    """Prepaid credit ledger via the xAI Management API (team key required)."""
+    key = os.environ.get("XAI_MANAGEMENT_KEY")
+    team = os.environ.get("XAI_TEAM_ID")
+    if not key or not team:
+        return None
+    payload, error = http_get_json(XAI_BALANCE_URL.format(team=team), {"Authorization": "Bearer " + key})
+    if payload is None:
+        return None
+    total = (payload or {}).get("total") or {}
+    remaining = number(total.get("val")) / 100.0
+    funded = 0.0
+    for change in payload.get("changes") or []:
+        origin = str((change or {}).get("changeOrigin") or "").upper()
+        if origin in ("PURCHASE", "AUTO_PURCHASE"):
+            funded += number(((change or {}).get("amount") or {}).get("val")) / 100.0
+    if remaining <= 0 and funded <= 0:
+        return None
+    return {
+        "remaining": remaining,
+        "funded": funded,
+        "spent": max(0.0, funded - remaining),
+        "currency": "USD",
+        "estimated": False,
+    }
+
+
+def grok_record(force: bool) -> dict:
+    record = base_record("grok")
+    record["name"] = "Grok Code"
+    record.update(local_stats("grok"))
+    record["hasPromptStats"] = record["totalPrompts"] > 0
+
+    token, expires_at = grok_cli_auth()
+    if token and expires_at and expires_at <= time.time():
+        cached, _, cached_tier = cached_limits("grok", force)
+        record["limits"] = cached
+        record["tierLabel"] = cached_tier
+        record["usageStatusText"] = "Sign-in expired"
+        record["authHelpText"] = "Run `grok` and sign in again to refresh the saved credentials."
+    elif token:
+        limits, error = grok_billing_limits(token)
+        if limits:
+            subs, _ = http_get_json(GROK_SUBSCRIPTIONS_URL, {"Authorization": "Bearer " + token})
+            tier = grok_tier_label(subs) or "Grok"
+            record["limits"] = limits
+            record["tierLabel"] = tier
+            store_limits("grok", limits, tier)
+            record["ready"] = True
+            record["usageStatusText"] = ""
+        else:
+            cached, _, cached_tier = cached_limits("grok", force)
+            record["limits"] = cached
+            record["tierLabel"] = cached_tier
+            record["usageStatusText"] = f"Grok limits unavailable ({error})"
+            record["ready"] = bool(cached)
+    else:
+        cached, _, cached_tier = cached_limits("grok", force)
+        record["limits"] = cached
+        record["tierLabel"] = cached_tier
+        record["usageStatusText"] = "Waiting for auth"
+
+    if record["balance"] is None:
+        record["balance"] = grok_prepaid_balance()
+        if record["balance"] is not None:
+            record["ready"] = True
+    return record
+
+
+# -------------------------------------------------------------------------- main
+
+
+def collect(agent_id: str, force: bool) -> dict:
+    if agent_id == "zai":
+        record = base_record("zai")
+        record["name"] = "Z.AI GLM"
+        record.update(local_stats("zai"))
+        record["hasPromptStats"] = record["totalPrompts"] > 0
+        limits = zai_limits(force)
+        record["limits"] = limits["limits"]
+        record["tierLabel"] = limits["tierLabel"]
+        # A probe failure that still has window-open cached limits keeps the
+        # meters visible but must say why the numbers are not fresh.
+        record["usageStatusText"] = "" if limits.get("ok") else limits["usageStatusText"]
+        record["ready"] = bool(limits["limits"])
+        return record
+    if agent_id == "kimi":
+        record = base_record("kimi")
+        record["name"] = "Kimi Code"
+        record.update(local_stats("kimi"))
+        record["hasPromptStats"] = record["totalPrompts"] > 0
+        limits = kimi_limits(force)
+        record["limits"] = limits["limits"]
+        record["tierLabel"] = limits["tierLabel"]
+        record["usageStatusText"] = "" if limits.get("ok") else limits["usageStatusText"]
+        record["ready"] = bool(limits["limits"])
+        return record
+    if agent_id == "grok":
+        return grok_record(force)
+    raise ValueError(f"unknown agent {agent_id}")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Write Z.AI / Kimi / Grok usage records for the omarchy agents panel")
+    parser.add_argument("agents", nargs="+", choices=["zai", "kimi", "grok", "all"])
+    parser.add_argument("--write", action="store_true", help="write records to ~/.local/state/omarchy/agents/usage/ instead of printing")
+    parser.add_argument("--force", action="store_true", help="re-probe the endpoints, ignoring the reuse window")
+    args = parser.parse_args()
+
+    agents = ["zai", "kimi", "grok"] if "all" in args.agents else args.agents
+    for agent_id in agents:
+        try:
+            record = collect(agent_id, args.force)
+        except Exception as error:
+            print(f"nibble-agent-usage: {agent_id} collector failed: {error}", file=sys.stderr)
+            return 1
+        if args.write:
+            write_json(state_dir() / f"{agent_id}.json", record)
+        else:
+            print(json.dumps(record, indent=2, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

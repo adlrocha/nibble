@@ -7,3 +7,6 @@
 .DS_Store
 .claude/settings.local.json
 docs/session-notes/
+
+# Python bytecode from tooling
+__pycache__/

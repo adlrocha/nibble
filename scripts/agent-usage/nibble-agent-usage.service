@@ -1,0 +1,7 @@
+[Unit]
+Description=nibble agent usage records for the omarchy agents panel
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/nibble-agent-usage all --write

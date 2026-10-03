@@ -15,20 +15,28 @@ This section lists every feature area in the project. Use it to audit what's wor
 | 1 | **Podman Sandboxes** | core | Per-repo rootless containers; repo mounted RW; `sleep infinity` PID 1; `podman exec` for attach |
 | 2 | **Session Continuity** | core | Deterministic session UUID per repo; resume across detach/reboot; `--fresh` to start over |
 | 3 | **Task DB** | core | SQLite backend tracking all tasks (sandboxed + non-sandboxed), states (running/completed/exited), session IDs |
-| 4 | **Install script** | core | `install.sh` — builds binary, installs Podman if absent, builds sandbox image, wires Claude hooks |
-| 5 | **Claude Code hooks** | core | Stop hook → `nibble report session-id` + memory capture; wrappers register tasks at startup |
+| 4 | **Install script** | core | `install.sh` — builds binary, installs Podman if absent, builds sandbox image, wires Claude hooks, optionally sets up Telegram |
+| 5 | **Claude Code hooks** | core | Stop hook → `nibble report session-id` + `nibble notify`; claude and omp wrappers register host-run agents as tasks at startup so the sidebar tracks them too |
 | 6 | **Setup scripts** | dx | `.nibble/setup.sh` in any repo — auto-runs at spawn to install toolchain before first attach |
 | 7 | **Git worktrees** | dx | `--branch` flag on spawn/attach/kill — creates/cleans up a worktree automatically per branch |
 | 8 | **`--btw` sessions** | dx | `attach --btw` — side session that doesn't overwrite which session the main attach would continue (ad-hoc research, parallel work); kept on disk like any other |
 | 9 | **Session retention** | core | Sessions are never deleted — `--fresh` only renames the current file to `.jsonl.bak`; Claude's own 30-day purge is disabled via `cleanupPeriodDays` |
 | 10 | **Hermes Agent** | experimental | Singleton sandbox where you mount/unmount repos dynamically; `hermes gateway` as PID 1 |
-| 11 | **Status line** | dx | Claude Code terminal status bar showing dir, branch, model, context %, 5h and 7d rate limit bars |
-| 12 | **Health checks** | ops | `SandboxHealth` enum (Healthy/Degraded/Dead); `nibble prune` marks stale tasks exited and GCs old records |
-| 13 | **Auto-resume on reboot** | ops | systemd user service (`nibble-resume.service`) restarts containers after host reboot |
-| 14 | **Web session inspector** | dx | `nibble web` — dark-mode browser UI (port 7878) for browsing/searching pi sessions, usage dashboard, conversation viewer; runs as `nibble-web.service`, Tailscale-reachable with token auth. See [docs/web.md](docs/web.md) |
-| 15 | **omp (oh-my-pi) support** | core | `--pi` runs upstream pi, `--omp` runs omp (oh-my-pi) — explicit, independent flags. Sandboxes mount both `~/.pi` and `~/.omp`; sessions are format-compatible and cross-resumable. `scripts/migrate-pi-to-omp.sh` migrates host config |
-| 16 | **Session recovery** | core | Eager task→session mapping via extension-reported `session-path`; interactive picker when attach finds multiple sessions for a repo; `session list` shows task links; runbook in [docs/session-recovery.md](docs/session-recovery.md) |
+| 11 | **Alternative LLM backends** | experimental | `--kimi`, `--glm` flags on attach — use non-Claude agents inside the same sandbox |
+| 12 | **Telegram notifications** | notifications | Sends last-message/attention alert to phone when agent finishes or needs input |
+| 13 | **Telegram reply listener** | notifications | Long-poll daemon (`nibble listen`) — routes phone replies back to agents via `podman exec -i` |
+| 14 | **Telegram bot commands** | notifications | `/help`, `/sandboxes`, `/spawn`, `/cron list` — control nibble from phone |
+| 15 | **Cron jobs** | scheduling | Schedule prompts to run inside sandboxes on a cron expression; markdown file format; skip-if-running; expiry |
+| 16 | **Status line** | dx | Claude Code terminal status bar showing dir, branch, model, context %, 5h and 7d rate limit bars |
+| 17 | **Health checks** | ops | `SandboxHealth` enum (Healthy/Degraded/Dead); periodic prune in listen daemon; Telegram alert on unexpected container death |
+| 18 | **Auto-resume on reboot** | ops | systemd user service (`nibble-resume.service`) restarts containers after host reboot |
+| 19 | **Inject** | ops | `nibble inject <id> <msg>` — send a message directly to any sandbox agent, bypassing Telegram |
+| 20 | **Web session inspector** | dx | `nibble web` — dark-mode browser UI (port 7878) for browsing/searching pi sessions, usage dashboard, conversation viewer; runs as `nibble-web.service`, Tailscale-reachable with token auth. See [docs/web.md](docs/web.md) |
+| 21 | **omp (oh-my-pi) support** | core | `--pi` runs upstream pi, `--omp` runs omp. Tasks are stored as `omp` or `pi`, not collapsed. Sandboxes mount both `~/.pi` and `~/.omp`; sessions are format-compatible and cross-resumable. `scripts/migrate-pi-to-omp.sh` migrates host config |
 | 17 | **Agent status panel** | core | `nibble status` live table (blocked/running/idle/exited with attention reasons) fed by `nibble report status` hooks; `nibble sidebar --install` gives every zellij tab an auto-refreshing status pane; `1`-`9` or `nibble goto` jumps focus to an agent's pane. Claude hooks (SessionStart → registered/running, Notification → blocked, Stop → idle, SessionEnd → exited) and the pi/omp extension (agent_start/settled/shutdown) report transitions. Every sandbox attach (including `--btw`) is its own tracked window task — concurrent windows on one sandbox never share or flap a row; the sandbox row mirrors the container. Status reports for unregistered IDs self-heal a placeholder row, so a lost `report start` can't make a session invisible. Launches without a wrapper (`claude -p`/`omp -p` in scripts, bare or `nibble sandbox bash` shells) are tracked too via a stable `claude-<session_id>` / `omp-<session_id>` task ID derived from the agent's own session — every session, host or sandbox, gets a row |
+| 23 | **Session recovery** | core | Eager task→session mapping via extension-reported `session-path`; interactive picker when attach finds multiple sessions for a repo; `session list` shows task links; runbook in [docs/session-recovery.md](docs/session-recovery.md) |
+| 24 | **Quota auto-continue** | ops | `nibble quota-watch` daemon detects subscription quota errors in claude/pi/omp transcripts, parks the task with a reset-time reason, and continues it automatically once the quota renews (zellij keystroke for live host panes, headless resume turn otherwise, sandbox containers restarted if down); `nibble-quota-watch.service`. See [docs/quota-watch.md](docs/quota-watch.md) |
+| 25 | **AI subscription dashboard** | dx | `nibble-agent-usage` writes Z.AI / Kimi / Grok quota records (limits, resets, plan, token burn from `token_usage`) into Omarchy's agents bar panel every 10 min; user-owned panel clone adds an Auth button per subscription and shrinks the provider chips. See [docs/agent-subscriptions.md](docs/agent-subscriptions.md) |
 
 ---
 
@@ -216,7 +224,7 @@ When a sandbox spawns, nibble writes agent instructions into two files inside th
 
 | File | Purpose |
 |------|---------|
-| `AGENTS.md` | Sandbox environment info and toolchain detection |
+| `AGENTS.md` | Sandbox environment info, toolchain detection, and skills/lessons guidance |
 | `.claude/CLAUDE.md` | Claude Code entry point — first line is `@../AGENTS.md` which imports the file above |
 
 **How it works:**

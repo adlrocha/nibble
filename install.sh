@@ -227,14 +227,18 @@ if systemctl --user is-active --quiet nibble-web.service 2>/dev/null; then
     ok "Stopped nibble-web.service for upgrade"
 fi
 
-# Remove the deprecated Telegram listener service if an old install left it
-# behind — the binary no longer has a `listen` command, so the unit would
-# crash-loop after this upgrade.
-if [ -f "$HOME/.config/systemd/user/nibble-listener.service" ]; then
-    systemctl --user disable --now nibble-listener.service 2>/dev/null || true
-    rm -f "$HOME/.config/systemd/user/nibble-listener.service"
-    systemctl --user daemon-reload 2>/dev/null || true
-    ok "Removed deprecated nibble-listener.service"
+# Also stop the quota-watch daemon before overwriting the binary.
+QUOTA_WATCH_WAS_ACTIVE=false
+if systemctl --user is-active --quiet nibble-quota-watch.service 2>/dev/null; then
+    QUOTA_WATCH_WAS_ACTIVE=true
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 5 systemctl --user stop nibble-quota-watch.service 2>/dev/null || true
+    else
+        systemctl --user stop --no-block nibble-quota-watch.service 2>/dev/null || true
+        sleep 2
+        systemctl --user kill --signal=SIGKILL nibble-quota-watch.service 2>/dev/null || true
+    fi
+    ok "Stopped nibble-quota-watch.service for upgrade"
 fi
 
 cp "$REPO_DIR/target/release/nibble" "$BIN_DIR/nibble.new"
@@ -242,6 +246,17 @@ chmod +x "$BIN_DIR/nibble.new"
 mv -f "$BIN_DIR/nibble.new" "$BIN_DIR/nibble"
 ok "nibble"
 
+
+# Restart services that were running before.
+if [ "$LISTENER_WAS_ACTIVE" = true ]; then
+    systemctl --user start nibble-listener.service 2>/dev/null || warn "Could not restart nibble-listener.service"
+    ok "Restarted nibble-listener.service"
+fi
+
+if [ "$QUOTA_WATCH_WAS_ACTIVE" = true ]; then
+    systemctl --user start nibble-quota-watch.service 2>/dev/null || warn "Could not restart nibble-quota-watch.service"
+    ok "Restarted nibble-quota-watch.service"
+fi
 
 # Warn if BIN_DIR is not on PATH
 if ! echo "$PATH" | tr ':' '\n' | grep -qx "$BIN_DIR"; then
@@ -496,6 +511,80 @@ if systemctl --user daemon-reload 2>/dev/null; then
         || warn "Could not enable nibble-usage.timer. Enable manually: systemctl --user enable --now nibble-usage.timer"
 else
     warn "systemd user session not available. Run scans manually: nibble usage scan"
+fi
+
+# ── 5e. Quota auto-continue daemon ────────────────────────────────────────────
+# Watches agent session transcripts for subscription quota errors and
+# continues the tasks once the quota window resets (host + sandbox sessions;
+# zellij keystroke for live panes, headless resume turn otherwise).
+step "Installing quota auto-continue daemon"
+
+mkdir -p "$HOME/.nibble/logs"
+cat > "$SYSTEMD_DIR/nibble-quota-watch.service" << UNIT
+[Unit]
+Description=Nibble — auto-continue agents after subscription quota reset
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=$BIN_DIR/nibble quota-watch
+Restart=on-failure
+RestartSec=30
+Environment=HOME=%h
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+StandardOutput=append:%h/.nibble/logs/quota-watch.log
+StandardError=append:%h/.nibble/logs/quota-watch.log
+
+[Install]
+WantedBy=default.target
+UNIT
+
+if systemctl --user daemon-reload 2>/dev/null; then
+    systemctl --user enable --now nibble-quota-watch.service 2>/dev/null \
+        && ok "Quota auto-continue daemon enabled (nibble-quota-watch.service)" \
+        || warn "Could not enable nibble-quota-watch.service. Enable manually: systemctl --user enable --now nibble-quota-watch.service"
+else
+    warn "systemd user session not available. Run manually: nibble quota-watch"
+fi
+
+# ── 5f. Agent usage records (omarchy agents panel) ────────────────────────────
+# Writes Z.AI / Kimi / Grok subscription quota records into
+# ~/.local/state/omarchy/agents/usage/ every 10 minutes, where Omarchy's
+# omarchy.agents bar panel picks them up alongside Claude and Codex.
+step "Installing agent usage records timer"
+
+cp "$REPO_DIR/scripts/agent-usage/nibble-agent-usage" "$BIN_DIR/nibble-agent-usage"
+chmod +x "$BIN_DIR/nibble-agent-usage"
+ok "nibble-agent-usage"
+
+cat > "$SYSTEMD_DIR/nibble-agent-usage.service" << UNIT
+[Unit]
+Description=nibble agent usage records for the omarchy agents panel
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/nibble-agent-usage all --write
+UNIT
+
+cat > "$SYSTEMD_DIR/nibble-agent-usage.timer" << UNIT
+[Unit]
+Description=Refresh nibble agent usage records every 10 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+if systemctl --user daemon-reload 2>/dev/null; then
+    systemctl --user enable --now nibble-agent-usage.timer 2>/dev/null \
+        && ok "Agent usage timer enabled (every 10 min)" \
+        || warn "Could not enable nibble-agent-usage.timer. Enable manually: systemctl --user enable --now nibble-agent-usage.timer"
+else
+    warn "systemd user session not available. Run manually: nibble-agent-usage all --write"
 fi
 
 # Seed the pricing override file if it doesn't exist.

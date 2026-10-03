@@ -194,7 +194,9 @@ pub fn summarize_file(path: &Path) -> Option<SessionSummary> {
                 if !ts.is_empty() {
                     last_active_at = ts.to_string();
                 }
-                let Some(msg) = v.get("message") else { continue };
+                let Some(msg) = v.get("message") else {
+                    continue;
+                };
                 match msg.get("role").and_then(Value::as_str) {
                     Some("user") => {
                         user_message_count += 1;
@@ -218,10 +220,8 @@ pub fn summarize_file(path: &Path) -> Option<SessionSummary> {
                         if let Some(u) = msg.get("usage") {
                             input += u.get("input").and_then(Value::as_i64).unwrap_or(0);
                             output += u.get("output").and_then(Value::as_i64).unwrap_or(0);
-                            cache_read +=
-                                u.get("cacheRead").and_then(Value::as_i64).unwrap_or(0);
-                            cache_write +=
-                                u.get("cacheWrite").and_then(Value::as_i64).unwrap_or(0);
+                            cache_read += u.get("cacheRead").and_then(Value::as_i64).unwrap_or(0);
+                            cache_write += u.get("cacheWrite").and_then(Value::as_i64).unwrap_or(0);
                             cost += u
                                 .get("cost")
                                 .and_then(|c| c.get("total"))
@@ -233,10 +233,7 @@ pub fn summarize_file(path: &Path) -> Option<SessionSummary> {
                                 b.get("type").and_then(Value::as_str) == Some("toolCall")
                             }) {
                                 tool_call_count += 1;
-                                let name = b
-                                    .get("name")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("?");
+                                let name = b.get("name").and_then(Value::as_str).unwrap_or("?");
                                 *tool_counts.entry(name.to_string()).or_insert(0) += 1;
                             }
                         }
@@ -357,7 +354,11 @@ pub fn parse_detail(summary: &SessionSummary) -> Option<SessionDetail> {
         let Ok(v) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
-        let ts = v.get("timestamp").and_then(Value::as_str).unwrap_or("").to_string();
+        let ts = v
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         match v.get("type").and_then(Value::as_str) {
             Some("model_change") => {
                 events.push(SessionEvent::ModelChange {
@@ -375,7 +376,9 @@ pub fn parse_detail(summary: &SessionSummary) -> Option<SessionDetail> {
                 });
             }
             Some("message") => {
-                let Some(msg) = v.get("message") else { continue };
+                let Some(msg) = v.get("message") else {
+                    continue;
+                };
                 let content = msg.get("content").cloned().unwrap_or(Value::Null);
                 match msg.get("role").and_then(Value::as_str) {
                     Some("user") => events.push(SessionEvent::User {
@@ -404,8 +407,7 @@ pub fn parse_detail(summary: &SessionSummary) -> Option<SessionDetail> {
                                 blocks
                                     .iter()
                                     .filter(|b| {
-                                        b.get("type").and_then(Value::as_str)
-                                            == Some("toolCall")
+                                        b.get("type").and_then(Value::as_str) == Some("toolCall")
                                     })
                                     .map(|b| ToolCallView {
                                         name: b
@@ -416,8 +418,7 @@ pub fn parse_detail(summary: &SessionSummary) -> Option<SessionDetail> {
                                         arguments: b
                                             .get("arguments")
                                             .map(|a| {
-                                                serde_json::to_string_pretty(a)
-                                                    .unwrap_or_default()
+                                                serde_json::to_string_pretty(a).unwrap_or_default()
                                             })
                                             .unwrap_or_default(),
                                     })
@@ -430,10 +431,7 @@ pub fn parse_detail(summary: &SessionSummary) -> Option<SessionDetail> {
                             text: text_of(&content),
                             thinking,
                             tool_calls,
-                            model: msg
-                                .get("model")
-                                .and_then(Value::as_str)
-                                .map(str::to_string),
+                            model: msg.get("model").and_then(Value::as_str).map(str::to_string),
                             provider: msg
                                 .get("provider")
                                 .and_then(Value::as_str)
@@ -463,10 +461,7 @@ pub fn parse_detail(summary: &SessionSummary) -> Option<SessionDetail> {
                             .unwrap_or("?")
                             .to_string(),
                         text: text_of(&content),
-                        is_error: msg
-                            .get("isError")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false),
+                        is_error: msg.get("isError").and_then(Value::as_bool).unwrap_or(false),
                     }),
                     _ => {}
                 }

@@ -38,8 +38,7 @@ skill for the commit/PR workflow.
 ## Installation
 
 `install.sh` copies each `skills/*/` directory (including its `references/`) to
-the host skill dirs above, which Claude Code and Pi scan automatically. Removed
-skills are cleaned up explicitly (see the `stale` loop in `install.sh`).
+the host skill dirs above, which Claude Code and Pi scan automatically.
 
 ## Adding a skill
 
