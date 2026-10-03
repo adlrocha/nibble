@@ -50,6 +50,37 @@ pub(crate) fn apply_status_transition(
     true
 }
 
+/// DB-level status report used by quota-watch and other long-running
+/// callers: resolves the task (self-healing an unknown ID so wrapper-less
+/// sessions — derived `claude-<session_id>` / `omp-<session_id>` — get a
+/// row on first report; `exited` on an unknown ID never creates one),
+/// normalises the reporting vocabulary (`working` → `running`,
+/// `idle` → `completed`), applies the transition and persists it.
+pub(crate) fn apply_report(db: &Database, task_id: &str, state: &str, reason: Option<&str>) -> Result<()> {
+    let mut task = match db.get_task_by_id(task_id)? {
+        Some(t) => t,
+        None if state == "exited" => {
+            eprintln!(
+                "report status: unknown task {} (exited — ignored)",
+                &task_id[..8.min(task_id.len())]
+            );
+            return Ok(());
+        }
+        None => db.ensure_task_or_create(task_id)?,
+    };
+    let normalised = match state {
+        "working" => "running",
+        "idle" => "completed",
+        other => other,
+    };
+    if apply_status_transition(&mut task, normalised, reason) {
+        db.update_task(&task)?;
+        Ok(())
+    } else {
+        anyhow::bail!("Invalid status state '{state}' (running, blocked, completed, exited)")
+    }
+}
+
 /// Coarse display state for the sidebar, ordered by urgency for sorting.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum SidebarState {
@@ -695,5 +726,507 @@ mod tests {
         assert_eq!(hit.task_id, a.task_id);
         assert!(resolve_task(&db, "zzzz").is_err(), "unknown prefix errors");
         assert!(resolve_task(&db, "0").is_err(), "ambiguous/unknown errors");
+    }
+}
+
+
+// ── Pane management (ported from the pre-split main.rs during the
+// origin/main integration) ────────────────────────────────────────────────────
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+const SIDEBAR_PANE_NAME: &str = "nibble";
+
+/// Wide enough to read agent rows without resizing, capped as a strip.
+fn sidebar_target_cols(tab_cols: u16) -> u16 {
+    let target = (tab_cols / 9).clamp(28, 48);
+    let room = tab_cols.saturating_sub(24).max(16);
+    target.min(room)
+}
+
+fn is_sidebar_pane(title: &str, command: Option<&str>) -> bool {
+    title == SIDEBAR_PANE_NAME
+        || title == "agents"
+        || command.is_some_and(|cmd| {
+            cmd.contains("nibble") && cmd.contains("status") && cmd.contains("--watch")
+        })
+}
+
+/// zellij 0.45: `resize <increase|decrease> [left|right|up|down]`.
+/// `--direction` is rejected. The border to shrink is the inner one.
+fn resize_args(pane_id: &str, resize: &str, border: &str) -> Vec<String> {
+    ["action", "resize", resize, border, "--pane-id", pane_id]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
+fn shrink_args(pane_id: &str, border: &str) -> Vec<String> {
+    resize_args(pane_id, "decrease", border)
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ZellijPane {
+    id: u32,
+    #[serde(default)]
+    is_plugin: bool,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    pane_columns: u16,
+    #[serde(default)]
+    pane_x: u16,
+    #[serde(default)]
+    tab_id: u32,
+    #[serde(default)]
+    pane_command: Option<String>,
+}
+
+fn zellij_panes() -> Result<Vec<ZellijPane>> {
+    let output = std::process::Command::new("zellij")
+        .args(["action", "list-panes", "--all", "--json"])
+        .output()
+        .context("zellij not available. Run `nibble status --watch` in a narrow pane.")?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        let detail = err.trim();
+        anyhow::bail!(
+            "Not inside zellij{}. Run `nibble status --watch` in a pane you size yourself.",
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(" ({detail})")
+            }
+        );
+    }
+    serde_json::from_slice(&output.stdout).context("could not parse zellij pane list")
+}
+
+fn current_tab_id(panes: &[ZellijPane]) -> Option<u32> {
+    if let Ok(raw) = std::env::var("ZELLIJ_PANE_ID") {
+        if let Ok(id) = raw.parse::<u32>() {
+            if let Some(pane) = panes.iter().find(|p| !p.is_plugin && p.id == id) {
+                return Some(pane.tab_id);
+            }
+        }
+    }
+    focused_pane_id()
+        .and_then(|id| panes.iter().find(|p| !p.is_plugin && p.id == id))
+        .map(|p| p.tab_id)
+}
+
+/// The pane the attached client is looking at. `list-clients` is the only
+/// reliable focus probe in zellij 0.45: `is_focused` in the pane JSON and
+/// `action focus-pane-id` both misbehave when driven from outside a client.
+fn focused_pane_id() -> Option<u32> {
+    let output = std::process::Command::new("zellij")
+        .args(["action", "list-clients"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in text.lines().skip(1) {
+        let mut fields = line.split_whitespace();
+        let _client = fields.next()?;
+        let pane = fields.next()?;
+        if let Some(id) = pane.strip_prefix("terminal_") {
+            return id.parse::<u32>().ok();
+        }
+    }
+    None
+}
+
+/// Focus a pane by cycling. `action focus-pane-id` is a silent no-op from
+/// outside a client in zellij 0.45, while `focus-next-pane` works.
+fn focus_pane_by_id(panes: &[ZellijPane], target: u32) -> Result<()> {
+    let steps = panes.iter().filter(|p| !p.is_plugin).count() + 2;
+    for _ in 0..steps {
+        if focused_pane_id() == Some(target) {
+            return Ok(());
+        }
+        zellij_action(&["focus-next-pane".into()])?;
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    anyhow::bail!("Could not focus pane {}", pane_ref(target))
+}
+
+fn pane_ref(id: u32) -> String {
+    format!("terminal_{id}")
+}
+
+fn tab_columns(panes: &[ZellijPane], tab_id: u32) -> u16 {
+    panes
+        .iter()
+        .filter(|p| !p.is_plugin && p.tab_id == tab_id)
+        .map(|p| p.pane_x.saturating_add(p.pane_columns))
+        .max()
+        .unwrap_or(80)
+}
+
+fn sidebar_in_tab<'a>(panes: &'a [ZellijPane], tab_id: u32) -> Option<&'a ZellijPane> {
+    panes.iter().find(|p| {
+        !p.is_plugin && p.tab_id == tab_id && is_sidebar_pane(&p.title, p.pane_command.as_deref())
+    })
+}
+
+fn pane_geometry(pane_id: &str) -> Option<(u16, u16)> {
+    let id = pane_id
+        .strip_prefix("terminal_")
+        .unwrap_or(pane_id)
+        .parse::<u32>()
+        .ok()?;
+    let pane = zellij_panes()
+        .ok()?
+        .into_iter()
+        .find(|p| !p.is_plugin && p.id == id)?;
+    if pane.pane_columns == 0 {
+        return None;
+    }
+    Some((pane.pane_columns, pane.pane_x))
+}
+
+fn shrink_sidebar(pane_id: &str, target: u16) {
+    let mut previous = u16::MAX;
+    let mut missing = 0u8;
+    for _ in 0..48 {
+        let Some((cols, x)) = pane_geometry(pane_id) else {
+            missing += 1;
+            if missing > 5 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            continue;
+        };
+        missing = 0;
+        // Left edge of the screen: the inner border is right. Otherwise the
+        // pane is to the right of something, and the inner border is left.
+        let border = if x == 0 { "right" } else { "left" };
+        if cols <= target || cols >= previous {
+            if previous != u16::MAX && cols * 4 < target * 3 {
+                // The last step overshot far below the target: grow back once.
+                let _ = std::process::Command::new("zellij")
+                    .args(resize_args(pane_id, "increase", border))
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+            break;
+        }
+        let ok = std::process::Command::new("zellij")
+            .args(shrink_args(pane_id, border))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !ok {
+            break;
+        }
+        previous = cols;
+    }
+}
+
+/// Swap the pane left until nothing in its tab sits further left, so the
+/// sidebar always lands at the left edge.
+fn move_pane_leftmost(pane_id: &str) {
+    let Some(id) = pane_id
+        .strip_prefix("terminal_")
+        .and_then(|n| n.parse::<u32>().ok())
+    else {
+        return;
+    };
+    for _ in 0..8 {
+        let Ok(panes) = zellij_panes() else { break };
+        let Some(me) = panes.iter().find(|p| !p.is_plugin && p.id == id) else {
+            break;
+        };
+        let furthest_left = panes
+            .iter()
+            .filter(|p| !p.is_plugin && p.tab_id == me.tab_id && p.id != id)
+            .map(|p| p.pane_x)
+            .min()
+            .unwrap_or(0);
+        if me.pane_x <= furthest_left {
+            break;
+        }
+        let moved = std::process::Command::new("zellij")
+            .args(["action", "move-pane", "left", "--pane-id", pane_id])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !moved {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+}
+
+/// Strip the agent's logo/spinner glyphs from a zellij pane title, leaving
+/// the reported topic. `None` for generic or nibble-owned panes. Only known
+/// prefix glyphs are removed, so non-ASCII topic text survives.
+fn clean_pane_title(title: &str) -> Option<String> {
+    let cleaned = title
+        .trim()
+        .trim_start_matches(|c: char| {
+            c.is_whitespace()
+                || matches!(
+                    c,
+                    '\u{2800}'
+                        ..='\u{28FF}' // braille spinner frames
+                    | 'π' | '✳' | '✻' | '✱' | '⚡'
+                    | '◐' | '◑' | '◒' | '◓' | '○' | '●' | '·'
+                )
+        })
+        .trim();
+    if cleaned.is_empty()
+        || cleaned.starts_with("Pane #")
+        || cleaned == SIDEBAR_PANE_NAME
+        || cleaned == "agents"
+    {
+        None
+    } else {
+        Some(cleaned.to_string())
+    }
+}
+
+/// Topics reported by agent pane titles, keyed two ways: by task id through
+/// `AGENT_TASK_ID` in the pane command (attach panes), and by pane id (host
+/// agents, matched through the task's recorded pane). Best-effort: empty
+/// outside zellij.
+pub(crate) fn zellij_pane_topics() -> (HashMap<String, String>, HashMap<u32, String>) {
+    let mut by_task = HashMap::new();
+    let mut by_pane = HashMap::new();
+    let Ok(panes) = zellij_panes() else {
+        return (by_task, by_pane);
+    };
+    for pane in panes.iter().filter(|p| !p.is_plugin) {
+        let Some(title) = clean_pane_title(&pane.title) else {
+            continue;
+        };
+        if let Some(cmd) = pane.pane_command.as_deref() {
+            if let Some(task_id) = extract_task_id(cmd) {
+                by_task.insert(task_id, title.clone());
+            }
+        }
+        by_pane.insert(pane.id, title);
+    }
+    (by_task, by_pane)
+}
+
+/// Run a zellij action, surfacing failures instead of swallowing them.
+fn zellij_action(args: &[String]) -> Result<()> {
+    let status = std::process::Command::new("zellij")
+        .arg("action")
+        .args(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .context("zellij not available")?;
+    if !status.success() {
+        anyhow::bail!("zellij action {} failed", args.join(" "));
+    }
+    Ok(())
+}
+
+fn create_sidebar(target: u16) -> Result<String> {
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("nibble"));
+    let opened = std::process::Command::new("zellij")
+        .args([
+            "action",
+            "new-pane",
+            "--direction",
+            "right",
+            "--name",
+            SIDEBAR_PANE_NAME,
+            "--close-on-exit",
+            "--no-focus",
+            "--",
+        ])
+        .arg(&exe)
+        .args(["status", "--watch"])
+        .output()
+        .context("zellij not available. Run `nibble status --watch` in a narrow pane.")?;
+    if !opened.status.success() {
+        let err = String::from_utf8_lossy(&opened.stderr);
+        let detail = err.trim();
+        anyhow::bail!(
+            "Could not open the sidebar{}. Run `nibble status --watch` in a pane you size yourself.",
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {detail}")
+            }
+        );
+    }
+    let pane_id = String::from_utf8_lossy(&opened.stdout).trim().to_string();
+    if pane_id.is_empty() {
+        anyhow::bail!("zellij opened a pane but did not return its id");
+    }
+    move_pane_leftmost(&pane_id);
+    shrink_sidebar(&pane_id, target);
+    Ok(pane_id)
+}
+
+pub(crate) fn open_sidebar_pane() -> Result<()> {
+    let panes = zellij_panes()?;
+    let tab = current_tab_id(&panes)
+        .context("Not inside zellij. Run `nibble status --watch` in a pane you size yourself.")?;
+    let target = sidebar_target_cols(tab_columns(&panes, tab));
+    if let Some(existing) = sidebar_in_tab(&panes, tab) {
+        let id = pane_ref(existing.id);
+        if existing.title != SIDEBAR_PANE_NAME {
+            let _ = std::process::Command::new("zellij")
+                .args(["action", "rename-pane", "--pane-id", &id, SIDEBAR_PANE_NAME])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+        if existing.pane_columns > target.saturating_add(8) {
+            shrink_sidebar(&id, target);
+        }
+        println!(
+            "Sidebar already open. Press q in that pane to close it, or run `nibble sidebar --close`."
+        );
+        return Ok(());
+    }
+    create_sidebar(target)?;
+    println!("Sidebar open. Press q in that pane to close it, or run `nibble sidebar --close`.");
+    Ok(())
+}
+
+/// Jump to the sidebar. Focus it in this tab, jump to its tab if it lives
+/// elsewhere in the session, or open it first when it is not open.
+///
+/// Invoked from inside a zellij pane (the Alt-a keybind wrapper), this
+/// detaches first: zellij 0.45 scopes focus actions issued from within a
+/// pane to that pane's focus group, and restores the pre-wrapper focus when
+/// the wrapper pane closes. The detached copy acts once the wrapper is gone.
+pub(crate) fn focus_sidebar_pane() -> Result<()> {
+    if std::env::var_os("ZELLIJ_PANE_ID").is_some()
+        && std::env::var_os("NIBBLE_SIDEBAR_DETACHED").is_none()
+    {
+        use std::os::unix::process::CommandExt;
+        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("nibble"));
+        let mut cmd = std::process::Command::new(exe);
+        cmd.args(["sidebar", "--focus"])
+            .env("NIBBLE_SIDEBAR_DETACHED", "1")
+            .env_remove("ZELLIJ_PANE_ID")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        cmd.spawn().context("could not detach sidebar focus")?;
+        return Ok(());
+    }
+    if std::env::var_os("NIBBLE_SIDEBAR_DETACHED").is_some() {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
+    let panes = zellij_panes()?;
+    let tab = current_tab_id(&panes)
+        .context("Not inside zellij. Run `nibble sidebar` from a zellij pane instead.")?;
+    if let Some(p) = sidebar_in_tab(&panes, tab) {
+        focus_pane_by_id(&panes, p.id)?;
+        return Ok(());
+    }
+    if let Some(p) = panes
+        .iter()
+        .find(|p| !p.is_plugin && is_sidebar_pane(&p.title, p.pane_command.as_deref()))
+    {
+        let id = p.id;
+        zellij_action(&["go-to-tab-by-id".into(), p.tab_id.to_string()])?;
+        focus_pane_by_id(&panes, id)?;
+        return Ok(());
+    }
+    let target = sidebar_target_cols(tab_columns(&panes, tab));
+    let id = create_sidebar(target)?;
+    let id_n = id
+        .strip_prefix("terminal_")
+        .and_then(|n| n.parse::<u32>().ok())
+        .context("zellij returned an unexpected pane id")?;
+    focus_pane_by_id(&zellij_panes()?, id_n)?;
+    Ok(())
+}
+
+/// Jump to an agent's pane from the sidebar's digit keys. The pane is found
+/// through `AGENT_TASK_ID` in its command (attach panes carry it); the
+/// task's recorded pane id is the fallback. Crosses tabs when needed.
+pub(crate) fn focus_agent_pane(task_id: &str, recorded_pane: Option<u32>) -> Result<()> {
+    let panes = zellij_panes()?;
+    let needle = format!("AGENT_TASK_ID={task_id}");
+    let target = panes
+        .iter()
+        .find(|p| {
+            !p.is_plugin
+                && p.pane_command
+                    .as_deref()
+                    .is_some_and(|c| c.contains(&needle))
+        })
+        .map(|p| p.id)
+        .or_else(|| recorded_pane.filter(|id| panes.iter().any(|p| !p.is_plugin && p.id == *id)));
+    let Some(id) = target else {
+        anyhow::bail!("no live pane for this agent");
+    };
+    let pane_tab = panes.iter().find(|p| p.id == id).map(|p| p.tab_id);
+    if let (Some(target_tab), Some(current)) = (pane_tab, current_tab_id(&panes)) {
+        if target_tab != current {
+            zellij_action(&["go-to-tab-by-id".into(), target_tab.to_string()])?;
+        }
+    }
+    focus_pane_by_id(&panes, id)
+}
+
+pub(crate) fn close_sidebar_pane() -> Result<()> {
+    let panes = zellij_panes()?;
+    let tab = current_tab_id(&panes).context(
+        "Not inside zellij. Focus the sidebar pane and press q, or close that pane from zellij.",
+    )?;
+    let hits: Vec<u32> = panes
+        .iter()
+        .filter(|p| {
+            !p.is_plugin && p.tab_id == tab && is_sidebar_pane(&p.title, p.pane_command.as_deref())
+        })
+        .map(|p| p.id)
+        .collect();
+    if hits.is_empty() {
+        println!("No sidebar in this tab.");
+        return Ok(());
+    }
+    for id in hits {
+        let status = std::process::Command::new("zellij")
+            .args(["action", "close-pane", "--pane-id", &pane_ref(id)])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .context("zellij not available")?;
+        if !status.success() {
+            anyhow::bail!("Failed to close sidebar pane {}", pane_ref(id));
+        }
+    }
+    println!("Sidebar closed.");
+    Ok(())
+}
+
+/// Pull an AGENT_TASK_ID value out of a pane's command line / environ blob.
+pub(crate) fn extract_task_id(blob: &str) -> Option<String> {
+    const KEY: &str = "AGENT_TASK_ID=";
+    let start = blob.find(KEY)? + KEY.len();
+    let rest = &blob[start..];
+    let end = rest
+        .find(|c: char| c.is_whitespace() || c == '\0')
+        .unwrap_or(rest.len());
+    let id = &rest[..end];
+    if id.is_empty() {
+        None
+    } else {
+        Some(id.to_string())
     }
 }

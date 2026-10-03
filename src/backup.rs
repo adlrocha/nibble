@@ -167,7 +167,11 @@ pub fn create_backup(output: Option<PathBuf>, include_sessions: bool) -> Result<
     let mut sources: Vec<(PathBuf, PathBuf, bool)> =
         vec![(source.clone(), PathBuf::from(".nibble"), true)];
     if include_sessions {
-        for rel in [".pi/agent/sessions", ".omp/agent/sessions", ".claude/projects"] {
+        for rel in [
+            ".pi/agent/sessions",
+            ".omp/agent/sessions",
+            ".claude/projects",
+        ] {
             let dir = home.join(rel);
             // The consolidated layout symlinks these paths into
             // ~/.nibble/sessions, which the base source above already

@@ -33,6 +33,7 @@ pub(crate) fn agent_display(agent_type: &AgentType) -> (&'static str, String) {
         AgentType::ClaudeCode => ("🤖", "Claude Code".to_string()),
         AgentType::Hermes => ("🧠", "Hermes".to_string()),
         AgentType::Pi => ("🥧", "Pi".to_string()),
+        AgentType::Omp => ("⬡", "omp".to_string()),
         AgentType::Unknown(s) => ("🔧", s.clone()),
     }
 }

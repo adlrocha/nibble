@@ -9,6 +9,12 @@ mod format;
 mod hermes;
 mod memory;
 mod models;
+mod agent_input;
+mod cron;
+mod lm;
+mod notifications;
+mod privacy_filter;
+mod quota_watch;
 mod sandbox;
 mod session;
 mod status;
@@ -40,11 +46,39 @@ fn main() -> Result<()> {
         Commands::Prune => {
             commands::prune_stale_tasks(&db)?;
         }
-        Commands::Status { watch, json, all } => {
-            status::cmd_status(&db, watch, json, all)?;
+        Commands::Status {
+            watch,
+            json,
+            all,
+            clear,
+            scratch,
+        } => {
+            if scratch {
+                commands::cmd_sandbox_kill_all(&db)?;
+                let n = db.delete_all_tasks()?;
+                println!("Removed {n} task row(s). Sandboxes stopped.");
+            } else if clear {
+                let n = db.delete_exited_tasks()?;
+                println!("Removed {n} exited task row(s).");
+            } else {
+                status::cmd_status(&db, watch, json, all)?;
+            }
         }
-        Commands::Sidebar { install, uninstall } => {
-            status::cmd_sidebar(install, uninstall)?;
+        Commands::Sidebar {
+            install,
+            uninstall,
+            focus,
+            close,
+        } => {
+            if install || uninstall {
+                status::cmd_sidebar(install, uninstall)?;
+            } else if close {
+                status::close_sidebar_pane()?;
+            } else {
+                // focus (or bare `nibble sidebar`): open + focus the pane
+                status::open_sidebar_pane()?;
+                status::focus_sidebar_pane()?;
+            }
         }
         Commands::Goto { task } => {
             status::cmd_goto(&db, &task)?;
@@ -58,6 +92,7 @@ fn main() -> Result<()> {
                 pid,
                 ppid,
                 zellij_pane_id,
+                zellij_session,
                 session_id,
             } => {
                 let mut task = Task::new(
@@ -72,6 +107,12 @@ fn main() -> Result<()> {
                     extra.insert(
                         "zellij_pane_id".to_string(),
                         serde_json::Value::Number(pane_id.into()),
+                    );
+                }
+                if let Some(session) = zellij_session {
+                    extra.insert(
+                        "zellij_session_name".to_string(),
+                        serde_json::Value::String(session),
                     );
                 }
                 task.context = Some(TaskContext {
@@ -106,6 +147,7 @@ fn main() -> Result<()> {
                     AgentType::ClaudeCode
                     | AgentType::Hermes
                     | AgentType::Pi
+                    | AgentType::Omp
                     | AgentType::Unknown(_) => {
                         if session_id.starts_with("ses_") {
                             // Legacy session ID (ses_ prefix) — ignore
@@ -353,6 +395,155 @@ fn main() -> Result<()> {
             let zip_path = PathBuf::from(path);
             backup::import_backup(&zip_path)?;
         }
+
+        Commands::Inject { task_id, message } => {
+            let task = db
+                .get_task_by_id(&task_id)?
+                .ok_or_else(|| anyhow::anyhow!("Task not found: {}", task_id))?;
+
+            if task.agent_type == AgentType::Hermes {
+                anyhow::bail!("Inject is not yet supported for Hermes sandboxes. Use `nibble sandbox attach` instead.");
+            }
+            if matches!(task.agent_type, AgentType::Pi | AgentType::Omp) {
+                anyhow::bail!(
+                    "Inject is not yet supported for {} sandboxes. Use `nibble sandbox attach` instead.",
+                    task.agent_type
+                );
+            }
+            agent_input::inject(&task, &message)?;
+            println!("Message injected into task {}", task_id);
+        }
+
+        Commands::Listen => {
+            let cfg = config::load().unwrap_or_default();
+
+            if !cfg.telegram.is_configured() {
+                anyhow::bail!("Telegram is not configured. Run scripts/setup-telegram.sh first.");
+            }
+
+            // Run an initial prune before entering the listener loop so stale
+            // tasks from a previous crash or reboot are cleaned up immediately.
+            let _ = commands::prune_stale_tasks(&db);
+
+            notifications::telegram_listener::run(&db, &cfg.telegram)?;
+        }
+
+        Commands::QuotaWatch { once } => {
+            let cfg = config::load().unwrap_or_default();
+            let db_path = db::default_db_path();
+            if once {
+                quota_watch::run_once(cfg.quota_watch, db_path)?;
+            } else {
+                quota_watch::run(cfg.quota_watch, db_path)?;
+            }
+        }
+
+        Commands::Lm { action } => {
+            let cfg = config::load().unwrap_or_default();
+            match action {
+                cli::LmAction::List => {
+                    let models = lm::list_models(&cfg.lm)?;
+                    lm::print_list(&models);
+                }
+                cli::LmAction::Use { model } => {
+                    lm::use_model(&cfg.lm, &model)?;
+                }
+            }
+        }
+
+        Commands::Notify {
+            message,
+            task_id,
+            attention,
+        } => {
+            let cfg = config::load().unwrap_or_default();
+
+            if !cfg.telegram.is_configured() {
+                eprintln!(
+                    "Telegram notifications are not configured. \
+                     Run scripts/setup-telegram.sh to set them up."
+                );
+                // Exit cleanly — missing config is not a fatal error for hooks.
+                return Ok(());
+            }
+
+            if !cfg.telegram.notifications {
+                // Agent-triggered notifications are disabled by the user.
+                return Ok(());
+            }
+
+            let text = notifications::build_notification_text(
+                &db,
+                task_id.as_deref(),
+                &message,
+                attention,
+            )?;
+
+            let msg_id = if let Some(tid) = &task_id {
+                notifications::telegram::send_with_reply_button(&cfg.telegram, &text, tid)
+                    .context("Failed to send Telegram notification")?
+            } else {
+                notifications::telegram::send(&cfg.telegram, &text)
+                    .context("Failed to send Telegram notification")?
+            };
+
+            // Record the Telegram message_id → task_id mapping so the listener
+            // can route phone replies back to the right agent session.
+            if let Some(tid) = &task_id {
+                let _ = db.insert_bot_message(msg_id, tid);
+            }
+        }
+
+        Commands::Cron { action } => match action {
+            cli::CronAction::Add {
+                repo,
+                schedule,
+                prompt,
+                file,
+                label,
+                expires,
+            } => {
+                cron::commands::cmd_cron_add(&db, repo, schedule, prompt, file, label, expires)?;
+            }
+            cli::CronAction::List { repo_path } => {
+                cron::commands::cmd_cron_list(&db, repo_path)?;
+            }
+            cli::CronAction::Edit {
+                id,
+                schedule,
+                prompt,
+                label,
+                enable,
+                disable,
+                expires,
+            } => {
+                let cron_id = cron::commands::resolve_cron_id(&db, &id)?;
+                cron::commands::cmd_cron_edit(
+                    &db, cron_id, schedule, prompt, label, enable, disable, expires,
+                )?;
+            }
+            cli::CronAction::Stop { id } => {
+                let cron_id = cron::commands::resolve_cron_id(&db, &id)?;
+                cron::commands::cmd_cron_edit(&db, cron_id, None, None, None, false, true, None)?;
+            }
+            cli::CronAction::Start { id } => {
+                let cron_id = cron::commands::resolve_cron_id(&db, &id)?;
+                cron::commands::cmd_cron_edit(&db, cron_id, None, None, None, true, false, None)?;
+            }
+            cli::CronAction::Kill { id } => {
+                let cron_id = cron::commands::resolve_cron_id(&db, &id)?;
+                let deleted = db.delete_cron_job(cron_id)?;
+                if deleted {
+                    println!("Deleted cron job {}", id);
+                } else {
+                    println!("Cron job {} not found", id);
+                }
+            }
+            cli::CronAction::Run { id } => {
+                let cron_id = cron::commands::resolve_cron_id(&db, &id)?;
+                cron::commands::cmd_cron_run(&db, cron_id)?;
+            }
+        },
         // ── Sandbox subcommands ────────────────────────────────────────────
         Commands::Sandbox { action } => match action {
             SandboxAction::Spawn {

@@ -162,8 +162,17 @@ for ext_dir in "$HOME/.nibble/extensions" "$HOME/.pi/agent/extensions" "$HOME/.o
         fi
     done
 done
+# ── 8. Remove agent usage timer ──────────────────────────────────────────────
+step "Removing agent usage timer"
 
-# ── 8. Remove Claude Code hooks ──────────────────────────────────────────────
+systemctl --user disable --quiet nibble-agent-usage.timer 2>/dev/null || true
+rm -f "$HOME/.config/systemd/user/nibble-agent-usage.service" \
+      "$HOME/.config/systemd/user/nibble-agent-usage.timer" \
+      "$HOME/.local/bin/nibble-agent-usage" \
+      "$HOME"/.local/state/omarchy/agents/usage/{zai,kimi,grok}.json
+systemctl --user daemon-reload 2>/dev/null || true
+
+# ── 9. Remove Claude Code hooks ──────────────────────────────────────────────
 step "Removing Claude Code hooks"
 
 if [ -f "$CLAUDE_SETTINGS" ] && command -v jq >/dev/null 2>&1; then
