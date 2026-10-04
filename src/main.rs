@@ -12,7 +12,6 @@ mod models;
 mod agent_input;
 mod cron;
 mod lm;
-mod notifications;
 mod privacy_filter;
 mod quota_watch;
 mod sandbox;
@@ -414,19 +413,6 @@ fn main() -> Result<()> {
             println!("Message injected into task {}", task_id);
         }
 
-        Commands::Listen => {
-            let cfg = config::load().unwrap_or_default();
-
-            if !cfg.telegram.is_configured() {
-                anyhow::bail!("Telegram is not configured. Run scripts/setup-telegram.sh first.");
-            }
-
-            // Run an initial prune before entering the listener loop so stale
-            // tasks from a previous crash or reboot are cleaned up immediately.
-            let _ = commands::prune_stale_tasks(&db);
-
-            notifications::telegram_listener::run(&db, &cfg.telegram)?;
-        }
 
         Commands::QuotaWatch { once } => {
             let cfg = config::load().unwrap_or_default();
@@ -451,48 +437,6 @@ fn main() -> Result<()> {
             }
         }
 
-        Commands::Notify {
-            message,
-            task_id,
-            attention,
-        } => {
-            let cfg = config::load().unwrap_or_default();
-
-            if !cfg.telegram.is_configured() {
-                eprintln!(
-                    "Telegram notifications are not configured. \
-                     Run scripts/setup-telegram.sh to set them up."
-                );
-                // Exit cleanly — missing config is not a fatal error for hooks.
-                return Ok(());
-            }
-
-            if !cfg.telegram.notifications {
-                // Agent-triggered notifications are disabled by the user.
-                return Ok(());
-            }
-
-            let text = notifications::build_notification_text(
-                &db,
-                task_id.as_deref(),
-                &message,
-                attention,
-            )?;
-
-            let msg_id = if let Some(tid) = &task_id {
-                notifications::telegram::send_with_reply_button(&cfg.telegram, &text, tid)
-                    .context("Failed to send Telegram notification")?
-            } else {
-                notifications::telegram::send(&cfg.telegram, &text)
-                    .context("Failed to send Telegram notification")?
-            };
-
-            // Record the Telegram message_id → task_id mapping so the listener
-            // can route phone replies back to the right agent session.
-            if let Some(tid) = &task_id {
-                let _ = db.insert_bot_message(msg_id, tid);
-            }
-        }
 
         Commands::Cron { action } => match action {
             cli::CronAction::Add {
