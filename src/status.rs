@@ -91,10 +91,23 @@ pub(crate) enum SidebarState {
     Exited,
 }
 
+/// A Running row whose last report is older than this renders as idle: a
+/// working agent reports every few seconds, so long silence means the
+/// process died without a shutdown report (killed, crashed) — especially
+/// self-healed rows, which carry no pid for the liveness reconcile to
+/// check and would otherwise glow "working" forever. Display-only: the
+/// DB keeps the last reported status.
+const STALE_RUNNING_SECS: i64 = 30 * 60;
+
 pub(crate) fn sidebar_state(task: &Task) -> SidebarState {
     match task.status {
         TaskStatus::Exited => SidebarState::Exited,
         _ if task.attention_reason.is_some() => SidebarState::Blocked,
+        TaskStatus::Running
+            if (chrono::Utc::now() - task.updated_at).num_seconds() > STALE_RUNNING_SECS =>
+        {
+            SidebarState::Idle
+        }
         TaskStatus::Running => SidebarState::Running,
         TaskStatus::Completed => SidebarState::Idle,
     }
@@ -420,11 +433,12 @@ pub(crate) fn cmd_status(db: &Database, watch: bool, json: bool, all: bool) -> R
         return Ok(());
     }
 
-    let width = std::env::var("COLUMNS")
+    // COLUMNS is a shell-exported convenience; zellij panes run nibble
+    // directly, so fall back to the real terminal size (TIOCGWINSZ) — the
+    // sidebar pane is a fraction of the tab and a wrong width wraps lines.
+    let env_width = std::env::var("COLUMNS")
         .ok()
-        .and_then(|c| c.parse::<usize>().ok())
-        .unwrap_or(40)
-        .max(20);
+        .and_then(|c| c.parse::<usize>().ok());
 
     // In watch mode grab single-key input so digits jump to the agent's pane.
     let mut raw = if watch { RawMode::enable() } else { None };
@@ -433,6 +447,11 @@ pub(crate) fn cmd_status(db: &Database, watch: bool, json: bool, all: bool) -> R
     let color = std::io::stdout().is_terminal();
 
     loop {
+        // Re-read each frame so pane resizes are picked up live.
+        let width = env_width
+            .or_else(|| terminal_size().map(|(cols, _)| cols as usize))
+            .unwrap_or(40)
+            .max(20);
         let tasks = collect_status_tasks(db, all)?;
         // Topic lines come from zellij pane titles — sidebar (watch) only,
         // matching the pre-merge renderer; a no-op outside zellij.
@@ -470,27 +489,37 @@ pub(crate) fn cmd_status(db: &Database, watch: bool, json: bool, all: bool) -> R
             std::thread::sleep(std::time::Duration::from_secs(1));
             continue;
         }
-        match read_key(1000) {
-            Some(Some(key)) => match key {
-                b'q' | 0x03 => break,
-                b'1'..=b'9' => {
-                    let idx = (key - b'1') as usize;
-                    notice = Some(match tasks.get(idx) {
-                        Some(t) => match pane_id_of(t) {
-                            Some(pane) => focus_pane_id(pane)
-                                .map_err(|e| e.to_string())
-                                .err()
-                                .unwrap_or_else(|| format!("→ {}", t.title.trim())),
-                            None => format!("no pane recorded for {}", t.title.trim()),
-                        },
-                        None => format!("no row {idx}"),
-                    });
+        match stdin_keys(1000) {
+            Ok(keys) => {
+                let mut quit = false;
+                for key in keys {
+                    match key {
+                        b'q' | b'Q' | 0x03 | 0x04 => {
+                            quit = true;
+                            break;
+                        }
+                        b'1'..=b'9' => {
+                            let idx = (key - b'1') as usize;
+                            notice = Some(match tasks.get(idx) {
+                                Some(t) => match pane_id_of(t) {
+                                    Some(pane) => focus_pane_id(pane)
+                                        .map_err(|e| e.to_string())
+                                        .err()
+                                        .unwrap_or_else(|| format!("→ {}", t.title.trim())),
+                                    None => format!("no pane recorded for {}", t.title.trim()),
+                                },
+                                None => format!("no row {idx}"),
+                            });
+                        }
+                        _ => {}
+                    }
                 }
-                _ => {}
-            },
+                if quit {
+                    break;
+                }
+            }
             // stdin went away (pane closed, piped input) — stop polling
-            Some(None) => raw = None,
-            None => {}
+            Err(()) => raw = None,
         }
     }
     drop(raw);
@@ -530,10 +559,30 @@ impl Drop for RawMode {
         }
     }
 }
-/// Wait up to `timeout_ms` for a byte on stdin.
-/// `Some(Some(b))` = key, `Some(None)` = stdin closed/EOF (stop reading),
-/// `None` = nothing arrived in time.
-fn read_key(timeout_ms: i32) -> Option<Option<u8>> {
+/// Terminal size of stdout, from the kernel (TIOCGWINSZ) — the source of
+/// truth in zellij panes, where no shell has exported COLUMNS.
+fn terminal_size() -> Option<(u16, u16)> {
+    // SAFETY: ioctl(2) on fd 1 with a valid winsize pointer.
+    let mut ws = libc::winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    if unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) } != 0
+        || ws.ws_col == 0
+    {
+        return None;
+    }
+    Some((ws.ws_col, ws.ws_row))
+}
+
+/// Keys pressed during the refresh window, read as one batch. Batches that
+/// start with ESC (arrows, function keys, shift+arrows — CSI sequences
+/// carry digits like `ESC [ 1 ; 2 C`) are dropped wholesale so embedded
+/// digits never trigger a jump. `Err(())` means stdin is closed (EOF) —
+/// the caller should stop polling.
+fn stdin_keys(timeout_ms: i32) -> Result<Vec<u8>, ()> {
     let mut pfd = libc::pollfd {
         fd: 0,
         events: libc::POLLIN,
@@ -542,15 +591,21 @@ fn read_key(timeout_ms: i32) -> Option<Option<u8>> {
     // SAFETY: poll(2) on a single stack pollfd.
     let ready = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
     if ready <= 0 {
-        return None;
+        return Ok(Vec::new());
     }
-    let mut buf = [0u8; 1];
-    // SAFETY: read(2) one byte from fd 0.
-    let n = unsafe { libc::read(0, buf.as_mut_ptr() as *mut libc::c_void, 1) };
+    let mut buf = [0u8; 32];
+    // SAFETY: read(2) up to 32 bytes from fd 0.
+    let n = unsafe { libc::read(0, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
     match n {
-        1 => Some(Some(buf[0])),
-        0 => Some(None), // EOF — stdin closed, poll would spin forever
-        _ => None,       // read error (e.g. EINTR) — treat as no key
+        0 => Err(()), // EOF — pane closed / piped input exhausted
+        n if n > 0 => {
+            if buf[0] == 0x1b {
+                Ok(Vec::new()) // escape-prefixed sequence: drop the batch
+            } else {
+                Ok(buf[..n as usize].to_vec())
+            }
+        }
+        _ => Ok(Vec::new()), // read error (e.g. EINTR) — treat as no keys
     }
 }
 
@@ -731,6 +786,30 @@ mod tests {
         let mut t = task();
         assert!(!apply_status_transition(&mut t, "bogus", None));
         assert!(!apply_status_transition(&mut t, "RUNNING", None));
+    }
+
+    #[test]
+    fn stale_running_row_renders_idle() {
+        let mut stale = task();
+        apply_status_transition(&mut stale, "running", None);
+        stale.updated_at =
+            chrono::Utc::now() - chrono::Duration::seconds(STALE_RUNNING_SECS + 60);
+        assert_eq!(
+            sidebar_state(&stale),
+            SidebarState::Idle,
+            "silent running row demotes to idle"
+        );
+
+        let mut fresh = task();
+        apply_status_transition(&mut fresh, "running", None);
+        assert_eq!(sidebar_state(&fresh), SidebarState::Running);
+
+        // Blocked never demotes — a live blocked agent is silent by nature.
+        let mut blocked = task();
+        apply_status_transition(&mut blocked, "blocked", Some("approve bash"));
+        blocked.updated_at =
+            chrono::Utc::now() - chrono::Duration::seconds(STALE_RUNNING_SECS + 60);
+        assert_eq!(sidebar_state(&blocked), SidebarState::Blocked);
     }
 
     #[test]
