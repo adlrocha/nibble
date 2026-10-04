@@ -25,7 +25,7 @@ This section lists every feature area in the project. Use it to audit what's wor
 | 11 | **Alternative LLM backends** | experimental | `--kimi`, `--glm` flags on attach — use non-Claude agents inside the same sandbox |
 | 15 | **Cron jobs** | scheduling | Schedule prompts to run inside sandboxes on a cron expression; markdown file format; skip-if-running; expiry |
 | 16 | **Status line** | dx | Claude Code terminal status bar showing dir, branch, model, context %, 5h and 7d rate limit bars |
-| 17 | **Health checks** | ops | `SandboxHealth` enum (Healthy/Degraded/Dead); periodic prune daemon; alert on unexpected container death |
+| 17 | **Health checks** | ops | `SandboxHealth` enum (Healthy/Degraded/Dead); `nibble prune` health-checks sandboxes — stopped → silent restart, unrestartable → exited, dead container → task pruned; manual (no periodic daemon since the listen daemon was removed) |
 | 18 | **Auto-resume on reboot** | ops | systemd user service (`nibble-resume.service`) restarts containers after host reboot |
 | 19 | **Inject** | ops | `nibble inject <id> <msg>` — send a message directly into any sandbox agent's session |
 | 20 | **Web session inspector** | dx | `nibble web` — dark-mode browser UI (port 7878) for browsing/searching pi sessions, usage dashboard, conversation viewer; runs as `nibble-web.service`, Tailscale-reachable with token auth. See [docs/web.md](docs/web.md) |
@@ -468,7 +468,7 @@ nibble sandbox attach . --fresh
 
 ### Container crash detection
 
-If a container disappears unexpectedly (OOM, host kill, etc.), `nibble prune` detects it and marks the task exited so you can re-spawn.
+If a container disappears unexpectedly (OOM, host kill, etc.), `nibble prune` detects it and deletes the task row — the session files live on the host mounts, so re-spawning the sandbox is always possible.
 
 ---
 

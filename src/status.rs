@@ -362,18 +362,6 @@ pub(crate) fn pane_id_of(task: &Task) -> Option<u32> {
         .and_then(|v| u32::try_from(v).ok())
 }
 
-fn focus_pane_id(pane_id: u32) -> Result<()> {
-    let status = std::process::Command::new("zellij")
-        .args(["action", "focus-pane-id"])
-        .arg(pane_id.to_string())
-        .status()
-        .context("failed to run `zellij action focus-pane-id`")?;
-    if !status.success() {
-        anyhow::bail!("zellij action focus-pane-id exited with {status}");
-    }
-    Ok(())
-}
-
 /// Rename the zellij pane the caller is running in to the given title, so
 /// agent panes are recognisable in the frame border. Best-effort: silently
 /// no-ops outside zellij and never fails the caller (hooks must not break
@@ -411,19 +399,21 @@ fn resolve_task(db: &Database, target: &str) -> Result<Task> {
 }
 
 /// `nibble goto <task>` — jump to the zellij pane hosting the agent.
+/// Prefers a live pane running the task (found via `AGENT_TASK_ID` in the
+/// pane command), falls back to the recorded pane id; switches tabs first
+/// when the target lives in another tab.
 pub(crate) fn cmd_goto(db: &Database, target: &str) -> Result<()> {
     if std::env::var_os("ZELLIJ").is_none() {
         anyhow::bail!("not inside a zellij session");
     }
     let task = resolve_task(db, target)?;
-    match pane_id_of(&task) {
-        Some(pane) => focus_pane_id(pane),
-        None => anyhow::bail!(
-            "no zellij pane recorded for task {} (host agents started before \
-             the wrappers were installed, or a dead pane, have none)",
+    focus_agent_pane(&task.task_id, pane_id_of(&task)).map_err(|_| {
+        anyhow::anyhow!(
+            "no live pane for task {} (host agents started before the \
+             wrappers were installed, or a dead pane, have none)",
             &task.task_id[..8.min(task.task_id.len())]
-        ),
-    }
+        )
+    })
 }
 
 pub(crate) fn cmd_status(db: &Database, watch: bool, json: bool, all: bool) -> Result<()> {
@@ -501,12 +491,9 @@ pub(crate) fn cmd_status(db: &Database, watch: bool, json: bool, all: bool) -> R
                         b'1'..=b'9' => {
                             let idx = (key - b'1') as usize;
                             notice = Some(match tasks.get(idx) {
-                                Some(t) => match pane_id_of(t) {
-                                    Some(pane) => focus_pane_id(pane)
-                                        .map_err(|e| e.to_string())
-                                        .err()
-                                        .unwrap_or_else(|| format!("→ {}", t.title.trim())),
-                                    None => format!("no pane recorded for {}", t.title.trim()),
+                                Some(t) => match focus_agent_pane(&t.task_id, pane_id_of(t)) {
+                                    Ok(()) => format!("→ {}", t.title.trim()),
+                                    Err(e) => e.to_string(),
                                 },
                                 None => format!("no row {idx}"),
                             });
