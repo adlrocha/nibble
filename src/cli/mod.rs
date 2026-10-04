@@ -69,8 +69,6 @@ pub enum Commands {
         /// Message to send
         message: String,
     },
-    /// Run the Telegram long-polling daemon (routes phone replies back to agents)
-    Listen,
 
     /// Run the quota auto-continue daemon (watch for subscription quota
     /// errors in agent sessions and continue the tasks once the quota resets)
@@ -79,26 +77,13 @@ pub enum Commands {
         #[arg(long)]
         once: bool,
     },
-    /// Send a Telegram notification (used by hooks and wrappers)
-    Notify {
-        /// Message body to send (agent last output or permission request)
-        #[arg(short, long)]
-        message: String,
 
-        /// Optional task ID to attach context (agent type, title, elapsed time)
-        #[arg(short, long)]
-        task_id: Option<String>,
-
-        /// Mark this as an attention-required notification (permission request, question, etc.)
-        /// Uses a distinct visual style so it stands out from regular completion notifications.
-        #[arg(long)]
-        attention: bool,
-    },
     /// Manage scheduled cron jobs for sandboxes
     Cron {
         #[command(subcommand)]
         action: CronAction,
     },
+
     /// List and manage local LLM model files
     Lm {
         #[command(subcommand)]

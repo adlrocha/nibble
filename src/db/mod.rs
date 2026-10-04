@@ -27,7 +27,7 @@ impl Database {
 
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
-             PRAGMA busy_timeout=5000;",
+             PRAGMA busy_timeout=30000;",
         )
         .context("Failed to set DB pragmas")?;
 
@@ -524,40 +524,10 @@ impl Database {
         Ok(tasks)
     }
 
-    /// Record that a Telegram message was sent for a task, so replies can be routed back.
-    pub fn insert_bot_message(&self, message_id: i64, task_id: &str) -> Result<()> {
-        let now = Utc::now().timestamp();
-        self.conn.execute(
-            "INSERT OR REPLACE INTO bot_messages (message_id, task_id, sent_at) VALUES (?1, ?2, ?3)",
-            params![message_id, task_id, now],
-        )?;
-        Ok(())
-    }
 
-    /// Look up which task a Telegram message belongs to (for routing replies).
-    pub fn get_task_id_by_message_id(&self, message_id: i64) -> Result<Option<String>> {
-        let task_id = self
-            .conn
-            .query_row(
-                "SELECT task_id FROM bot_messages WHERE message_id = ?1",
-                params![message_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(task_id)
-    }
 
     /// Return the total number of bot messages recorded for `task_id`.
     /// Used by the safety-net to detect new notifications added after an inject started,
-    /// without relying on timestamps (avoids clock-skew and WAL snapshot issues).
-    pub fn bot_message_count_for_task(&self, task_id: &str) -> Result<i64> {
-        let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM bot_messages WHERE task_id = ?1",
-            params![task_id],
-            |row| row.get(0),
-        )?;
-        Ok(count)
-    }
 
     /// Read a value from the key-value store.
     pub fn kv_get(&self, key: &str) -> Result<Option<String>> {

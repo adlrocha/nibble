@@ -851,12 +851,8 @@ pub fn format_workspace(ws: Option<&str>) -> String {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// Last assistant message extraction (for Telegram safety-net)
-// ══════════════════════════════════════════════════════════════════════════════
 
 /// Best-effort extraction of the last assistant message for a task.
-/// Used by the Telegram listener safety-net to send actual output instead
-/// of a generic "Agent turn complete" message.
 pub fn last_assistant_message_for_task(task: &crate::models::Task) -> Option<String> {
     let home = dirs::home_dir().unwrap_or_default();
 

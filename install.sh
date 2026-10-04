@@ -248,10 +248,6 @@ ok "nibble"
 
 
 # Restart services that were running before.
-if [ "$LISTENER_WAS_ACTIVE" = true ]; then
-    systemctl --user start nibble-listener.service 2>/dev/null || warn "Could not restart nibble-listener.service"
-    ok "Restarted nibble-listener.service"
-fi
 
 if [ "$QUOTA_WATCH_WAS_ACTIVE" = true ]; then
     systemctl --user start nibble-quota-watch.service 2>/dev/null || warn "Could not restart nibble-quota-watch.service"
