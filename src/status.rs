@@ -3,8 +3,9 @@
 //!
 //! Producers (claude hooks, pi/omp extension events, wrappers) report status
 //! transitions; this module validates and persists them, renders a compact
-//! two-line-per-task table for narrow panes, and can open the view as a
-//! zellij side panel in the current session.
+//! two-line-per-task table (plus a dim topic line from the agent's zellij pane
+//! title when present) for narrow panes, and can open the view as a zellij
+//! side panel in the current session.
 
 use anyhow::{Context, Result};
 
@@ -99,12 +100,20 @@ pub(crate) fn sidebar_state(task: &Task) -> SidebarState {
     }
 }
 
-fn state_icon(state: &SidebarState) -> &'static str {
-    match state {
-        SidebarState::Blocked => "\u{1F534}", // red
-        SidebarState::Running => "\u{1F7E2}", // green
-        SidebarState::Idle => "\u{26AA}",     // white
-        SidebarState::Exited => "\u{26AB}",   // black
+/// Traffic-light activity mark (restored from the pre-merge renderer of
+/// 757585c/ebbbfb3): red `!` needs input, orange `●` working, green `●`
+/// ready for input, dim `·` exited.
+fn state_mark(state: &SidebarState, color: bool) -> String {
+    let (glyph, code) = match state {
+        SidebarState::Blocked => ("!", "1;31"),
+        SidebarState::Running => ("●", "38;5;208"),
+        SidebarState::Idle => ("●", "32"),
+        SidebarState::Exited => ("·", "2"),
+    };
+    if color {
+        format!("\x1b[{code}m{glyph}\x1b[0m")
+    } else {
+        glyph.to_string()
     }
 }
 
@@ -144,14 +153,37 @@ fn truncate_chars(s: &str, max: usize) -> String {
     }
 }
 
+/// Topics reported by agent pane titles, keyed by task id (via
+/// `AGENT_TASK_ID` in the pane command) and by pane id — the live
+/// "what is this agent doing" line under each row.
+pub(crate) type PaneTopics = (HashMap<String, String>, HashMap<u32, String>);
+
 /// Render the status list for a terminal `width` columns wide.
-/// Two lines per task so narrow (sidebar) panes stay readable.
-/// `numbered` prefixes `N)` keys for the interactive watch mode (max 9).
-pub(crate) fn render_status(tasks: &[&Task], width: usize, numbered: bool) -> String {
+/// Two lines per task so narrow (sidebar) panes stay readable, plus a dim
+/// topic line when the agent's pane title reports one. `numbered` prefixes
+/// `N)` keys for the interactive watch mode (max 9) and appends the legend.
+pub(crate) fn render_status(
+    tasks: &[&Task],
+    width: usize,
+    numbered: bool,
+    color: bool,
+    topics: Option<&PaneTopics>,
+) -> String {
+    if tasks.is_empty() {
+        let mut out = "  no active agents\n".to_string();
+        if numbered {
+            if let Some(legend) = legend_line(width, color) {
+                out.push('\n');
+                out.push_str(&legend);
+                out.push('\n');
+            }
+        }
+        return out;
+    }
     let mut out = String::new();
     for (i, task) in tasks.iter().enumerate() {
         let state = sidebar_state(task);
-        let icon = state_icon(&state);
+        let icon = state_mark(&state, color);
         let (_emoji, agent_label) = agent_display(&task.agent_type);
         let location = task
             .container_name
@@ -203,8 +235,57 @@ pub(crate) fn render_status(tasks: &[&Task], width: usize, numbered: bool) -> St
         } else {
             out.push_str(&format!("   {detail}\n"));
         }
+        // Dim topic line from the agent's pane title, when one is reported.
+        if let Some((by_task, by_pane)) = topics {
+            let topic = by_task
+                .get(&task.task_id)
+                .or_else(|| pane_id_of(task).and_then(|id| by_pane.get(&id)))
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty());
+            if let Some(topic) = topic {
+                let text = truncate_chars(topic, width.saturating_sub(3).max(10));
+                if color {
+                    out.push_str(&format!("\x1b[2m   {text}\x1b[0m\n"));
+                } else {
+                    out.push_str(&format!("   {text}\n"));
+                }
+            }
+        }
+    }
+    if numbered {
+        if let Some(legend) = legend_line(width, color) {
+            out.push('\n');
+            out.push_str(&legend);
+            out.push('\n');
+        }
     }
     out
+}
+
+/// Explains the activity marks so the sidebar pane is self-describing.
+/// Dropped when the pane is too narrow to fit even the compact form.
+fn legend_line(width: usize, color: bool) -> Option<String> {
+    let (needs, working, ready) = if width >= 36 {
+        ("! needs input", "● working", "● ready")
+    } else if width >= 27 {
+        ("! input", "● busy", "● ready")
+    } else {
+        return None;
+    };
+    let paint = |code: &str, text: &str| {
+        if color {
+            format!("\x1b[{code}m{text}\x1b[0m")
+        } else {
+            text.to_string()
+        }
+    };
+    let sep = if color { "\x1b[2m · \x1b[0m" } else { " · " };
+    Some(format!(
+        " {}{sep}{}{sep}{}",
+        paint("1;31", needs),
+        paint("38;5;208", working),
+        paint("32", ready),
+    ))
 }
 
 /// Collect tasks for display: reconcile dead host pids, drop stale exited
@@ -348,14 +429,21 @@ pub(crate) fn cmd_status(db: &Database, watch: bool, json: bool, all: bool) -> R
     // In watch mode grab single-key input so digits jump to the agent's pane.
     let mut raw = if watch { RawMode::enable() } else { None };
     let mut notice: Option<String> = None;
+    use std::io::IsTerminal;
+    let color = std::io::stdout().is_terminal();
 
     loop {
         let tasks = collect_status_tasks(db, all)?;
-        let body = if tasks.is_empty() {
-            "  no active agents\n".to_string()
-        } else {
-            render_status(&tasks.iter().collect::<Vec<_>>(), width, watch)
-        };
+        // Topic lines come from zellij pane titles — sidebar (watch) only,
+        // matching the pre-merge renderer; a no-op outside zellij.
+        let topics = if watch { Some(zellij_pane_topics()) } else { None };
+        let body = render_status(
+            &tasks.iter().collect::<Vec<_>>(),
+            width,
+            watch,
+            color,
+            topics.as_ref(),
+        );
 
         if watch {
             // Clear screen, cursor home.
@@ -649,9 +737,9 @@ mod tests {
     fn render_two_lines_and_multibyte_safe() {
         let mut t = task();
         t.title = "🚧 emoji 标题 that is quite long indeed".to_string();
-        let out = render_status(&[&t], 30, false);
+        let out = render_status(&[&t], 30, false, false, None);
         let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines.len(), 2, "two lines per task");
+        assert_eq!(lines.len(), 2, "two lines per task: {out}");
         assert!(out.contains("Pi"), "agent label present");
         // truncation must not split a multibyte char (would panic or garble)
         assert!(lines[0].chars().count() <= 30 + 4, "respects width");
@@ -671,7 +759,7 @@ mod tests {
             "parent_task_id".to_string(),
             serde_json::Value::String("parent-1".to_string()),
         );
-        let out = render_status(&[&t], 40, false);
+        let out = render_status(&[&t], 40, false, false, None);
         assert!(out.contains("sandbox window"), "window rows locate in the sandbox: {out}");
         assert!(!out.contains("host"), "window rows must not claim host: {out}");
     }
@@ -679,17 +767,90 @@ mod tests {
     #[test]
     fn render_plain_task_shows_host_location() {
         let t = task();
-        let out = render_status(&[&t], 40, false);
+        let out = render_status(&[&t], 40, false, false, None);
         assert!(out.contains("host"), "plain rows keep the host location: {out}");
     }
 
     #[test]
     fn render_numbered_shows_keys() {
         let t = task();
-        let out = render_status(&[&t], 30, true);
+        let out = render_status(&[&t], 30, true, false, None);
         assert!(out.contains("1\x1b[2m)\x1b[0m"), "numbered key prefix");
-        let plain = render_status(&[&t], 30, false);
+        let plain = render_status(&[&t], 30, false, false, None);
         assert!(!plain.contains("1\u{1b}[2m)"), "plain render has no keys");
+    }
+
+    #[test]
+    fn render_marks_match_traffic_light_semantics() {
+        let mut blocked = task();
+        apply_status_transition(&mut blocked, "blocked", Some("approve bash"));
+        let mut working = task();
+        apply_status_transition(&mut working, "running", None);
+        let mut idle = task();
+        apply_status_transition(&mut idle, "completed", None);
+        let mut gone = task();
+        apply_status_transition(&mut gone, "exited", None);
+
+        let out = render_status(&[&blocked, &working, &idle, &gone], 40, false, false, None);
+        let first_lines: Vec<&str> = out.lines().step_by(2).collect();
+        assert!(first_lines[0].starts_with('!'), "blocked shows ! : {out}");
+        assert!(first_lines[1].starts_with('●'), "working shows ● : {out}");
+        assert!(first_lines[2].starts_with('●'), "idle shows ● : {out}");
+        assert!(first_lines[3].starts_with('·'), "exited shows · : {out}");
+
+        let colored = render_status(&[&working], 40, false, true, None);
+        assert!(colored.contains("\x1b[38;5;208m●\x1b[0m"), "working mark is orange: {colored}");
+    }
+
+    #[test]
+    fn render_topic_line_from_pane_title() {
+        let mut t = task(); // task_id "t1"
+        let by_task: PaneTopics = (
+            [("t1".to_string(), "fixing sidebar legend".to_string())].into(),
+            [].into(),
+        );
+        let out = render_status(&[&t], 40, false, false, Some(&by_task));
+        assert!(out.contains("fixing sidebar legend"), "topic by task id: {out}");
+        assert_eq!(out.lines().count(), 3, "topic line added under the row");
+
+        // Fallback: topic keyed by the recorded zellij pane id.
+        let mut t2 = task();
+        t2.context = Some(TaskContext {
+            url: None,
+            project_path: None,
+            session_id: None,
+            claude_session_id: None,
+            extra: HashMap::from([(
+                "zellij_pane_id".to_string(),
+                serde_json::Value::Number(7u32.into()),
+            )]),
+        });
+        let by_pane: PaneTopics = ([].into(), [(7u32, "by pane".to_string())].into());
+        let out = render_status(&[&t2], 40, false, false, Some(&by_pane));
+        assert!(out.contains("by pane"), "topic by pane id: {out}");
+
+        // No topic reported → plain two-line row, no stray line.
+        let out = render_status(&[&t], 40, false, false, None);
+        assert_eq!(out.lines().count(), 2, "no topic, no extra line: {out}");
+    }
+
+    #[test]
+    fn legend_shown_in_watch_mode_wide_panes_only() {
+        let t = task();
+        let wide = render_status(&[&t], 40, true, false, None);
+        assert!(
+            wide.contains("! needs input · ● working · ● ready"),
+            "full legend in wide sidebar: {wide}"
+        );
+        let compact = render_status(&[&t], 30, true, false, None);
+        assert!(
+            compact.contains("! input · ● busy · ● ready"),
+            "compact legend in narrow sidebar: {compact}"
+        );
+        let narrow = render_status(&[&t], 20, true, false, None);
+        assert!(!narrow.contains("needs input"), "too narrow drops legend: {narrow}");
+        let oneshot = render_status(&[&t], 40, false, false, None);
+        assert!(!oneshot.contains("needs input"), "legend is watch-only: {oneshot}");
     }
 
     #[test]
