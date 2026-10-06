@@ -174,7 +174,11 @@ fn main() -> Result<()> {
                 );
                 db.update_task(&task)?;
             }
-            ReportAction::PaneId { task_id, pane_id } => {
+            ReportAction::PaneId {
+                task_id,
+                pane_id,
+                pid,
+            } => {
                 let mut task = db.ensure_task_or_create(&task_id)?;
                 let ctx = task.context.get_or_insert_with(|| TaskContext {
                     url: None,
@@ -190,6 +194,13 @@ fn main() -> Result<()> {
                     "zellij_pane_id".to_string(),
                     serde_json::Value::Number(pane_id.into()),
                 );
+                // The agent's own pid: graceful sessions report exited on
+                // shutdown, but a killed one never gets the chance — the
+                // pid lets collect_status_tasks reconcile it away even if
+                // its zellij pane stays open.
+                if let Some(pid) = pid {
+                    task.pid = Some(pid);
+                }
                 db.update_task(&task)?;
             }
             ReportAction::Status {
