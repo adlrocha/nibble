@@ -174,6 +174,24 @@ fn main() -> Result<()> {
                 );
                 db.update_task(&task)?;
             }
+            ReportAction::PaneId { task_id, pane_id } => {
+                let mut task = db.ensure_task_or_create(&task_id)?;
+                let ctx = task.context.get_or_insert_with(|| TaskContext {
+                    url: None,
+                    project_path: None,
+                    session_id: None,
+                    claude_session_id: None,
+                    extra: HashMap::new(),
+                });
+                // Pane of the running agent — written by the pi/omp
+                // extension (ZELLIJ_PANE_ID) so sidebar digit-jumps and
+                // `nibble goto` can focus bare-launched sessions too.
+                ctx.extra.insert(
+                    "zellij_pane_id".to_string(),
+                    serde_json::Value::Number(pane_id.into()),
+                );
+                db.update_task(&task)?;
+            }
             ReportAction::Status {
                 task_id,
                 state,

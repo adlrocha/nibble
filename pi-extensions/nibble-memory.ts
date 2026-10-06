@@ -14,7 +14,10 @@
  *   - session_start:   reports the session file path to nibble (eager
  *                      task→session mapping so attach never has to guess
  *                      which session belongs to this task after a reboot)
- *   - agent_start:     status → running (also retries session-path report)
+ *                      and, inside zellij, the pane id so the sidebar's
+ *                      1-9 jumps and `nibble goto` can focus this session
+ *   - agent_start:     status → running (also retries session-path and
+ *                      pane-id reports)
  *   - agent_settled:   status → completed (only when the session is idle,
  *                      so subagent/workflow activity doesn't flap the state)
  *
@@ -110,6 +113,27 @@ const reportSessionPath = (taskId: string, path: string): void => {
 		);
 	} catch {
 		// Non-fatal: session-path reporting is best-effort
+	}
+};
+
+const reportPaneId = (taskId: string): void => {
+	if (!taskId) return;
+	// Pane mapping for the sidebar's 1-9 jumps and `nibble goto`; only
+	// meaningful for host agents living in a zellij pane.
+	const paneId = process.env.ZELLIJ_PANE_ID;
+	if (!paneId || !/^\d+$/.test(paneId)) return;
+
+	try {
+		execSync(
+			`nibble report pane-id '${taskId.replace(/'/g, "'\\''")}' '${paneId}'`,
+			{
+				timeout: 5000,
+				stdio: "pipe",
+				env: { ...process.env, NIBBLE_AGENT_TYPE: agentType() },
+			},
+		);
+	} catch {
+		// Non-fatal: pane-id reporting is best-effort
 	}
 };
 
@@ -278,8 +302,13 @@ export default function (pi: ExtensionAPI) {
 		const file = sm?.getSessionFile?.();
 		if (typeof file === "string" && file) {
 			noteSessionFile(file);
-			const taskId = getTaskId();
-			if (taskId) reportSessionPath(taskId, file);
+		}
+		const taskId = getTaskId();
+		if (taskId) {
+			if (typeof file === "string" && file) {
+				reportSessionPath(taskId, file);
+			}
+			reportPaneId(taskId);
 		}
 	};
 	// ── agent_settled: status → completed (only when truly idle) ───────────
