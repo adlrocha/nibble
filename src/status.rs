@@ -1060,6 +1060,15 @@ fn zellij_panes() -> Result<Vec<ZellijPane>> {
 }
 
 fn current_tab_id(panes: &[ZellijPane]) -> Option<u32> {
+    // The attached client's focused pane is the authoritative "current
+    // tab": goto may run from any pane (a shell, not just the sidebar),
+    // and focusing works relative to what the client sees. Fall back to
+    // this process's own pane when no client is attached.
+    if let Some(id) = focused_pane_id() {
+        if let Some(pane) = panes.iter().find(|p| !p.is_plugin && p.id == id) {
+            return Some(pane.tab_id);
+        }
+    }
     if let Ok(raw) = std::env::var("ZELLIJ_PANE_ID") {
         if let Ok(id) = raw.parse::<u32>() {
             if let Some(pane) = panes.iter().find(|p| !p.is_plugin && p.id == id) {
@@ -1067,9 +1076,7 @@ fn current_tab_id(panes: &[ZellijPane]) -> Option<u32> {
             }
         }
     }
-    focused_pane_id()
-        .and_then(|id| panes.iter().find(|p| !p.is_plugin && p.id == id))
-        .map(|p| p.tab_id)
+    None
 }
 
 /// The pane the attached client is looking at. `list-clients` is the only

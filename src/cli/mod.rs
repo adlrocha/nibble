@@ -233,6 +233,19 @@ pub enum ReportAction {
         path: String,
     },
 
+    /// Record the zellij pane hosting an agent (for sidebar jumps / goto)
+    ///
+    /// Called by the pi/omp nibble-memory extension with ZELLIJ_PANE_ID so
+    /// bare-launched sessions (no wrapper AGENT_TASK_ID env) can still be
+    /// focused from the sidebar's 1-9 keys or `nibble goto`.
+    #[command(name = "pane-id")]
+    PaneId {
+        /// Task ID
+        task_id: String,
+        /// Zellij pane ID
+        pane_id: u32,
+    },
+
     /// Transition a task's live status (called by agent hooks/extensions)
     ///
     /// States: running (actively generating), blocked (needs user input —
