@@ -421,6 +421,36 @@ pub(crate) fn cmd_goto(db: &Database, target: &str) -> Result<()> {
     })
 }
 
+/// Probe whether our own zellij pane still exists. zellij 0.45 can leak
+/// the process of a closed pane (pty left open, no signal), so stdin EOF
+/// never arrives; `rename-pane` is the one action that validates the pane
+/// id — "not found" (pane gone, or the whole session) means this pane is
+/// dead and the watcher should exit instead of rendering forever into a
+/// pane nobody sees. Renaming to the sidebar name is idempotent for
+/// nibble-managed panes; any other failure is assumed transient.
+fn pane_alive(pane_id: u32) -> bool {
+    let out = std::process::Command::new("zellij")
+        .args([
+            "action",
+            "rename-pane",
+            "--pane-id",
+            &pane_ref(pane_id),
+            SIDEBAR_PANE_NAME,
+        ])
+        .output();
+    match out {
+        Ok(o) => {
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            );
+            !text.contains("not found")
+        }
+        Err(_) => true, // zellij missing/busy: assume alive, probe again later
+    }
+}
+
 pub(crate) fn cmd_status(db: &Database, watch: bool, json: bool, all: bool) -> Result<()> {
     if json {
         let tasks = collect_status_tasks(db, all)?;
@@ -440,8 +470,23 @@ pub(crate) fn cmd_status(db: &Database, watch: bool, json: bool, all: bool) -> R
     let mut notice: Option<String> = None;
     use std::io::IsTerminal;
     let color = std::io::stdout().is_terminal();
+    // Our own pane (sidebar), to detect when zellij has closed it — see
+    // `pane_alive`.
+    let my_pane = std::env::var("ZELLIJ_PANE_ID")
+        .ok()
+        .and_then(|p| p.parse::<u32>().ok());
+    let mut frame = 0u32;
 
     loop {
+        frame += 1;
+        // Every ~10s confirm the pane still exists; leaked watchers spin
+        // on a dead pane forever otherwise (one zellij call + DB read per
+        // second each).
+        if let Some(id) = my_pane {
+            if frame % 10 == 0 && !pane_alive(id) {
+                break;
+            }
+        }
         // Re-read each frame so pane resizes are picked up live.
         let width = env_width
             .or_else(|| terminal_size().map(|(cols, _)| cols as usize))
@@ -970,6 +1015,25 @@ mod tests {
     }
 
     #[test]
+    fn terminal_pane_tab_skips_plugin_pane_ids() {
+        // Zellij reuses pane ids across plugin and terminal panes; the
+        // plugin (tab-bar) pane 6 sits in an earlier tab than the terminal
+        // pane 6 hosting the agent.
+        let pane = |id: u32, tab_id: u32, is_plugin: bool| ZellijPane {
+            id,
+            is_plugin,
+            title: if is_plugin { "zellij:tab-bar" } else { "[malone-suite:main]" }.into(),
+            pane_columns: 80,
+            pane_x: 0,
+            tab_id,
+            pane_command: None,
+        };
+        let panes = [pane(6, 2, true), pane(6, 3, false)];
+        assert_eq!(terminal_pane_tab(&panes, 6), Some(3), "terminal pane's tab");
+        assert_eq!(terminal_pane_tab(&panes, 99), None, "unknown pane");
+    }
+
+    #[test]
     fn resolve_task_by_prefix() {
         let tmp = tempfile::TempDir::new().unwrap();
         let db = Database::open(tmp.path().join("t.db")).unwrap();
@@ -1420,6 +1484,17 @@ pub(crate) fn focus_sidebar_pane() -> Result<()> {
     Ok(())
 }
 
+/// The tab a terminal pane lives in. Plugin panes (tab/status bars) share
+/// the id namespace with terminal panes, so id lookups must skip them: a
+/// bare `find(|p| p.id == id)` resolves a tab-bar in some other tab and
+/// sends the jump to the wrong place.
+fn terminal_pane_tab(panes: &[ZellijPane], id: u32) -> Option<u32> {
+    panes
+        .iter()
+        .find(|p| !p.is_plugin && p.id == id)
+        .map(|p| p.tab_id)
+}
+
 /// Jump to an agent's pane from the sidebar's digit keys. The pane is found
 /// through `AGENT_TASK_ID` in its command (attach panes carry it); the
 /// task's recorded pane id is the fallback. Crosses tabs when needed.
@@ -1439,7 +1514,7 @@ pub(crate) fn focus_agent_pane(task_id: &str, recorded_pane: Option<u32>) -> Res
     let Some(id) = target else {
         anyhow::bail!("no live pane for this agent");
     };
-    let pane_tab = panes.iter().find(|p| p.id == id).map(|p| p.tab_id);
+    let pane_tab = terminal_pane_tab(&panes, id);
     if let (Some(target_tab), Some(current)) = (pane_tab, current_tab_id(&panes)) {
         if target_tab != current {
             zellij_action(&["go-to-tab-by-id".into(), target_tab.to_string()])?;
