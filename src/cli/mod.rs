@@ -652,6 +652,12 @@ pub enum SessionAction {
         limit: usize,
     },
 
+    /// Show full details for one session: full ID, transcript path, resume command
+    Info {
+        /// Session ID or unambiguous prefix (from `nibble session list`)
+        id: String,
+    },
+
     /// Read and display a session transcript by its ID
     Read {
         /// Session ID (from `nibble session list`)

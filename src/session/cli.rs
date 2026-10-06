@@ -219,6 +219,54 @@ pub(crate) fn cmd_session_list(
     Ok(())
 }
 
+pub(crate) fn cmd_session_info(id: &str) -> Result<()> {
+    let matches = session::find_sessions_by_prefix(id);
+    if matches.is_empty() {
+        anyhow::bail!("No session found matching '{}'", id);
+    }
+    if matches.len() > 1 {
+        anyhow::bail!(
+            "'{}' is ambiguous — {} sessions share this prefix. Use a longer prefix:\n{}",
+            id,
+            matches.len(),
+            matches
+                .iter()
+                .map(|s| format!(
+                    "  {}  {}",
+                    &s.session_id[..s.session_id.len().min(8)],
+                    session::get_session_title(s)
+                ))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+    let s = &matches[0];
+
+    // Ready-to-paste resume command for the session's agent. pi-format
+    // transcripts (pi, hermes) resume with pi's --session flag; omp is a
+    // pi fork that uses --resume like claude.
+    let resume_cmd = match s.agent.as_str() {
+        "claude" => format!("claude --resume {}", s.session_id),
+        "omp" => format!("omp --resume {}", s.session_id),
+        _ => format!("pi --session {}", s.session_id),
+    };
+
+    println!("{:12}{}", "Session:", s.session_id);
+    println!("{:12}{}", "Agent:", s.agent);
+    if let Some(ws) = &s.workspace {
+        println!("{:12}{}", "Repo:", ws);
+    }
+    println!("{:12}{}", "Transcript:", s.path.display());
+    if let Some(m) = s.modified {
+        println!("{:12}{}", "Updated:", session::format_time(Some(m)));
+    }
+    println!("{:12}{}", "Size:", session::format_size(s.size_bytes));
+    println!();
+    println!("Resume from the host (run in the session's repo directory):");
+    println!("  {}", resume_cmd);
+    Ok(())
+}
+
 pub(crate) fn cmd_session_read(id: &str, raw: bool) -> Result<()> {
     if raw {
         let content = session::read_session_raw(id)?;

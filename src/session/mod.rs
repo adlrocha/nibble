@@ -352,6 +352,20 @@ pub fn find_session_by_id(id: &str) -> Option<SessionInfo> {
     find_session_by_id_with_home(id, dirs::home_dir().unwrap_or_default().as_ref())
 }
 
+/// All sessions whose ID starts with `prefix` (exact or short ID).
+/// Used to resolve short IDs unambiguously instead of silently picking one.
+pub fn find_sessions_by_prefix(prefix: &str) -> Vec<SessionInfo> {
+    let mut out = Vec::new();
+    if let Ok(sessions) = list_all_sessions() {
+        for s in sessions {
+            if s.session_id.starts_with(prefix) {
+                out.push(s);
+            }
+        }
+    }
+    out
+}
+
 fn find_session_by_id_with_home(id: &str, home: &std::path::Path) -> Option<SessionInfo> {
     if let Ok(sessions) = list_all_sessions_with_home(home) {
         if let Some(s) = sessions.iter().find(|s| s.session_id == id) {

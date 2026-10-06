@@ -89,6 +89,21 @@ instead of your main conversation.
    nibble sandbox attach <repo> --session <session-id>
    ```
 
+## Resuming a session from the host (no sandbox)
+
+`nibble session list` truncates session IDs to 8 characters for display, but
+agents need the full ID to resume. Get it — plus a ready-to-paste resume
+command for the session's agent — with:
+
+```bash
+nibble session info <id-or-prefix>     # e.g. nibble session info e1c337d3
+```
+
+Then run the printed command from the session's repo directory:
+`claude --resume <full-id>`, `omp --resume <full-id>`, or
+`pi --session <full-id>`. A too-short prefix is rejected with the list of
+matching sessions instead of silently picking one.
+
 ## Backing sessions up
 
 `nibble backup` archives nibble's own state (`~/.nibble`: task DB, memory).
@@ -108,6 +123,7 @@ session files are immutable, so nothing existing is overwritten or deleted.
 
 ```bash
 nibble session list                       # grouped by day, with titles
+nibble session info <id-or-prefix>        # full ID + resume command
 nibble session read <id>                  # formatted transcript
 nibble session read <id> --raw            # raw JSONL
 nibble web                                # browser UI on :7878 (search + viewer)
