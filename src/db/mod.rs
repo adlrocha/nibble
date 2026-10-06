@@ -16,6 +16,19 @@ pub struct Database {
 }
 
 impl Database {
+    /// Run a closure inside a single write transaction.
+    /// `unchecked_transaction` works through `&self`, letting long scans
+    /// batch upserts (one fsync and one lock acquisition per chunk)
+    /// instead of holding the writer hot with a transaction per statement
+    /// — which starved concurrent `report status` writes for the whole
+    /// (multi-minute) scan.
+    pub fn with_write_tx<T>(&self, f: impl FnOnce(&Database) -> Result<T>) -> Result<T> {
+        let tx = self.conn.unchecked_transaction()?;
+        let out = f(self)?;
+        tx.commit()?;
+        Ok(out)
+    }
+
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let conn = Connection::open(path).context("Failed to open database")?;
 
