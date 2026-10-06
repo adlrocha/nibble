@@ -15,7 +15,7 @@ use anyhow::{bail, Context, Result};
 
 use crate::models::{SandboxType, Task};
 use crate::sandbox::podman::PodmanSandbox;
-use crate::sandbox::{container_working_dir, ContainerStatus, Sandbox};
+use crate::sandbox::{container_working_dir, ContainerStatus};
 
 /// Send `message` to the Claude session running inside a Podman sandbox.
 ///

@@ -40,8 +40,8 @@ use crate::config::QuotaWatchConfig;
 use crate::db::Database;
 use crate::models::{AgentType, SandboxType, Task};
 use crate::sandbox::container_working_dir;
+use crate::sandbox::ContainerStatus;
 use crate::sandbox::podman::PodmanSandbox;
-use crate::sandbox::{ContainerStatus, Sandbox};
 
 const PENDING_PREFIX: &str = "qw:pending:";
 const OFFSET_PREFIX: &str = "qw:offset:";

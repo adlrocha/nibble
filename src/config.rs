@@ -7,8 +7,6 @@ use std::path::PathBuf;
 /// Top-level configuration structure.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
-    #[serde(default)]
-    pub telegram: TelegramConfig,
 
     #[serde(default)]
     pub hermes: HermesConfig,
@@ -20,9 +18,6 @@ pub struct Config {
     pub claude: ClaudeConfig,
 
     #[serde(default)]
-    pub privacy_filter: PrivacyFilterConfig,
-
-    #[serde(default)]
     pub memory: MemoryConfig,
 
     #[serde(default)]
@@ -30,6 +25,23 @@ pub struct Config {
 
     #[serde(default)]
     pub quota_watch: QuotaWatchConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LmConfig {
+    /// Directories scanned for .gguf model files.
+    /// Defaults to ~/workspace/llm-models.
+    #[serde(default = "default_lm_model_dirs")]
+    pub model_dirs: Vec<String>,
+
+    /// Path to the llama-server systemd unit file used to detect the active model.
+    #[serde(default = "default_lm_service_unit")]
+    pub service_unit: String,
+}
+
+fn default_lm_model_dirs() -> Vec<String> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    vec![format!("{}/workspace/llm-models", home)]
 }
 
 /// Quota auto-continue configuration.
@@ -240,160 +252,6 @@ impl Default for ClaudeConfig {
     }
 }
 
-/// LLM Privacy Filter configuration.
-///
-/// Controls the inline proxy that scans agent API calls for PII/secrets
-/// before they leave the host.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PrivacyFilterConfig {
-    /// Whether the privacy filter proxy is enabled.
-    #[serde(default)]
-    pub enabled: bool,
-
-    /// Proxy mode: "redact" replaces PII with [REDACTED: type];
-    /// "block" returns a 400 error when PII is detected;
-    /// "flag" redacts and forwards but adds an alert header.
-    #[serde(default = "default_pf_mode")]
-    pub mode: String,
-
-    /// Port the proxy listens on (host side). Sandboxes reach it via
-    /// 127.0.0.1:<port> because they use --network host.
-    #[serde(default = "default_pf_port")]
-    pub proxy_port: u16,
-
-    /// Inference device for the privacy-filter model.
-    #[serde(default = "default_pf_device")]
-    pub device: String,
-
-    /// Upstream Anthropic API URL (the proxy forwards here after scanning).
-    #[serde(default = "default_pf_anthropic_upstream")]
-    pub anthropic_upstream: String,
-
-    /// Upstream OpenAI API URL (the proxy forwards here after scanning).
-    #[serde(default = "default_pf_openai_upstream")]
-    pub openai_upstream: String,
-
-    /// If the proxy is unreachable, allow the request through (true) or
-    /// block it (false).
-    #[serde(default = "default_true")]
-    pub fail_open: bool,
-}
-
-fn default_pf_mode() -> String {
-    "redact".to_string()
-}
-
-fn default_pf_port() -> u16 {
-    8474
-}
-
-fn default_pf_device() -> String {
-    "cpu".to_string()
-}
-
-fn default_pf_anthropic_upstream() -> String {
-    "https://api.anthropic.com".to_string()
-}
-
-fn default_pf_openai_upstream() -> String {
-    "https://api.openai.com".to_string()
-}
-
-impl Default for PrivacyFilterConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            mode: default_pf_mode(),
-            proxy_port: default_pf_port(),
-            device: default_pf_device(),
-            anthropic_upstream: default_pf_anthropic_upstream(),
-            openai_upstream: default_pf_openai_upstream(),
-            fail_open: true,
-        }
-    }
-}
-
-/// Telegram bot notification settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TelegramConfig {
-    /// Whether Telegram notifications are enabled at all.
-    #[serde(default)]
-    pub enabled: bool,
-
-    /// Whether agent-triggered notifications (Claude Stop hook, etc.) are sent.
-    /// When false, `nibble notify` is a no-op, but Telegram listener messages
-    /// (injection completions, heartbeats, cron alerts) are still sent.
-    #[serde(default = "default_true")]
-    pub notifications: bool,
-
-    /// Bot token from @BotFather (e.g. "123456:ABC-DEF...").
-    #[serde(default)]
-    pub bot_token: String,
-
-    /// Chat ID to send notifications to (user or group chat).
-    #[serde(default)]
-    pub chat_id: String,
-
-    /// Telegram username (without @) that is allowed to interact with the bot.
-    /// When set, the listener rejects any message whose sender username does not
-    /// match, providing a second layer of protection on top of the chat_id check.
-    #[serde(default)]
-    pub allowed_username: String,
-}
-
-impl Default for TelegramConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            notifications: true,
-            bot_token: String::new(),
-            chat_id: String::new(),
-            allowed_username: String::new(),
-        }
-    }
-}
-
-impl TelegramConfig {
-    /// Returns true when the config is complete enough to use.
-    pub fn is_configured(&self) -> bool {
-        self.enabled && !self.bot_token.is_empty() && !self.chat_id.is_empty()
-    }
-}
-
-/// Local LLM model management configuration.
-///
-/// Controls where `nibble lm list` scans for model files and which systemd
-/// service unit is inspected to determine the currently active model.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LmConfig {
-    /// Directories scanned for .gguf model files.
-    /// Defaults to ~/workspace/llm-models.
-    #[serde(default = "default_lm_model_dirs")]
-    pub model_dirs: Vec<String>,
-
-    /// Path to the llama-server systemd unit file used to detect the active model.
-    #[serde(default = "default_lm_service_unit")]
-    pub service_unit: String,
-}
-
-fn default_lm_model_dirs() -> Vec<String> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    vec![format!("{}/workspace/llm-models", home)]
-}
-
-fn default_lm_service_unit() -> String {
-    "/etc/systemd/system/llama-server.service".to_string()
-}
-
-impl Default for LmConfig {
-    fn default() -> Self {
-        Self {
-            model_dirs: default_lm_model_dirs(),
-            service_unit: default_lm_service_unit(),
-        }
-    }
-}
-
 /// Returns the path to the config file: ~/.nibble/config.toml
 pub fn config_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
@@ -551,100 +409,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_default_config_is_disabled() {
-        let cfg = Config::default();
-        assert!(!cfg.telegram.is_configured());
-    }
-
-    #[test]
-    fn test_telegram_config_is_configured() {
-        let cfg = TelegramConfig {
-            enabled: true,
-            notifications: true,
-            bot_token: "token".to_string(),
-            chat_id: "123".to_string(),
-            allowed_username: String::new(),
-        };
-        assert!(cfg.is_configured());
-    }
-
-    #[test]
-    fn test_telegram_config_not_configured_when_disabled() {
-        let cfg = TelegramConfig {
-            enabled: false,
-            notifications: true,
-            bot_token: "token".to_string(),
-            chat_id: "123".to_string(),
-            allowed_username: String::new(),
-        };
-        assert!(!cfg.is_configured());
-    }
-
-    #[test]
-    fn test_telegram_config_not_configured_when_empty_token() {
-        let cfg = TelegramConfig {
-            enabled: true,
-            notifications: true,
-            bot_token: String::new(),
-            chat_id: "123".to_string(),
-            allowed_username: String::new(),
-        };
-        assert!(!cfg.is_configured());
-    }
-
-    #[test]
-    fn test_parse_valid_toml() {
-        let toml_str = r#"
-[telegram]
-enabled = true
-bot_token = "123:ABC"
-chat_id = "456789"
-"#;
-        let config: Config = toml::from_str(toml_str).unwrap();
-        assert!(config.telegram.is_configured());
-        assert!(config.telegram.notifications);
-        assert_eq!(config.telegram.bot_token, "123:ABC");
-        assert_eq!(config.telegram.chat_id, "456789");
-        // allowed_username is optional — defaults to empty string
-        assert_eq!(config.telegram.allowed_username, "");
-    }
-
-    #[test]
-    fn test_parse_toml_with_username() {
-        let toml_str = r#"
-[telegram]
-enabled = true
-bot_token = "123:ABC"
-chat_id = "456789"
-allowed_username = "adlrocha"
-"#;
-        let config: Config = toml::from_str(toml_str).unwrap();
-        assert!(config.telegram.notifications);
-        assert_eq!(config.telegram.allowed_username, "adlrocha");
-    }
-
-    #[test]
-    fn test_parse_empty_toml() {
-        let config: Config = toml::from_str("").unwrap();
-        assert!(!config.telegram.is_configured());
-        assert!(config.telegram.notifications); // default true
-    }
-
-    #[test]
-    fn test_telegram_notifications_disabled_in_toml() {
-        let toml_str = r#"
-[telegram]
-enabled = true
-notifications = false
-bot_token = "123:ABC"
-chat_id = "456789"
-"#;
-        let config: Config = toml::from_str(toml_str).unwrap();
-        assert!(config.telegram.is_configured());
-        assert!(!config.telegram.notifications);
-    }
-
-    #[test]
     fn test_pi_extensions_default_from_manifest() {
         // Defaults are sourced from pi-extensions/external-packages.txt.
         let ext = Config::default().pi.extensions;
@@ -787,41 +551,89 @@ update_on_spawn = false
         let config: Config = toml::from_str("").unwrap();
         assert!(config.claude.update_on_spawn);
     }
+}
 
-    // ── PrivacyFilterConfig tests ───────────────────────────────────────────
+fn default_lm_service_unit() -> String {
+    "/etc/systemd/system/llama-server.service".to_string()
+}
 
-    #[test]
-    fn test_pf_config_defaults() {
-        let cfg = PrivacyFilterConfig::default();
-        assert!(!cfg.enabled);
-        assert_eq!(cfg.mode, "redact");
-        assert_eq!(cfg.proxy_port, 8474);
-        assert_eq!(cfg.device, "cpu");
-        assert_eq!(cfg.anthropic_upstream, "https://api.anthropic.com");
-        assert_eq!(cfg.openai_upstream, "https://api.openai.com");
-        assert!(cfg.fail_open);
-    }
-
-    #[test]
-    fn test_pf_config_parse_overrides() {
-        let toml_str = r#"
-[privacy_filter]
-enabled = true
-mode = "block"
-proxy_port = 9999
-device = "cuda"
-"#;
-        let config: Config = toml::from_str(toml_str).unwrap();
-        assert!(config.privacy_filter.enabled);
-        assert_eq!(config.privacy_filter.mode, "block");
-        assert_eq!(config.privacy_filter.proxy_port, 9999);
-        assert_eq!(config.privacy_filter.device, "cuda");
-    }
-
-    #[test]
-    fn test_pf_config_absent_defaults() {
-        let config: Config = toml::from_str("").unwrap();
-        assert!(!config.privacy_filter.enabled);
-        assert_eq!(config.privacy_filter.proxy_port, 8474);
+impl Default for LmConfig {
+    fn default() -> Self {
+        Self {
+            model_dirs: default_lm_model_dirs(),
+            service_unit: default_lm_service_unit(),
+        }
     }
 }
+
+/// Controls the inline proxy that scans agent API calls for PII/secrets
+/// before they leave the host.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrivacyFilterConfig {
+    /// Whether the privacy filter proxy is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Proxy mode: "redact" replaces PII with [REDACTED: type];
+    /// "block" returns a 400 error when PII is detected;
+    /// "flag" redacts and forwards but adds an alert header.
+    #[serde(default = "default_pf_mode")]
+    pub mode: String,
+
+    /// Port the proxy listens on (host side). Sandboxes reach it via
+    /// 127.0.0.1:<port> because they use --network host.
+    #[serde(default = "default_pf_port")]
+    pub proxy_port: u16,
+
+    /// Inference device for the privacy-filter model.
+    #[serde(default = "default_pf_device")]
+    pub device: String,
+
+    /// Upstream Anthropic API URL (the proxy forwards here after scanning).
+    #[serde(default = "default_pf_anthropic_upstream")]
+    pub anthropic_upstream: String,
+
+    /// Upstream OpenAI API URL (the proxy forwards here after scanning).
+    #[serde(default = "default_pf_openai_upstream")]
+    pub openai_upstream: String,
+
+    /// If the proxy is unreachable, allow the request through (true) or
+    /// block it (false).
+    #[serde(default = "default_true")]
+    pub fail_open: bool,
+}
+
+fn default_pf_mode() -> String {
+    "redact".to_string()
+}
+
+fn default_pf_port() -> u16 {
+    8474
+}
+
+fn default_pf_device() -> String {
+    "cpu".to_string()
+}
+
+fn default_pf_anthropic_upstream() -> String {
+    "https://api.anthropic.com".to_string()
+}
+
+fn default_pf_openai_upstream() -> String {
+    "https://api.openai.com".to_string()
+}
+
+impl Default for PrivacyFilterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: default_pf_mode(),
+            proxy_port: default_pf_port(),
+            device: default_pf_device(),
+            anthropic_upstream: default_pf_anthropic_upstream(),
+            openai_upstream: default_pf_openai_upstream(),
+            fail_open: true,
+        }
+    }
+}
+

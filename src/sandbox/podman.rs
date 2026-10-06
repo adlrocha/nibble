@@ -7,9 +7,8 @@
 //! - Privileged mode so the agent can install system packages inside the container
 //! - Volume mounts for the repo and shared dependency caches
 
-use crate::sandbox::{
-    container_working_dir, ContainerInfo, ContainerStatus, Sandbox, SandboxConfig,
-};
+use crate::models::SandboxConfig;
+use crate::sandbox::{container_working_dir, ContainerInfo, ContainerStatus};
 use anyhow::{bail, Context, Result};
 use std::path::Path;
 use std::process::Command;
@@ -314,36 +313,15 @@ CMD ["bash"]
     }
 }
 
-impl Sandbox for PodmanSandbox {
-    fn is_available(&self) -> Result<bool> {
+impl PodmanSandbox {
+    pub fn is_available(&self) -> Result<bool> {
         match Command::new("podman").arg("--version").output() {
             Ok(output) => Ok(output.status.success()),
             Err(_) => Ok(false),
         }
     }
 
-    fn setup(&self) -> Result<()> {
-        if !self.is_available()? {
-            bail!("Podman is not installed. Please install podman first.");
-        }
-
-        let output = Command::new("podman")
-            .args(["info", "--format", "{{.Host.Security.Rootless}}"])
-            .output()
-            .context("Failed to check podman rootless mode")?;
-
-        let rootless = String::from_utf8_lossy(&output.stdout).trim() == "true";
-        if !rootless {
-            eprintln!("Warning: Podman is not running in rootless mode.");
-            eprintln!("For security, please configure rootless podman.");
-        }
-
-        self.ensure_image("nibble-sandbox:latest")?;
-
-        Ok(())
-    }
-
-    fn spawn(
+    pub fn spawn(
         &self,
         task_id: &str,
         repo_path: &Path,
@@ -405,9 +383,11 @@ impl Sandbox for PodmanSandbox {
             args.push(format!("{}={}", key, value));
         }
 
-        // Standard env vars
-        args.push("-e".to_string());
-        args.push(format!("AGENT_TASK_ID={}", task_id));
+        // Standard env vars. AGENT_TASK_ID is deliberately NOT set at the
+        // container level: every agent window (attach) injects its own
+        // per-window task ID via `podman exec -e`, and an ambient ID would
+        // make agents started in `nibble sandbox bash` shells report
+        // against (and flap) the sandbox row.
         args.push("-e".to_string());
         args.push("AGENT_INBOX_VERSION=1".to_string());
         args.push("-e".to_string());
@@ -420,7 +400,7 @@ impl Sandbox for PodmanSandbox {
         }
         if let Ok(base_url) = std::env::var("ANTHROPIC_BASE_URL") {
             // Only forward host base URL if the sandbox config hasn't already
-            // set one (e.g. via the privacy filter proxy).
+            // set one.
             if !config.env_vars.contains_key("ANTHROPIC_BASE_URL") {
                 args.push("-e".to_string());
                 args.push(format!("ANTHROPIC_BASE_URL={}", base_url));
@@ -503,7 +483,7 @@ impl Sandbox for PodmanSandbox {
             args.push(format!("{}:/usr/local/bin/nibble:ro", nibble_bin.display()));
         }
 
-        // Mount nibble config (Telegram token etc.) so hooks can send notifications.
+        // Mount nibble config so in-container hooks can read settings (memory, etc.).
         let nibble_dir = home_dir.join(".nibble");
         if nibble_dir.exists() {
             args.push("-v".to_string());
@@ -557,7 +537,7 @@ impl Sandbox for PodmanSandbox {
         Ok(info)
     }
 
-    fn start(&self, container_id: &str) -> Result<()> {
+    pub fn start(&self, container_id: &str) -> Result<()> {
         let output = Command::new("podman")
             .args(["start", container_id])
             .output()
@@ -571,7 +551,7 @@ impl Sandbox for PodmanSandbox {
         Ok(())
     }
 
-    fn kill(&self, container_id: &str) -> Result<()> {
+    pub fn kill(&self, container_id: &str) -> Result<()> {
         // Only send SIGKILL if the container is actually running
         let status = self.status(container_id)?;
         if status == ContainerStatus::Running || status == ContainerStatus::Paused {
@@ -596,7 +576,7 @@ impl Sandbox for PodmanSandbox {
         Ok(())
     }
 
-    fn status(&self, container_id: &str) -> Result<ContainerStatus> {
+    pub fn status(&self, container_id: &str) -> Result<ContainerStatus> {
         let output = Command::new("podman")
             .args(["inspect", container_id])
             .output()
@@ -609,7 +589,7 @@ impl Sandbox for PodmanSandbox {
         self.parse_container_status(String::from_utf8_lossy(&output.stdout).as_ref())
     }
 
-    fn list(&self) -> Result<Vec<ContainerInfo>> {
+    pub fn list(&self) -> Result<Vec<ContainerInfo>> {
         let output = Command::new("podman")
             .args([
                 "ps",
@@ -647,23 +627,7 @@ impl Sandbox for PodmanSandbox {
         Ok(containers)
     }
 
-    fn logs(&self, container_id: &str, tail: Option<usize>) -> Result<String> {
-        let mut args = vec!["logs".to_string()];
-        if let Some(n) = tail {
-            args.push("--tail".to_string());
-            args.push(n.to_string());
-        }
-        args.push(container_id.to_string());
-
-        let output = Command::new("podman")
-            .args(&args)
-            .output()
-            .context("Failed to get container logs")?;
-
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    }
-
-    fn exec(&self, container_id: &str, command: &[&str]) -> Result<String> {
+    pub fn exec(&self, container_id: &str, command: &[&str]) -> Result<String> {
         let mut args = vec!["exec".to_string(), container_id.to_string()];
         args.extend(command.iter().map(|s| s.to_string()));
 
@@ -678,6 +642,30 @@ impl Sandbox for PodmanSandbox {
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
+
+    /// Check whether the container is running and can execute processes.
+    ///
+    /// Returns `SandboxHealth::Healthy` if the container is running and
+    /// `podman exec` succeeds, `SandboxHealth::Degraded` if the container
+    /// appears running but exec fails (zombie/OOM/etc.),
+    /// `SandboxHealth::Stopped` if the container exists but is stopped (reboot),
+    /// or `SandboxHealth::Dead` if the container no longer exists.
+    pub fn health_check(&self, container_id: &str) -> super::SandboxHealth {
+        match self.status(container_id) {
+            Ok(ContainerStatus::Running) => {}
+            Ok(ContainerStatus::Stopped) => return super::SandboxHealth::Stopped,
+            _ => return super::SandboxHealth::Dead,
+        }
+
+        // Try running a trivial command to confirm exec capability.
+        let can_exec = self.exec(container_id, &["true"]).is_ok();
+
+        if can_exec {
+            super::SandboxHealth::Healthy
+        } else {
+            super::SandboxHealth::Degraded
+        }
     }
 }
 

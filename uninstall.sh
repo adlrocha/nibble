@@ -76,21 +76,36 @@ fi
 # ── 3. Stop services ──────────────────────────────────────────────────────────
 step "Stopping services"
 
-for svc in nibble-listener nibble-resume nibble-reset nibble-cleanup nibble-web; do
+for svc in nibble-listener nibble-resume nibble-reset nibble-cleanup nibble-web \
+           nibble-privacy-proxy nibble-usage; do
     if systemctl --user is-active --quiet "$svc.service" 2>/dev/null; then
         systemctl --user stop "$svc.service"
         ok "Stopped $svc.service"
+    fi
+done
+for unit in nibble-usage.timer nibble-cleanup.timer; do
+    if systemctl --user is-active --quiet "$unit" 2>/dev/null; then
+        systemctl --user stop "$unit"
+        ok "Stopped $unit"
     fi
 done
 
 # ── 4. Disable and remove systemd services ────────────────────────────────────
 step "Removing systemd services"
 
-for svc in nibble-listener nibble-resume nibble-reset nibble-cleanup nibble-web; do
+for svc in nibble-listener nibble-resume nibble-reset nibble-cleanup nibble-web \
+           nibble-privacy-proxy nibble-usage; do
     if [ -f "$SYSTEMD_DIR/$svc.service" ]; then
         systemctl --user disable "$svc.service" 2>/dev/null || true
         rm -f "$SYSTEMD_DIR/$svc.service"
         ok "Removed $svc.service"
+    fi
+done
+for unit in nibble-usage.timer nibble-cleanup.timer; do
+    if [ -f "$SYSTEMD_DIR/$unit" ]; then
+        systemctl --user disable "$unit" 2>/dev/null || true
+        rm -f "$SYSTEMD_DIR/$unit"
+        ok "Removed $unit"
     fi
 done
 
@@ -101,7 +116,7 @@ fi
 # ── 5. Remove binaries ───────────────────────────────────────────────────────
 step "Removing binaries"
 
-for bin in nibble nibble-musl; do
+for bin in nibble nibble-musl browser; do
     if [ -f "$BIN_DIR/$bin" ]; then
         rm -f "$BIN_DIR/$bin"
         ok "Removed $BIN_DIR/$bin"
@@ -116,6 +131,37 @@ if [ -d "$WRAPPERS_DIR" ]; then
     ok "Removed $WRAPPERS_DIR/"
 fi
 
+# ── 7. Remove nibble-installed skills ─────────────────────────────────────────
+step "Removing nibble-installed skills"
+
+# Everything install.sh ships in skills/, plus legacy factory/fable5 installs.
+NIBBLE_SKILLS="engineering git-commit-pr nibble-memory nibble-pr-review \
+nibble-no-ai-slop omarchy-migration"
+STALE_SKILLS="factory-pipeline factory-spec factory-verify factory-qa-gate \
+factory-lessons fable5-emulation"
+
+for skills_dir in "$HOME/.claude/skills" "$HOME/.nibble/skills" "$HOME/.pi/agent/skills"; do
+    [ -d "$skills_dir" ] || continue
+    for skill in $NIBBLE_SKILLS $STALE_SKILLS; do
+        if [ -d "$skills_dir/$skill" ]; then
+            rm -rf "$skills_dir/$skill"
+            ok "Removed $skills_dir/$skill"
+        fi
+    done
+done
+
+# ── 7b. Remove nibble-installed pi/omp extensions ─────────────────────────────
+step "Removing nibble pi/omp extensions"
+
+for ext_dir in "$HOME/.nibble/extensions" "$HOME/.pi/agent/extensions" "$HOME/.omp/agent/extensions"; do
+    [ -d "$ext_dir" ] || continue
+    for ext in nibble-memory.ts tok-speed.ts local-llm-autodetect.ts; do
+        if [ -f "$ext_dir/$ext" ]; then
+            rm -f "$ext_dir/$ext"
+            ok "Removed $ext_dir/$ext"
+        fi
+    done
+done
 # ── 8. Remove agent usage timer ──────────────────────────────────────────────
 step "Removing agent usage timer"
 
@@ -139,7 +185,7 @@ if [ -f "$CLAUDE_SETTINGS" ] && command -v jq >/dev/null 2>&1; then
     fi
 fi
 
-# ── 10. Remove config and data ───────────────────────────────────────────────
+# ── 9. Remove config and data ────────────────────────────────────────────────
 step "Removing config and data"
 
 if [ "$KEEP_CONFIG" = false ]; then
@@ -152,15 +198,19 @@ else
     warn "Keeping $HOME/.nibble/ (--keep-config)"
 fi
 
-# ── 11. Remind about shell aliases ───────────────────────────────────────────
+# ── 10. Remind about shell aliases ───────────────────────────────────────────
 SHELL_RC=""
 [ -f "$HOME/.zshrc" ]  && SHELL_RC="$HOME/.zshrc"
 [ -f "$HOME/.bashrc" ] && [ -z "$SHELL_RC" ] && SHELL_RC="$HOME/.bashrc"
 
-if [ -n "$SHELL_RC" ] && grep -q "nibble/wrappers/claude-wrapper" "$SHELL_RC" 2>/dev/null; then
-    echo ""
-    warn "A shell alias for claude-wrapper was found in $SHELL_RC."
-    warn "Remove it manually and reload your shell."
+if [ -n "$SHELL_RC" ]; then
+    for agent in claude pi omp; do
+        if grep -q "nibble/wrappers/$agent-wrapper" "$SHELL_RC" 2>/dev/null; then
+            echo ""
+            warn "A shell alias for $agent-wrapper was found in $SHELL_RC."
+            warn "Remove it manually and reload your shell."
+        fi
+    done
 fi
 
 echo ""

@@ -4,6 +4,8 @@ use croner::Cron;
 
 use crate::models::CronJob;
 
+pub mod commands;
+
 /// Parse a cron schedule expression and compute the next run time
 pub fn compute_next_run(schedule: &str, after: DateTime<Utc>) -> Result<DateTime<Utc>> {
     let cron = Cron::new(schedule)

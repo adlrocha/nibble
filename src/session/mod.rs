@@ -3,6 +3,9 @@
 //! Lists available sessions for each agent with browser-history-like UX,
 //! and can read their contents with agent-specific formatting.
 
+pub(crate) mod cli;
+pub(crate) mod pi;
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -848,12 +851,8 @@ pub fn format_workspace(ws: Option<&str>) -> String {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// Last assistant message extraction (for Telegram safety-net)
-// ══════════════════════════════════════════════════════════════════════════════
 
 /// Best-effort extraction of the last assistant message for a task.
-/// Used by the Telegram listener safety-net to send actual output instead
-/// of a generic "Agent turn complete" message.
 pub fn last_assistant_message_for_task(task: &crate::models::Task) -> Option<String> {
     let home = dirs::home_dir().unwrap_or_default();
 

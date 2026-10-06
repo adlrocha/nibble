@@ -1,8 +1,8 @@
 #!/bin/bash
 # Wrapper for omp (oh-my-pi) to track tasks in nibble.
 # Registers a task and exports AGENT_TASK_ID so the nibble-memory extension
-# reports status (working/idle) and session paths for host sessions.
-# Hooks handle: running (input), idle (agent_end), exited (process death).
+# reports status (working/idle) and session paths for host sessions — also
+# for sessions launched without this wrapper, via derived session IDs.
 #
 # Usage: omp [args...] — all arguments are passed through unchanged.
 
@@ -49,10 +49,23 @@ if [ -n "$ZELLIJ" ] && [ -n "$ZELLIJ_PANE_ID" ]; then
     [ -n "$ZELLIJ_SESSION_NAME" ] && EXTRA_FLAGS="$EXTRA_FLAGS --zellij-session $ZELLIJ_SESSION_NAME"
 fi
 
-# Register task as 'running'
-# shellcheck disable=SC2086
-nibble report start "$AGENT_TASK_ID" "omp" "$PWD" "$TASK_TITLE" \
-    --pid $$ --ppid $PPID $EXTRA_FLAGS 2>/dev/null || true
+# Register task as 'running'. Retry: concurrent sidebar watchers can hold
+# the DB lock briefly, and a lost registration makes the session invisible
+# (`nibble report status` self-heals a row, but without pid/pane). Never
+# fatal — but never silent either (INV-5).
+REGISTERED=false
+for _attempt in 1 2 3; do
+    # shellcheck disable=SC2086
+    if "$AGENT_INBOX" report start "$AGENT_TASK_ID" "omp" "$PWD" "$TASK_TITLE" \
+        --pid $$ --ppid $PPID $EXTRA_FLAGS 2>/dev/null; then
+        REGISTERED=true
+        break
+    fi
+    sleep 1
+done
+if [ "$REGISTERED" = false ]; then
+    echo "nibble: task registration failed after 3 attempts — this session won't show in the status sidebar" >&2
+fi
 
 # Run omp — the extension handles status updates
 exec "$OMP_BIN" "$@"

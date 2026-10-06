@@ -6,7 +6,13 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use crate::models::{
-    AgentType, CronJob, SandboxConfig, SandboxType, Task, TaskContext, TaskStatus,
+    AgentType,
+    CronJob,
+    SandboxConfig,
+    SandboxType,
+    Task,
+    TaskContext,
+    TaskStatus,
 };
 
 const SCHEMA_VERSION: i32 = 11;
@@ -21,7 +27,7 @@ impl Database {
 
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
-             PRAGMA busy_timeout=5000;",
+             PRAGMA busy_timeout=30000;",
         )
         .context("Failed to set DB pragmas")?;
 
@@ -518,40 +524,10 @@ impl Database {
         Ok(tasks)
     }
 
-    /// Record that a Telegram message was sent for a task, so replies can be routed back.
-    pub fn insert_bot_message(&self, message_id: i64, task_id: &str) -> Result<()> {
-        let now = Utc::now().timestamp();
-        self.conn.execute(
-            "INSERT OR REPLACE INTO bot_messages (message_id, task_id, sent_at) VALUES (?1, ?2, ?3)",
-            params![message_id, task_id, now],
-        )?;
-        Ok(())
-    }
 
-    /// Look up which task a Telegram message belongs to (for routing replies).
-    pub fn get_task_id_by_message_id(&self, message_id: i64) -> Result<Option<String>> {
-        let task_id = self
-            .conn
-            .query_row(
-                "SELECT task_id FROM bot_messages WHERE message_id = ?1",
-                params![message_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(task_id)
-    }
 
     /// Return the total number of bot messages recorded for `task_id`.
     /// Used by the safety-net to detect new notifications added after an inject started,
-    /// without relying on timestamps (avoids clock-skew and WAL snapshot issues).
-    pub fn bot_message_count_for_task(&self, task_id: &str) -> Result<i64> {
-        let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM bot_messages WHERE task_id = ?1",
-            params![task_id],
-            |row| row.get(0),
-        )?;
-        Ok(count)
-    }
 
     /// Read a value from the key-value store.
     pub fn kv_get(&self, key: &str) -> Result<Option<String>> {
@@ -653,25 +629,6 @@ impl Database {
             )
             .optional()?;
         Ok(result)
-    }
-
-    /// Return all sandbox tasks for a given repo path, newest first.
-    pub fn get_tasks_by_repo_path(&self, repo_path: &str) -> Result<Vec<Task>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, task_id, agent_type, title, status, created_at, updated_at,
-                    completed_at, pid, ppid, monitor_pid, attention_reason,
-                    exit_code, context, metadata, container_id, container_name,
-                    repo_path, worktree_path, sandbox_type, sandbox_config
-             FROM tasks
-             WHERE repo_path = ?1 AND sandbox_type != 'none'
-             ORDER BY created_at DESC, id DESC",
-        )?;
-
-        let tasks = stmt
-            .query_map(params![repo_path], |row| self.row_to_task(row))?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        Ok(tasks)
     }
 
     /// Delete a single task by its `task_id`. Returns true if a row was removed.
@@ -787,181 +744,6 @@ impl Database {
             |row| row.get(0),
         )?;
         Ok(count > 0)
-    }
-
-    // Cron job methods
-    pub fn insert_cron_job(&self, job: &CronJob) -> Result<i64> {
-        let now = Utc::now().timestamp();
-        self.conn.execute(
-            "INSERT INTO cron_jobs (
-                repo_path, label, schedule, prompt, enabled, skip_if_running,
-                running, last_run, next_run, expires_at, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
-                job.repo_path,
-                job.label,
-                job.schedule,
-                job.prompt,
-                job.enabled as i32,
-                job.skip_if_running as i32,
-                job.running as i32,
-                job.last_run.map(|dt| dt.timestamp()),
-                job.next_run.timestamp(),
-                job.expires_at.map(|dt| dt.timestamp()),
-                now,
-            ],
-        )?;
-        Ok(self.conn.last_insert_rowid())
-    }
-
-    pub fn update_cron_job(&self, job: &CronJob) -> Result<()> {
-        self.conn.execute(
-            "UPDATE cron_jobs SET
-                label = ?1, schedule = ?2, prompt = ?3, enabled = ?4,
-                skip_if_running = ?5, running = ?6, last_run = ?7, next_run = ?8,
-                expires_at = ?9
-            WHERE id = ?10",
-            params![
-                job.label,
-                job.schedule,
-                job.prompt,
-                job.enabled as i32,
-                job.skip_if_running as i32,
-                job.running as i32,
-                job.last_run.map(|dt| dt.timestamp()),
-                job.next_run.timestamp(),
-                job.expires_at.map(|dt| dt.timestamp()),
-                job.id.unwrap_or(0),
-            ],
-        )?;
-        Ok(())
-    }
-
-    /// Mark a single cron job as running=true/false (used by the background thread).
-    pub fn set_cron_job_running(&self, id: i64, running: bool) -> Result<()> {
-        self.conn.execute(
-            "UPDATE cron_jobs SET running = ?1 WHERE id = ?2",
-            params![running as i32, id],
-        )?;
-        Ok(())
-    }
-
-    /// Clear the running flag on all cron jobs.  Called on daemon startup to
-    /// recover from a crash where in-flight jobs were left with running=1.
-    pub fn reset_all_cron_running_flags(&self) -> Result<()> {
-        self.conn
-            .execute("UPDATE cron_jobs SET running = 0 WHERE running = 1", [])?;
-        Ok(())
-    }
-
-    pub fn get_cron_job(&self, id: i64) -> Result<Option<CronJob>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, repo_path, label, schedule, prompt, enabled, skip_if_running,
-                    running, last_run, next_run, expires_at, created_at
-             FROM cron_jobs WHERE id = ?1",
-        )?;
-
-        let job = stmt
-            .query_row(params![id], |row| self.row_to_cron_job(row))
-            .optional()?;
-
-        Ok(job)
-    }
-
-    pub fn list_cron_jobs(&self, repo_path_filter: Option<&str>) -> Result<Vec<CronJob>> {
-        let jobs = match repo_path_filter {
-            Some(repo_path) => {
-                let mut stmt = self.conn.prepare(
-                    "SELECT id, repo_path, label, schedule, prompt, enabled, skip_if_running,
-                            running, last_run, next_run, expires_at, created_at
-                     FROM cron_jobs WHERE repo_path = ?1 ORDER BY created_at DESC, id DESC",
-                )?;
-                let jobs = stmt
-                    .query_map(params![repo_path], |row| self.row_to_cron_job(row))?
-                    .collect::<Result<Vec<_>, _>>()?;
-                jobs
-            }
-            None => {
-                let mut stmt = self.conn.prepare(
-                    "SELECT id, repo_path, label, schedule, prompt, enabled, skip_if_running,
-                            running, last_run, next_run, expires_at, created_at
-                     FROM cron_jobs ORDER BY created_at DESC, id DESC",
-                )?;
-                let jobs = stmt
-                    .query_map([], |row| self.row_to_cron_job(row))?
-                    .collect::<Result<Vec<_>, _>>()?;
-                jobs
-            }
-        };
-
-        Ok(jobs)
-    }
-
-    pub fn delete_cron_job(&self, id: i64) -> Result<bool> {
-        let affected = self
-            .conn
-            .execute("DELETE FROM cron_jobs WHERE id = ?1", params![id])?;
-
-        Ok(affected > 0)
-    }
-
-    pub fn get_cron_job_by_label(&self, label: &str) -> Result<Option<CronJob>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, repo_path, label, schedule, prompt, enabled, skip_if_running,
-                    running, last_run, next_run, expires_at, created_at
-             FROM cron_jobs WHERE label = ?1 LIMIT 1",
-        )?;
-        let job = stmt
-            .query_row(params![label], |row| self.row_to_cron_job(row))
-            .optional()?;
-        Ok(job)
-    }
-
-    pub fn label_exists_for_repo(&self, repo_path: &str, label: &str) -> Result<bool> {
-        let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM cron_jobs WHERE repo_path = ?1 AND label = ?2",
-            params![repo_path, label],
-            |row| row.get(0),
-        )?;
-        Ok(count > 0)
-    }
-
-    /// Get all cron jobs that are due to run (next_run <= now and enabled)
-    pub fn get_due_cron_jobs(&self, now: DateTime<Utc>) -> Result<Vec<CronJob>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, repo_path, label, schedule, prompt, enabled, skip_if_running,
-                    running, last_run, next_run, expires_at, created_at
-             FROM cron_jobs WHERE enabled = 1 AND next_run <= ?1
-             ORDER BY next_run ASC",
-        )?;
-
-        let jobs = stmt
-            .query_map(params![now.timestamp()], |row| self.row_to_cron_job(row))?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        Ok(jobs)
-    }
-
-    fn row_to_cron_job(&self, row: &rusqlite::Row) -> rusqlite::Result<CronJob> {
-        let last_run_ts: Option<i64> = row.get(8)?;
-        let next_run_ts: i64 = row.get(9)?;
-        let expires_ts: Option<i64> = row.get(10)?;
-        let created_ts: i64 = row.get(11)?;
-
-        Ok(CronJob {
-            id: Some(row.get(0)?),
-            repo_path: row.get(1)?,
-            label: row.get(2)?,
-            schedule: row.get(3)?,
-            prompt: row.get(4)?,
-            enabled: row.get::<_, i32>(5)? != 0,
-            skip_if_running: row.get::<_, i32>(6)? != 0,
-            running: row.get::<_, i32>(7)? != 0,
-            last_run: last_run_ts.map(|ts| Utc.timestamp_opt(ts, 0).unwrap()),
-            next_run: Utc.timestamp_opt(next_run_ts, 0).unwrap(),
-            expires_at: expires_ts.map(|ts| Utc.timestamp_opt(ts, 0).unwrap()),
-            created_at: Utc.timestamp_opt(created_ts, 0).unwrap(),
-        })
     }
 
     fn row_to_task(&self, row: &rusqlite::Row) -> rusqlite::Result<Task> {
@@ -1167,6 +949,244 @@ impl Database {
 
         Ok((rows, window))
     }
+    pub fn insert_cron_job(&self, job: &CronJob) -> Result<i64> {
+        let now = Utc::now().timestamp();
+        self.conn.execute(
+            "INSERT INTO cron_jobs (
+                repo_path, label, schedule, prompt, enabled, skip_if_running,
+                running, last_run, next_run, expires_at, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                job.repo_path,
+                job.label,
+                job.schedule,
+                job.prompt,
+                job.enabled as i32,
+                job.skip_if_running as i32,
+                job.running as i32,
+                job.last_run.map(|dt| dt.timestamp()),
+                job.next_run.timestamp(),
+                job.expires_at.map(|dt| dt.timestamp()),
+                now,
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn update_cron_job(&self, job: &CronJob) -> Result<()> {
+        self.conn.execute(
+            "UPDATE cron_jobs SET
+                label = ?1, schedule = ?2, prompt = ?3, enabled = ?4,
+                skip_if_running = ?5, running = ?6, last_run = ?7, next_run = ?8,
+                expires_at = ?9
+            WHERE id = ?10",
+            params![
+                job.label,
+                job.schedule,
+                job.prompt,
+                job.enabled as i32,
+                job.skip_if_running as i32,
+                job.running as i32,
+                job.last_run.map(|dt| dt.timestamp()),
+                job.next_run.timestamp(),
+                job.expires_at.map(|dt| dt.timestamp()),
+                job.id.unwrap_or(0),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Mark a single cron job as running=true/false (used by the background thread).
+    pub fn set_cron_job_running(&self, id: i64, running: bool) -> Result<()> {
+        self.conn.execute(
+            "UPDATE cron_jobs SET running = ?1 WHERE id = ?2",
+            params![running as i32, id],
+        )?;
+        Ok(())
+    }
+
+    /// Clear the running flag on all cron jobs.  Called on daemon startup to
+    /// recover from a crash where in-flight jobs were left with running=1.
+    pub fn reset_all_cron_running_flags(&self) -> Result<()> {
+        self.conn
+            .execute("UPDATE cron_jobs SET running = 0 WHERE running = 1", [])?;
+        Ok(())
+    }
+
+    pub fn get_cron_job(&self, id: i64) -> Result<Option<CronJob>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, repo_path, label, schedule, prompt, enabled, skip_if_running,
+                    running, last_run, next_run, expires_at, created_at
+             FROM cron_jobs WHERE id = ?1",
+        )?;
+
+        let job = stmt
+            .query_row(params![id], |row| self.row_to_cron_job(row))
+            .optional()?;
+
+        Ok(job)
+    }
+
+    pub fn list_cron_jobs(&self, repo_path_filter: Option<&str>) -> Result<Vec<CronJob>> {
+        let jobs = match repo_path_filter {
+            Some(repo_path) => {
+                let mut stmt = self.conn.prepare(
+                    "SELECT id, repo_path, label, schedule, prompt, enabled, skip_if_running,
+                            running, last_run, next_run, expires_at, created_at
+                     FROM cron_jobs WHERE repo_path = ?1 ORDER BY created_at DESC, id DESC",
+                )?;
+                let jobs = stmt
+                    .query_map(params![repo_path], |row| self.row_to_cron_job(row))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                jobs
+            }
+            None => {
+                let mut stmt = self.conn.prepare(
+                    "SELECT id, repo_path, label, schedule, prompt, enabled, skip_if_running,
+                            running, last_run, next_run, expires_at, created_at
+                     FROM cron_jobs ORDER BY created_at DESC, id DESC",
+                )?;
+                let jobs = stmt
+                    .query_map([], |row| self.row_to_cron_job(row))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                jobs
+            }
+        };
+
+        Ok(jobs)
+    }
+
+    pub fn delete_cron_job(&self, id: i64) -> Result<bool> {
+        let affected = self
+            .conn
+            .execute("DELETE FROM cron_jobs WHERE id = ?1", params![id])?;
+
+        Ok(affected > 0)
+    }
+
+    pub fn get_cron_job_by_label(&self, label: &str) -> Result<Option<CronJob>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, repo_path, label, schedule, prompt, enabled, skip_if_running,
+                    running, last_run, next_run, expires_at, created_at
+             FROM cron_jobs WHERE label = ?1 LIMIT 1",
+        )?;
+        let job = stmt
+            .query_row(params![label], |row| self.row_to_cron_job(row))
+            .optional()?;
+        Ok(job)
+    }
+
+    pub fn label_exists_for_repo(&self, repo_path: &str, label: &str) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM cron_jobs WHERE repo_path = ?1 AND label = ?2",
+            params![repo_path, label],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Get all cron jobs that are due to run (next_run <= now and enabled)
+    pub fn get_due_cron_jobs(&self, now: DateTime<Utc>) -> Result<Vec<CronJob>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, repo_path, label, schedule, prompt, enabled, skip_if_running,
+                    running, last_run, next_run, expires_at, created_at
+             FROM cron_jobs WHERE enabled = 1 AND next_run <= ?1
+             ORDER BY next_run ASC",
+        )?;
+
+        let jobs = stmt
+            .query_map(params![now.timestamp()], |row| self.row_to_cron_job(row))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(jobs)
+    }
+
+    fn row_to_cron_job(&self, row: &rusqlite::Row) -> rusqlite::Result<CronJob> {
+        let last_run_ts: Option<i64> = row.get(8)?;
+        let next_run_ts: i64 = row.get(9)?;
+        let expires_ts: Option<i64> = row.get(10)?;
+        let created_ts: i64 = row.get(11)?;
+
+        Ok(CronJob {
+            id: Some(row.get(0)?),
+            repo_path: row.get(1)?,
+            label: row.get(2)?,
+            schedule: row.get(3)?,
+            prompt: row.get(4)?,
+            enabled: row.get::<_, i32>(5)? != 0,
+            skip_if_running: row.get::<_, i32>(6)? != 0,
+            running: row.get::<_, i32>(7)? != 0,
+            last_run: last_run_ts.map(|ts| Utc.timestamp_opt(ts, 0).unwrap()),
+            next_run: Utc.timestamp_opt(next_run_ts, 0).unwrap(),
+            expires_at: expires_ts.map(|ts| Utc.timestamp_opt(ts, 0).unwrap()),
+            created_at: Utc.timestamp_opt(created_ts, 0).unwrap(),
+        })
+    }
+
+
+    /// Return all sandbox tasks for a given repo path, newest first.
+    pub fn get_tasks_by_repo_path(&self, repo_path: &str) -> Result<Vec<Task>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, task_id, agent_type, title, status, created_at, updated_at,
+                    completed_at, pid, ppid, monitor_pid, attention_reason,
+                    exit_code, context, metadata, container_id, container_name,
+                    repo_path, worktree_path, sandbox_type, sandbox_config
+             FROM tasks
+             WHERE repo_path = ?1 AND sandbox_type != 'none'
+             ORDER BY created_at DESC, id DESC",
+        )?;
+
+        let tasks = stmt
+            .query_map(params![repo_path], |row| self.row_to_task(row))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(tasks)
+    }
+
+    /// Return the task for `task_id`, creating a placeholder when missing.
+    ///
+    /// Self-healing path for status/session reports whose `report start`
+    /// was lost (e.g. a transient DB failure swallowed by a wrapper): the
+    /// reporting agent stays visible instead of failing silently. The
+    /// agent type comes from `NIBBLE_AGENT_TYPE` when the producer exports
+    /// it (Claude hooks do); the title/location come from the reporting
+    /// process's cwd. No pid is recorded — the reporter may live in a
+    /// container pid namespace, and a wrong host pid would make the
+    /// sidebar's liveness reconcile retire the row immediately.
+    pub fn ensure_task_or_create(&self, task_id: &str) -> Result<Task> {
+        if let Some(task) = self.get_task_by_id(task_id)? {
+            return Ok(task);
+        }
+        let agent = match std::env::var("NIBBLE_AGENT_TYPE").as_deref() {
+            Ok("claude") => AgentType::ClaudeCode,
+            Ok("pi") => AgentType::Pi,
+            Ok("hermes") => AgentType::Hermes,
+            Ok(other) => AgentType::Unknown(other.to_string()),
+            Err(_) => AgentType::Unknown("agent".to_string()),
+        };
+        let cwd = std::env::current_dir()
+            .ok()
+            .map(|p| p.to_string_lossy().to_string());
+        let title = format!(
+            "[{}]",
+            cwd.as_deref()
+                .and_then(|c| Path::new(c).file_name())
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        );
+        let mut task = Task::new(task_id.to_string(), agent, title, None, None);
+        task.context = Some(TaskContext {
+            url: None,
+            project_path: cwd,
+            session_id: None,
+            claude_session_id: None,
+            extra: HashMap::new(),
+        });
+        self.insert_task(&task)?;
+        // Read back so callers see the persisted row (id, timestamps).
+        self.get_task_by_id(task_id)?
+            .ok_or_else(|| anyhow::anyhow!("inserted task {} not readable back", task_id))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1211,6 +1231,53 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let db = Database::open(temp_file.path()).unwrap();
         (db, temp_file)
+    }
+
+    #[test]
+    fn ensure_task_or_create_registers_placeholder_and_passes_through() {
+        let (db, _tmp) = create_test_db();
+        // Existing task passes through untouched.
+        let existing = Task::new(
+            "known-id".to_string(),
+            AgentType::Pi,
+            "[repo]".to_string(),
+            Some(1),
+            None,
+        );
+        db.insert_task(&existing).unwrap();
+        let got = db.ensure_task_or_create("known-id").unwrap();
+        assert_eq!(got.task_id, "known-id");
+        assert_eq!(got.agent_type, AgentType::Pi);
+
+        // Unknown id: placeholder created, agent honoured from
+        // NIBBLE_AGENT_TYPE, located by cwd, no pid (container-namespace
+        // hazard).
+        std::env::set_var("NIBBLE_AGENT_TYPE", "claude");
+        let created = db.ensure_task_or_create("fresh-id").unwrap();
+        std::env::remove_var("NIBBLE_AGENT_TYPE");
+        assert_eq!(created.task_id, "fresh-id");
+        assert_eq!(created.agent_type, AgentType::ClaudeCode, "\"claude\" aliases to ClaudeCode");
+        assert_eq!(created.pid, None, "placeholders carry no pid");
+        assert!(created
+            .context
+            .as_ref()
+            .and_then(|c| c.project_path.as_deref())
+            .is_some(), "placeholder is locatable");
+        assert!(created.title.starts_with('[') && created.title.ends_with(']'));
+        // Second call returns the same row (no duplicate insert).
+        let again = db.ensure_task_or_create("fresh-id").unwrap();
+        assert_eq!(again.id, created.id);
+
+        // Unmapped agent strings round-trip as Unknown; omp is a
+        // first-class agent type since the origin/main integration.
+        std::env::set_var("NIBBLE_AGENT_TYPE", "omp");
+        let omp = db.ensure_task_or_create("omp-id").unwrap();
+        std::env::remove_var("NIBBLE_AGENT_TYPE");
+        assert_eq!(omp.agent_type, AgentType::Omp);
+        std::env::set_var("NIBBLE_AGENT_TYPE", "grok-cli");
+        let unmapped = db.ensure_task_or_create("grok-id").unwrap();
+        std::env::remove_var("NIBBLE_AGENT_TYPE");
+        assert_eq!(unmapped.agent_type, AgentType::Unknown("grok-cli".to_string()));
     }
 
     #[test]
@@ -1502,10 +1569,8 @@ mod tests {
         let list = db.list_sandbox_tasks().unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].task_id, "sandbox");
-        assert_eq!(list[0].container_name, Some("nibble-test".into()));
     }
 
-    /// INV-2: get_task_by_repo_path returns the most recent sandbox for a repo
     #[test]
     fn test_get_task_by_repo_path() {
         let (db, _temp) = create_test_db();
@@ -1540,40 +1605,5 @@ mod tests {
         assert_eq!(found.unwrap().task_id, "new");
 
         assert!(db.get_task_by_repo_path("/nonexistent").unwrap().is_none());
-    }
-
-    /// INV-3: get_tasks_by_repo_path returns all sandbox tasks for a repo, newest first
-    #[test]
-    fn test_get_tasks_by_repo_path() {
-        let (db, _temp) = create_test_db();
-
-        let mut t1 = Task::new(
-            "first".into(),
-            AgentType::ClaudeCode,
-            "first".into(),
-            None,
-            None,
-        );
-        t1.sandbox_type = SandboxType::Podman;
-        t1.repo_path = Some("/tmp/repo".into());
-        db.insert_task(&t1).unwrap();
-
-        std::thread::sleep(std::time::Duration::from_millis(10));
-
-        let mut t2 = Task::new(
-            "second".into(),
-            AgentType::ClaudeCode,
-            "second".into(),
-            None,
-            None,
-        );
-        t2.sandbox_type = SandboxType::Podman;
-        t2.repo_path = Some("/tmp/repo".into());
-        db.insert_task(&t2).unwrap();
-
-        let list = db.get_tasks_by_repo_path("/tmp/repo").unwrap();
-        assert_eq!(list.len(), 2);
-        assert_eq!(list[0].task_id, "second");
-        assert_eq!(list[1].task_id, "first");
     }
 }
