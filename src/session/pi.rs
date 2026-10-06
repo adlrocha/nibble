@@ -302,11 +302,9 @@ pub(crate) fn pi_session_path_candidates(stored: &str, roots: &[&str]) -> Vec<st
         Some(".pi") | Some(".omp") => roots
             .iter()
             .map(|root| {
-                container_home.join(root).join(
-                    rel.components()
-                        .skip(1)
-                        .collect::<std::path::PathBuf>(),
-                )
+                container_home
+                    .join(root)
+                    .join(rel.components().skip(1).collect::<std::path::PathBuf>())
             })
             .collect(),
         _ => vec![container_home.join(rel)],
@@ -315,8 +313,8 @@ pub(crate) fn pi_session_path_candidates(stored: &str, roots: &[&str]) -> Vec<st
 
 #[cfg(test)]
 mod tests {
-    use super::{list_pi_sessions_for_cwd_with_home, pi_session_path_candidates};
     use super::mount_agent_config_dir;
+    use super::{list_pi_sessions_for_cwd_with_home, pi_session_path_candidates};
     use std::path::PathBuf;
 
     #[test]
@@ -408,7 +406,10 @@ mod tests {
     #[test]
     fn candidates_unrelated_path_passes_through() {
         let cands = pi_session_path_candidates("/opt/elsewhere/s.jsonl", &[".omp", ".pi"]);
-        assert_eq!(cands, vec![std::path::PathBuf::from("/opt/elsewhere/s.jsonl")]);
+        assert_eq!(
+            cands,
+            vec![std::path::PathBuf::from("/opt/elsewhere/s.jsonl")]
+        );
     }
 
     #[test]

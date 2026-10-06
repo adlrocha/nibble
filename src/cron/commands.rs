@@ -1,13 +1,13 @@
 //! Cron job command handlers (Add/List/Edit/Run), extracted verbatim from
 //! the pre-split main.rs during the origin/main integration.
 
-use anyhow::{Context, Result};
-use crate::db::Database;
 use crate::cron;
+use crate::db::Database;
 use crate::models;
 use crate::models::AgentType;
 use crate::sandbox::podman::PodmanSandbox;
 use crate::sandbox::SandboxHealth;
+use anyhow::{Context, Result};
 
 pub(crate) fn cmd_cron_add(
     db: &Database,
@@ -302,7 +302,10 @@ pub(crate) fn cmd_cron_run(db: &Database, id: i64) -> Result<()> {
 
 /// Find a healthy sandbox for the given repo path. Returns None if no healthy container exists.
 
-pub(crate) fn find_healthy_sandbox_for_repo(db: &Database, repo_path: &str) -> Result<Option<models::Task>> {
+pub(crate) fn find_healthy_sandbox_for_repo(
+    db: &Database,
+    repo_path: &str,
+) -> Result<Option<models::Task>> {
     let Some(task) = db.get_task_by_repo_path(repo_path)? else {
         return Ok(None);
     };
@@ -352,4 +355,3 @@ impl std::fmt::Display for SelectedAgent {
         }
     }
 }
-

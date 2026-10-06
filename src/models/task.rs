@@ -608,4 +608,3 @@ mod tests {
         assert_eq!(back, AgentType::Omp);
     }
 }
-

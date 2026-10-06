@@ -7,7 +7,6 @@ use std::path::PathBuf;
 /// Top-level configuration structure.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
-
     #[serde(default)]
     pub hermes: HermesConfig,
 
@@ -636,4 +635,3 @@ impl Default for PrivacyFilterConfig {
         }
     }
 }
-

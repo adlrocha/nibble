@@ -107,7 +107,8 @@ pub fn detect_toolchains(
 /// Edit the .md files under `src/sandbox_instructions/` — never edit here.
 mod sandbox_instructions {
     pub const BASE: &str = include_str!("../sandbox_instructions/base.md");
-    pub const GENERAL_PRINCIPLES: &str = include_str!("../sandbox_instructions/general_principles.md");
+    pub const GENERAL_PRINCIPLES: &str =
+        include_str!("../sandbox_instructions/general_principles.md");
 }
 
 /// Build the AGENTS.md content written to `/<repo-name>/AGENTS.md` inside the
