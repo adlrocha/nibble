@@ -26,7 +26,7 @@
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { execSync } from "child_process";
+import { execSync, spawn } from "child_process";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -60,6 +60,37 @@ const agentType = (): string => {
 	return "pi";
 };
 
+const shellQuote = (s: string): string => `'${s.replace(/'/g, "'\\''")}'`;
+
+// Fire-and-forget nibble calls, serialized through one background queue.
+// execSync ran these on the agent's event loop, so whenever the tasks DB
+// had writer contention (e.g. a `nibble usage scan` holds the writer for
+// minutes) every `input`/`tool_execution_end` handler stalled — messages
+// took seconds to be accepted. The queue keeps reporting off the hot path
+// and preserves per-session ordering (so a delayed `working` can't land
+// after `completed`).
+let nibbleQueue: Promise<void> = Promise.resolve();
+const runNibble = (args: string[]): void => {
+	nibbleQueue = nibbleQueue.then(
+		() =>
+			new Promise<void>((resolve) => {
+				const child = spawn("nibble", args, {
+					stdio: "ignore",
+					env: { ...process.env, NIBBLE_AGENT_TYPE: agentType() },
+				});
+				const timer = setTimeout(() => child.kill("SIGKILL"), 15000);
+				child.on("error", () => {
+					clearTimeout(timer);
+					resolve();
+				});
+				child.on("exit", () => {
+					clearTimeout(timer);
+					resolve();
+				});
+			}),
+	);
+};
+
 const capture = (
 	taskId: string,
 	role: string,
@@ -73,14 +104,7 @@ const capture = (
 		args.push(`--${k}`, v);
 	}
 
-	try {
-		execSync(
-			`nibble ${args.map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(" ")}`,
-			{ timeout: 5000, stdio: "pipe" },
-		);
-	} catch {
-		// Non-fatal: capture is best-effort
-	}
+	runNibble(args);
 };
 
 const summarize = (taskId: string): void => {
@@ -102,39 +126,26 @@ const summarize = (taskId: string): void => {
 const reportSessionPath = (taskId: string, path: string): void => {
 	if (!taskId || !path) return;
 
-	try {
-		execSync(
-			`nibble report session-path '${taskId.replace(/'/g, "'\\''")}' '${path.replace(/'/g, "'\\''")}'`,
-			{
-				timeout: 5000,
-				stdio: "pipe",
-				env: { ...process.env, NIBBLE_AGENT_TYPE: agentType() },
-			},
-		);
-	} catch {
-		// Non-fatal: session-path reporting is best-effort
-	}
+	runNibble(["report", "session-path", taskId, path]);
 };
 
 const reportPaneId = (taskId: string): void => {
 	if (!taskId) return;
 	// Pane mapping for the sidebar's 1-9 jumps and `nibble goto`; only
-	// meaningful for host agents living in a zellij pane.
+	// meaningful for host agents living in a zellij pane. The pid powers
+	// liveness reconcile so a killed agent's row disappears even if its
+	// pane stays open.
 	const paneId = process.env.ZELLIJ_PANE_ID;
 	if (!paneId || !/^\d+$/.test(paneId)) return;
 
-	try {
-		execSync(
-			`nibble report pane-id '${taskId.replace(/'/g, "'\\''")}' '${paneId}'`,
-			{
-				timeout: 5000,
-				stdio: "pipe",
-				env: { ...process.env, NIBBLE_AGENT_TYPE: agentType() },
-			},
-		);
-	} catch {
-		// Non-fatal: pane-id reporting is best-effort
-	}
+	runNibble([
+		"report",
+		"pane-id",
+		taskId,
+		paneId,
+		"--pid",
+		String(process.pid),
+	]);
 };
 
 const reportStatus = (taskId: string, state: string, message?: string): void => {
@@ -145,18 +156,23 @@ const reportStatus = (taskId: string, state: string, message?: string): void => 
 		args.push("--message", message.trim());
 	}
 
-	try {
-		execSync(
-			`nibble ${args.map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(" ")}`,
-			{
+	// The exited report is load-bearing (a graceful shutdown leaves no
+	// other trace; the queue could be torn down with the process), so it
+	// runs synchronously. Everything else is queued off the hot path.
+	if (state === "exited") {
+		try {
+			execSync(`nibble ${args.map(shellQuote).join(" ")}`, {
 				timeout: 5000,
 				stdio: "pipe",
 				env: { ...process.env, NIBBLE_AGENT_TYPE: agentType() },
-			},
-		);
-	} catch {
-		// Non-fatal: status reporting is best-effort
+			});
+		} catch {
+			// Non-fatal: status reporting is best-effort
+		}
+		return;
 	}
+
+	runNibble(args);
 };
 
 

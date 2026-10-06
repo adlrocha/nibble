@@ -244,6 +244,10 @@ pub enum ReportAction {
         task_id: String,
         /// Zellij pane ID
         pane_id: u32,
+        /// Agent process ID — lets the sidebar's liveness reconcile mark
+        /// the row exited when a killed agent leaves its pane open
+        #[arg(long)]
+        pid: Option<i32>,
     },
 
     /// Transition a task's live status (called by agent hooks/extensions)
