@@ -1,23 +1,21 @@
 #!/bin/bash
-# Wrapper for omp (oh-my-pi) to track tasks in nibble.
-# Registers a task and exports AGENT_TASK_ID so the nibble-memory extension
-# reports status (working/idle) and session paths for host sessions — also
-# for sessions launched without this wrapper, via derived session IDs.
+# Wrapper for the pi coding agent to track tasks in nibble.
+# Creates the task and exports AGENT_TASK_ID for the pi extension
+# (nibble-memory.ts) which reports live status: agent_start → running,
+# agent_settled → completed, session_shutdown → exited.
 #
-# Usage: omp [args...] — all arguments are passed through unchanged.
+# Usage:
+#   pi [args...]   -- normal interactive mode, tracked by nibble
 
-# nibble binary location
-AGENT_INBOX="${NIBBLE_BIN:-$HOME/.local/bin/nibble}"
+# Find the original pi binary
+PI_BIN=$(which -a pi | grep -v "$(readlink -f "$0")" | head -n 1)
 
-# Find the original omp binary
-OMP_BIN=$(which -a omp | grep -v "$(readlink -f "$0")" | head -n 1)
-
-if [ -z "$OMP_BIN" ]; then
-    echo "Error: Could not find original omp binary" >&2
+if [ -z "$PI_BIN" ]; then
+    echo "Error: Could not find original pi binary" >&2
     exit 1
 fi
 
-# Generate unique task ID and export for the extension to use
+# Generate unique task ID and export for the pi extension
 export AGENT_TASK_ID=$(uuidgen)
 
 # Get repo info if in a git repository
@@ -36,17 +34,12 @@ if [ -n "$REPO_NAME" ]; then
 else
     TASK_TITLE="[$(basename "$PWD")]"
 fi
-
-# Truncate to 100 chars
 TASK_TITLE="${TASK_TITLE:0:100}"
 
 # Pass zellij pane ID if running inside zellij
 EXTRA_FLAGS=""
 if [ -n "$ZELLIJ" ] && [ -n "$ZELLIJ_PANE_ID" ]; then
     EXTRA_FLAGS="$EXTRA_FLAGS --zellij-pane-id $ZELLIJ_PANE_ID"
-    # Session name lets the quota-watch daemon target this pane from outside
-    # the session (`zellij --session <name> action write-chars --pane-id`).
-    [ -n "$ZELLIJ_SESSION_NAME" ] && EXTRA_FLAGS="$EXTRA_FLAGS --zellij-session $ZELLIJ_SESSION_NAME"
 fi
 
 # Register task as 'running'. Retry: concurrent sidebar watchers can hold
@@ -56,7 +49,7 @@ fi
 REGISTERED=false
 for _attempt in 1 2 3; do
     # shellcheck disable=SC2086
-    if "$AGENT_INBOX" report start "$AGENT_TASK_ID" "omp" "$PWD" "$TASK_TITLE" \
+    if nibble report start "$AGENT_TASK_ID" "pi" "$PWD" "$TASK_TITLE" \
         --pid $$ --ppid $PPID $EXTRA_FLAGS 2>/dev/null; then
         REGISTERED=true
         break
@@ -67,5 +60,5 @@ if [ "$REGISTERED" = false ]; then
     echo "nibble: task registration failed after 3 attempts — this session won't show in the status sidebar" >&2
 fi
 
-# Run omp — the extension handles status updates
-exec "$OMP_BIN" "$@"
+# Run pi — the extension handles status updates
+exec "$PI_BIN" "$@"

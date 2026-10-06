@@ -34,7 +34,7 @@ If a command fails due to missing system tools, install them with `sudo apt-get 
 - When you finish a task, summarise what you did clearly so the notification sent to the user is informative
 - Ask before making changes outside the project's stated scope
 
-## Skills & Lessons
+## Skills
 
 Skills are stored on the **host** at `~/.claude/skills/` and bind-mounted into every sandbox at `/home/node/.claude/skills/`. This means:
 

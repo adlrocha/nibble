@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "nibble")]
-#[command(about = "Manage sandboxed coding agents and scheduled tasks", long_about = None)]
+#[command(about = "Manage sandboxed coding agents", long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -23,24 +23,19 @@ pub enum Commands {
         action: HermesAction,
     },
 
-    /// Inject a message into a running sandbox agent (bypasses Telegram)
-    Inject {
-        /// Task ID of the agent to inject into
-        task_id: String,
-        /// Message to send
-        message: String,
-    },
+    /// Prune stale tasks (dead/gone containers → mark exited, GC old exited tasks)
+    Prune,
 
-    /// Show agents that are actually alive. Dead processes and closed panes drop off.
+    /// Show live agent statuses (sidebar-friendly; use --watch in a zellij pane)
     Status {
-        /// Re-render every second. In the pane: q closes, 1-9 jump to an agent.
-        #[arg(long, short)]
+        /// Re-render every second (for a dedicated zellij side pane)
+        #[arg(short, long)]
         watch: bool,
-        /// Machine-readable JSON
+        /// Output machine-readable JSON (implies no watch)
         #[arg(long)]
         json: bool,
-        /// Include exited tasks (the archive). Default is the live set only.
-        #[arg(long, short)]
+        /// Include exited tasks (dimmed at the bottom)
+        #[arg(short, long)]
         all: bool,
         /// Delete exited task rows. Does not stop containers.
         #[arg(long)]
@@ -50,12 +45,15 @@ pub enum Commands {
         scratch: bool,
     },
 
-    /// Open the live-agent sidebar in the current zellij tab.
-    ///
-    /// The pane tracks agents that are still alive. Press a number inside it
-    /// to jump to that agent's pane, q to close it, or run
-    /// `nibble sidebar --close` from any pane in the tab.
+    /// Open the agent-status side panel in the current zellij session
     Sidebar {
+        /// Install the always-on sidebar layout (every tab of every new
+        /// zellij session gets a status pane). Never overwrites a custom layout.
+        #[arg(long)]
+        install: bool,
+        /// Remove the nibble-managed zellij layout files
+        #[arg(long)]
+        uninstall: bool,
         /// Focus the sidebar pane, opening it first if it is not open.
         #[arg(long, conflicts_with = "close")]
         focus: bool,
@@ -64,8 +62,13 @@ pub enum Commands {
         close: bool,
     },
 
-    /// Run the Telegram long-polling daemon (routes phone replies back to agents)
-    Listen,
+    /// Inject a message into a running sandbox agent (bypasses Telegram)
+    Inject {
+        /// Task ID of the agent to inject into
+        task_id: String,
+        /// Message to send
+        message: String,
+    },
 
     /// Run the quota auto-continue daemon (watch for subscription quota
     /// errors in agent sessions and continue the tasks once the quota resets)
@@ -75,29 +78,24 @@ pub enum Commands {
         once: bool,
     },
 
-    /// Send a Telegram notification (used by hooks and wrappers)
-    Notify {
-        /// Message body to send (agent last output or permission request)
-        #[arg(short, long)]
-        message: String,
-
-        /// Optional task ID to attach context (agent type, title, elapsed time)
-        #[arg(short, long)]
-        task_id: Option<String>,
-
-        /// Mark this as an attention-required notification (permission request, question, etc.)
-        /// Uses a distinct visual style so it stands out from regular completion notifications.
-        #[arg(long)]
-        attention: bool,
-    },
-
     /// Manage scheduled cron jobs for sandboxes
     Cron {
         #[command(subcommand)]
         action: CronAction,
     },
 
-    /// Report task status (internal command used by wrappers and hooks)
+    /// List and manage local LLM model files
+    Lm {
+        #[command(subcommand)]
+        action: LmAction,
+    },
+
+    /// Jump to the zellij pane hosting an agent (task ID or unique prefix)
+    Goto {
+        /// Task ID, unique ID prefix, or row number from `nibble status`
+        task: String,
+    },
+
     Report {
         #[command(subcommand)]
         action: ReportAction,
@@ -131,18 +129,6 @@ pub enum Commands {
     Import {
         /// Path to the backup zip file
         path: String,
-    },
-
-    /// Manage the LLM privacy filter proxy (scans agent API calls for PII/secrets)
-    Proxy {
-        #[command(subcommand)]
-        action: ProxyAction,
-    },
-
-    /// List and manage local LLM model files
-    Lm {
-        #[command(subcommand)]
-        action: LmAction,
     },
 
     /// Track token usage across Claude Code and pi sessions
@@ -194,21 +180,6 @@ pub enum UsageAction {
 }
 
 #[derive(Subcommand)]
-pub enum LmAction {
-    /// List all .gguf model files found in configured model directories
-    List,
-
-    /// Switch the active model and restart llama-server
-    ///
-    /// Accepts a partial model name (e.g. "gemma", "Qwen3").
-    /// Sampling parameters are read from profiles.toml in the model directory.
-    Use {
-        /// Partial or full filename of the .gguf model to activate
-        model: String,
-    },
-}
-
-#[derive(Subcommand)]
 pub enum ReportAction {
     /// Register a new task in the database (called by wrappers at agent startup)
     Start {
@@ -253,7 +224,7 @@ pub enum ReportAction {
     /// Called by the pi/omp nibble-memory extension at session start. This is
     /// the authoritative task→session mapping: without it, attach falls back
     /// to guessing the newest session file for the repo, which is ambiguous
-    /// once more than one session exists (main + --btw + injected turns).
+    /// once more than one session exists (main + --btw side sessions).
     #[command(name = "session-path")]
     SessionPath {
         /// Task ID
@@ -262,19 +233,46 @@ pub enum ReportAction {
         path: String,
     },
 
-    /// Annotate a live task. Does not keep a dead process on the list;
-    /// `nibble status` drops anything whose process is gone.
+    /// Transition a task's live status (called by agent hooks/extensions)
+    ///
+    /// States: running (actively generating), blocked (needs user input —
+    /// permission prompt, question), completed (turn done, idle), exited.
     Status {
         /// Task ID
         task_id: String,
-        /// running, blocked, completed, or exited
+        /// New state: running | blocked | completed | exited
         state: String,
-        /// Short reason, used for blocked (the permission prompt, the question)
-        #[arg(long)]
+        /// Short context for blocked (e.g. the permission prompt summary)
+        #[arg(short, long)]
         message: Option<String>,
     },
 }
 
+/// Agent-selection flags shared by `sandbox spawn` and `sandbox attach`.
+#[derive(clap::Args)]
+pub struct AgentFlags {
+    /// Start a new session (generates a fresh random UUID, replacing the stored one)
+    #[arg(long)]
+    pub fresh: bool,
+    /// Create a git worktree for this branch and spawn a sandbox for it.
+    /// The worktree is created at <repo_parent>/<repo_name>--<branch-slug>.
+    /// The branch is auto-created from the repo's current HEAD if it doesn't exist.
+    #[arg(long)]
+    pub branch: Option<String>,
+    /// Use Hermes Agent instead of Claude Code.
+    /// Spawns a dedicated Hermes container with gateway support.
+    #[arg(long)]
+    pub hermes: bool,
+    /// Use the upstream pi coding agent (@earendil-works/pi-coding-agent)
+    /// instead of Claude Code. Installs pi plus any [pi].extensions
+    /// (e.g. pi-dynamic-workflows) at spawn time.
+    #[arg(long, conflicts_with = "omp")]
+    pub pi: bool,
+    /// Use the omp (oh-my-pi) coding agent instead of Claude Code.
+    /// Installs the standalone omp binary plus any [pi].extensions at spawn time.
+    #[arg(long)]
+    pub omp: bool,
+}
 #[derive(Subcommand)]
 pub enum SandboxAction {
     /// Spawn a sandboxed agent for a repo
@@ -287,30 +285,11 @@ pub enum SandboxAction {
         /// Sandbox image to use
         #[arg(long, default_value = "nibble-sandbox:latest")]
         image: String,
-        /// Start a new session (generates a fresh random UUID, replacing the stored one)
-        #[arg(long)]
-        fresh: bool,
         /// Use a specific Claude session UUID instead of the deterministic repo UUID
         #[arg(long)]
         session_id: Option<String>,
-        /// Create a git worktree for this branch and spawn a sandbox for it.
-        /// The worktree is created at <repo_parent>/<repo_name>--<branch-slug>.
-        /// The branch is auto-created from the repo's current HEAD if it doesn't exist.
-        #[arg(long)]
-        branch: Option<String>,
-        /// Use Hermes Agent instead of Claude Code.
-        /// Spawns a dedicated Hermes container with gateway support.
-        #[arg(long)]
-        hermes: bool,
-        /// Use the upstream pi coding agent (@earendil-works/pi-coding-agent)
-        /// instead of Claude Code. Installs pi plus any [pi].extensions
-        /// (e.g. pi-dynamic-workflows) at spawn time.
-        #[arg(long, conflicts_with = "omp")]
-        pi: bool,
-        /// Use the omp (oh-my-pi) coding agent instead of Claude Code.
-        /// Installs the standalone omp binary plus any [pi].extensions at spawn time.
-        #[arg(long)]
-        omp: bool,
+        #[command(flatten)]
+        agent: AgentFlags,
     },
 
     /// List all sandbox containers and their status
@@ -326,33 +305,17 @@ pub enum SandboxAction {
     Attach {
         /// Repo path (e.g. "." or "/path/to/repo") OR container name
         container_or_path: String,
-        /// Start a fresh session instead of resuming the last conversation
-        #[arg(long)]
-        fresh: bool,
         /// Start an independent side session that doesn't overwrite which session the main
         /// attach would continue. The session is kept on disk like any other.
         /// Useful for ad-hoc research or non-conflicting changes alongside a main session.
         #[arg(long)]
         btw: bool,
-        /// Use Hermes Agent instead of Claude Code
-        #[arg(long)]
-        hermes: bool,
-        /// Use the upstream pi coding agent (@earendil-works/pi-coding-agent)
-        /// instead of Claude Code.
-        #[arg(long, conflicts_with = "omp")]
-        pi: bool,
-        /// Use the omp (oh-my-pi) coding agent instead of Claude Code.
-        #[arg(long)]
-        omp: bool,
         /// Resume a specific session by ID (from `nibble session list`).
         /// Overrides the stored session for this task.
         #[arg(long)]
         session: Option<String>,
-        /// Create a git worktree for this branch and spawn+attach a sandbox for it.
-        /// The worktree is created at <repo_parent>/<repo_name>--<branch-slug>.
-        /// The branch is auto-created from the repo's current HEAD if it doesn't exist.
-        #[arg(long)]
-        branch: Option<String>,
+        #[command(flatten)]
+        agent: AgentFlags,
     },
 
     /// Stop and remove a sandbox container
@@ -374,13 +337,6 @@ pub enum SandboxAction {
         #[arg(long)]
         branch: Option<String>,
     },
-
-    /// Restart all stopped sandbox containers (e.g. after a host reboot)
-    ///
-    /// Attempts to start any stopped containers tracked in the database.
-    /// Containers that no longer exist are cleaned up.
-    Restart,
-
     /// Resume sandboxes after a host reboot
     Resume {
         #[arg(short, long)]
@@ -689,17 +645,7 @@ pub enum SessionAction {
     },
 }
 
-#[derive(Subcommand)]
-pub enum ProxyAction {
-    /// Start the privacy filter proxy in the background
-    Start,
-    /// Stop the privacy filter proxy
-    Stop,
-    /// Show proxy status and health
-    Status,
-}
-
-#[derive(Subcommand)]
+#[derive(Debug, Clone, Subcommand)]
 pub enum CronAction {
     /// Add a new cron job targeting a repo path.
     /// At trigger time nibble will find or spawn a sandbox for that repo automatically.
@@ -790,5 +736,20 @@ pub enum CronAction {
     Run {
         /// Cron job ID or label
         id: String,
+    },
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum LmAction {
+    /// List all .gguf model files found in configured model directories
+    List,
+
+    /// Switch the active model and restart llama-server
+    ///
+    /// Accepts a partial model name (e.g. "gemma", "Qwen3").
+    /// Sampling parameters are read from profiles.toml in the model directory.
+    Use {
+        /// Partial or full filename of the .gguf model to activate
+        model: String,
     },
 }

@@ -269,7 +269,12 @@ impl Task {
         if title.len() <= max_len {
             title.to_string()
         } else {
-            format!("{}...", &title[..max_len.saturating_sub(3)])
+            // Back off to a char boundary so multibyte UTF-8 never gets split.
+            let mut cut = max_len.saturating_sub(3);
+            while !title.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            format!("{}...", &title[..cut])
         }
     }
 
@@ -286,6 +291,7 @@ impl Task {
     pub fn set_running(&mut self) {
         self.status = TaskStatus::Running;
         self.completed_at = None;
+        self.attention_reason = None;
         self.updated_at = Utc::now();
     }
 
@@ -602,3 +608,4 @@ mod tests {
         assert_eq!(back, AgentType::Omp);
     }
 }
+

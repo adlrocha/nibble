@@ -1,9 +1,0 @@
-{
-  "name": "com.agent_tasks.bridge",
-  "description": "Native messaging host for Agent Inbox extension",
-  "path": "/usr/local/bin/agent-bridge",
-  "type": "stdio",
-  "allowed_origins": [
-    "chrome-extension://EXTENSION_ID_PLACEHOLDER/"
-  ]
-}

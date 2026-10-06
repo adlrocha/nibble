@@ -1,14 +1,14 @@
 //! Sandbox module for isolated agent execution.
 //!
 //! Provides containerized execution environments for Claude Code agents
-//! using rootless Podman. Supports input injection via named pipes for
-//! remote control via Telegram.
+//! using rootless Podman.
 
-use crate::models::{SandboxConfig, SandboxType};
 use anyhow::Result;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
+pub mod context;
 pub mod podman;
+pub mod worktree;
 
 /// Information about a running container
 #[derive(Debug, Clone)]
@@ -49,90 +49,6 @@ pub enum SandboxHealth {
     Stopped,
     /// Container no longer exists in the runtime.
     Dead,
-}
-
-/// Trait for sandbox implementations
-#[allow(dead_code)]
-pub trait Sandbox: Send + Sync {
-    /// Check if the sandbox runtime is available
-    fn is_available(&self) -> Result<bool>;
-
-    /// Install/setup the sandbox runtime if needed
-    fn setup(&self) -> Result<()>;
-
-    /// Spawn a new container for an agent
-    ///
-    /// # Arguments
-    /// * `task_id` - Unique task identifier
-    /// * `repo_path` - Path to the repository on host
-    /// * `config` - Sandbox configuration
-    fn spawn(
-        &self,
-        task_id: &str,
-        repo_path: &Path,
-        config: &SandboxConfig,
-    ) -> Result<ContainerInfo>;
-
-    /// Start a stopped container (e.g. after a host reboot)
-    fn start(&self, container_id: &str) -> Result<()>;
-
-    /// Kill/stop a container
-    fn kill(&self, container_id: &str) -> Result<()>;
-
-    /// Get container status
-    fn status(&self, container_id: &str) -> Result<ContainerStatus>;
-
-    /// List all containers managed by this sandbox
-    fn list(&self) -> Result<Vec<ContainerInfo>>;
-
-    /// Get logs from a container
-    fn logs(&self, container_id: &str, tail: Option<usize>) -> Result<String>;
-
-    /// Execute a command inside the container
-    fn exec(&self, container_id: &str, command: &[&str]) -> Result<String>;
-
-    /// Check whether the container is running and can execute processes.
-    ///
-    /// Returns `SandboxHealth::Healthy` if the container is running and
-    /// `podman exec` succeeds, `SandboxHealth::Degraded` if the container
-    /// appears running but exec fails (zombie/OOM/etc.),
-    /// `SandboxHealth::Stopped` if the container exists but is stopped (reboot),
-    /// or `SandboxHealth::Dead` if the container no longer exists.
-    fn health_check(&self, container_id: &str) -> SandboxHealth {
-        match self.status(container_id) {
-            Ok(ContainerStatus::Running) => {}
-            Ok(ContainerStatus::Stopped) => return SandboxHealth::Stopped,
-            _ => return SandboxHealth::Dead,
-        }
-
-        // Try running a trivial command to confirm exec capability.
-        let can_exec = self.exec(container_id, &["true"]).is_ok();
-
-        if can_exec {
-            SandboxHealth::Healthy
-        } else {
-            SandboxHealth::Degraded
-        }
-    }
-}
-
-/// Factory function to get the appropriate sandbox implementation
-#[allow(dead_code)]
-pub fn get_sandbox(sandbox_type: SandboxType) -> Result<Box<dyn Sandbox>> {
-    match sandbox_type {
-        SandboxType::None => Err(anyhow::anyhow!("No sandbox implementation for type 'none'")),
-        SandboxType::Podman => Ok(Box::new(podman::PodmanSandbox::new())),
-    }
-}
-
-/// Check if podman is installed and available
-#[allow(dead_code)]
-pub fn is_podman_available() -> bool {
-    std::process::Command::new("podman")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
 }
 
 /// Get the base directory for nibble data
@@ -183,7 +99,7 @@ pub fn pi_session_dir_name(container_dir: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::models::{SandboxConfig, SandboxType};
 
     #[test]
     fn test_sandbox_type_serialization() {

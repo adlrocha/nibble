@@ -139,7 +139,6 @@ impl App {
     /// "what is actually running". The task DB is only consulted afterwards,
     /// best-effort, to attach repo/project labels.
     fn live_sandboxes(&self) -> Vec<SandboxInfo> {
-        use crate::sandbox::Sandbox;
         let containers = crate::sandbox::podman::PodmanSandbox::new()
             .list()
             .unwrap_or_default();
