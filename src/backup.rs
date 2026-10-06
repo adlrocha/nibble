@@ -202,9 +202,7 @@ pub fn create_backup(output: Option<PathBuf>, include_sessions: bool) -> Result<
         // WalkDir with follow_links(false) would yield the link itself and
         // never descend, silently archiving an empty dir instead of the
         // transcripts.
-        let src = src_raw
-            .canonicalize()
-            .unwrap_or_else(|_| src_raw.clone());
+        let src = src_raw.canonicalize().unwrap_or_else(|_| src_raw.clone());
 
         // Walk the subtree and add every file / empty directory.
         // Use into_iter() so we can skip whole subtrees (e.g. cache/).

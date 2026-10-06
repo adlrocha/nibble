@@ -6,13 +6,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use crate::models::{
-    AgentType,
-    CronJob,
-    SandboxConfig,
-    SandboxType,
-    Task,
-    TaskContext,
-    TaskStatus,
+    AgentType, CronJob, SandboxConfig, SandboxType, Task, TaskContext, TaskStatus,
 };
 
 const SCHEMA_VERSION: i32 = 11;
@@ -523,8 +517,6 @@ impl Database {
         }
         Ok(tasks)
     }
-
-
 
     /// Return the total number of bot messages recorded for `task_id`.
     /// Used by the safety-net to detect new notifications added after an inject started,
@@ -1123,7 +1115,6 @@ impl Database {
         })
     }
 
-
     /// Return all sandbox tasks for a given repo path, newest first.
     pub fn get_tasks_by_repo_path(&self, repo_path: &str) -> Result<Vec<Task>> {
         let mut stmt = self.conn.prepare(
@@ -1256,13 +1247,20 @@ mod tests {
         let created = db.ensure_task_or_create("fresh-id").unwrap();
         std::env::remove_var("NIBBLE_AGENT_TYPE");
         assert_eq!(created.task_id, "fresh-id");
-        assert_eq!(created.agent_type, AgentType::ClaudeCode, "\"claude\" aliases to ClaudeCode");
+        assert_eq!(
+            created.agent_type,
+            AgentType::ClaudeCode,
+            "\"claude\" aliases to ClaudeCode"
+        );
         assert_eq!(created.pid, None, "placeholders carry no pid");
-        assert!(created
-            .context
-            .as_ref()
-            .and_then(|c| c.project_path.as_deref())
-            .is_some(), "placeholder is locatable");
+        assert!(
+            created
+                .context
+                .as_ref()
+                .and_then(|c| c.project_path.as_deref())
+                .is_some(),
+            "placeholder is locatable"
+        );
         assert!(created.title.starts_with('[') && created.title.ends_with(']'));
         // Second call returns the same row (no duplicate insert).
         let again = db.ensure_task_or_create("fresh-id").unwrap();
@@ -1277,7 +1275,10 @@ mod tests {
         std::env::set_var("NIBBLE_AGENT_TYPE", "grok-cli");
         let unmapped = db.ensure_task_or_create("grok-id").unwrap();
         std::env::remove_var("NIBBLE_AGENT_TYPE");
-        assert_eq!(unmapped.agent_type, AgentType::Unknown("grok-cli".to_string()));
+        assert_eq!(
+            unmapped.agent_type,
+            AgentType::Unknown("grok-cli".to_string())
+        );
     }
 
     #[test]

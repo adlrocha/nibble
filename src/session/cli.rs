@@ -3,8 +3,8 @@
 use anyhow::Result;
 use std::collections::HashMap;
 
-use crate::db::Database;
 use crate::commands::resolve_sandbox_repo_path;
+use crate::db::Database;
 use crate::{memory, session};
 
 #[allow(clippy::too_many_arguments)]
@@ -174,8 +174,7 @@ pub(crate) fn cmd_session_list(
                     .cloned(),
                 _ => None,
             };
-            let ws =
-                session::format_workspace(resolved_ws.as_deref().or(s.workspace.as_deref()));
+            let ws = session::format_workspace(resolved_ws.as_deref().or(s.workspace.as_deref()));
 
             let agent_short = memory::format::agent_short_name(&s.agent);
             // Resolve task_id for memory badge lookup

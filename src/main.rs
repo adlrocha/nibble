@@ -1,17 +1,17 @@
+mod agent_input;
 mod backup;
 mod cli;
 #[path = "sandbox/commands.rs"]
 mod commands;
 mod config;
+mod cron;
 mod db;
 mod format;
 #[path = "sandbox/hermes.rs"]
 mod hermes;
+mod lm;
 mod memory;
 mod models;
-mod agent_input;
-mod cron;
-mod lm;
 mod privacy_filter;
 mod quota_watch;
 mod sandbox;
@@ -179,12 +179,21 @@ fn main() -> Result<()> {
                 state,
                 message,
             } => {
+                // Hooks/extensions report in agent vocabulary (`working`,
+                // `idle`); normalise before the transition — this CLI path
+                // is what hooks call, and apply_status_transition only
+                // speaks running|blocked|completed|exited. Genuinely
+                // invalid states remain a loud error.
+                let state = match state.as_str() {
+                    "working" => "running".to_string(),
+                    "idle" => "completed".to_string(),
+                    _ => state,
+                };
                 // Self-heal: an unknown task is auto-registered so the
                 // agent stays visible even if its `report start` was lost
                 // to a transient failure (INV-3). `exited` is the
                 // exception — reporting the death of an unknown task must
-                // not create a row. An invalid *state* remains a loud
-                // error (hook callers use `|| true`).
+                // not create a row.
                 let mut task = match db.get_task_by_id(&task_id)? {
                     Some(t) => t,
                     None if state == "exited" => {
@@ -379,7 +388,15 @@ fn main() -> Result<()> {
         }
         Commands::Session { action } => match action {
             cli::SessionAction::List {
-                agent, repo, sandbox, today, yesterday, week, month, last, limit,
+                agent,
+                repo,
+                sandbox,
+                today,
+                yesterday,
+                week,
+                month,
+                last,
+                limit,
             } => session::cli::cmd_session_list(
                 &db, agent, repo, sandbox, today, yesterday, week, month, last, limit,
             )?,
@@ -413,7 +430,6 @@ fn main() -> Result<()> {
             println!("Message injected into task {}", task_id);
         }
 
-
         Commands::QuotaWatch { once } => {
             let cfg = config::load().unwrap_or_default();
             let db_path = db::default_db_path();
@@ -436,7 +452,6 @@ fn main() -> Result<()> {
                 }
             }
         }
-
 
         Commands::Cron { action } => match action {
             cli::CronAction::Add {
@@ -619,7 +634,16 @@ fn main() -> Result<()> {
                     }
                 };
 
-                commands::cmd_sandbox_attach(&db, task_id, agent.fresh, btw, agent.hermes, agent.pi, agent.omp, session.clone())?;
+                commands::cmd_sandbox_attach(
+                    &db,
+                    task_id,
+                    agent.fresh,
+                    btw,
+                    agent.hermes,
+                    agent.pi,
+                    agent.omp,
+                    session.clone(),
+                )?;
             }
             SandboxAction::Kill {
                 container_or_path,

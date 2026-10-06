@@ -16,11 +16,7 @@ use crate::models::{Task, TaskStatus};
 /// Apply a hook-reported status transition to a task.
 /// Returns `false` for an unknown state string (caller reports and fails);
 /// unknown *task IDs* are handled by the caller before this runs.
-pub(crate) fn apply_status_transition(
-    task: &mut Task,
-    state: &str,
-    message: Option<&str>,
-) -> bool {
+pub(crate) fn apply_status_transition(task: &mut Task, state: &str, message: Option<&str>) -> bool {
     let now = chrono::Utc::now();
     match state {
         "running" => {
@@ -57,7 +53,12 @@ pub(crate) fn apply_status_transition(
 /// row on first report; `exited` on an unknown ID never creates one),
 /// normalises the reporting vocabulary (`working` → `running`,
 /// `idle` → `completed`), applies the transition and persists it.
-pub(crate) fn apply_report(db: &Database, task_id: &str, state: &str, reason: Option<&str>) -> Result<()> {
+pub(crate) fn apply_report(
+    db: &Database,
+    task_id: &str,
+    state: &str,
+    reason: Option<&str>,
+) -> Result<()> {
     let mut task = match db.get_task_by_id(task_id)? {
         Some(t) => t,
         None if state == "exited" => {
@@ -316,9 +317,7 @@ pub(crate) fn collect_status_tasks(db: &Database, include_exited: bool) -> Resul
         }
     }
     let cutoff = chrono::Utc::now() - chrono::Duration::hours(1);
-    tasks.retain(|t| {
-        t.status != TaskStatus::Exited || (include_exited && t.updated_at > cutoff)
-    });
+    tasks.retain(|t| t.status != TaskStatus::Exited || (include_exited && t.updated_at > cutoff));
     tasks.sort_by(|a, b| {
         sidebar_state(a)
             .cmp(&sidebar_state(b))
@@ -386,14 +385,20 @@ fn resolve_task(db: &Database, target: &str) -> Result<Task> {
         return Ok(t);
     }
     let tasks = collect_status_tasks(db, true)?;
-    let matches: Vec<&Task> = tasks.iter().filter(|t| t.task_id.starts_with(target)).collect();
+    let matches: Vec<&Task> = tasks
+        .iter()
+        .filter(|t| t.task_id.starts_with(target))
+        .collect();
     match matches.as_slice() {
         [t] => Ok((*t).clone()),
         [] => anyhow::bail!("no task matches '{target}'"),
         many => anyhow::bail!(
             "'{target}' is ambiguous ({}): {}",
             many.len(),
-            many.iter().map(|t| &t.task_id[..8.min(t.task_id.len())]).collect::<Vec<_>>().join(", ")
+            many.iter()
+                .map(|t| &t.task_id[..8.min(t.task_id.len())])
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
     }
 }
@@ -445,7 +450,11 @@ pub(crate) fn cmd_status(db: &Database, watch: bool, json: bool, all: bool) -> R
         let tasks = collect_status_tasks(db, all)?;
         // Topic lines come from zellij pane titles — sidebar (watch) only,
         // matching the pre-merge renderer; a no-op outside zellij.
-        let topics = if watch { Some(zellij_pane_topics()) } else { None };
+        let topics = if watch {
+            Some(zellij_pane_topics())
+        } else {
+            None
+        };
         let body = render_status(
             &tasks.iter().collect::<Vec<_>>(),
             width,
@@ -556,8 +565,7 @@ fn terminal_size() -> Option<(u16, u16)> {
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
-    if unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) } != 0
-        || ws.ws_col == 0
+    if unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) } != 0 || ws.ws_col == 0
     {
         return None;
     }
@@ -719,9 +727,9 @@ pub(crate) fn cmd_sidebar(install: bool, uninstall: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::AgentType;
     use crate::models::TaskContext;
     use std::collections::HashMap;
-    use crate::models::AgentType;
     use std::str::FromStr;
 
     fn task() -> Task {
@@ -753,7 +761,10 @@ mod tests {
             Some("permission prompt: rm -rf")
         ));
         assert!(t.attention_reason.is_some());
-        assert_eq!(t.attention_reason.as_deref(), Some("permission prompt: rm -rf"));
+        assert_eq!(
+            t.attention_reason.as_deref(),
+            Some("permission prompt: rm -rf")
+        );
         // blocked sorts first
         assert_eq!(sidebar_state(&t), SidebarState::Blocked);
     }
@@ -779,8 +790,7 @@ mod tests {
     fn stale_running_row_renders_idle() {
         let mut stale = task();
         apply_status_transition(&mut stale, "running", None);
-        stale.updated_at =
-            chrono::Utc::now() - chrono::Duration::seconds(STALE_RUNNING_SECS + 60);
+        stale.updated_at = chrono::Utc::now() - chrono::Duration::seconds(STALE_RUNNING_SECS + 60);
         assert_eq!(
             sidebar_state(&stale),
             SidebarState::Idle,
@@ -826,15 +836,24 @@ mod tests {
             serde_json::Value::String("parent-1".to_string()),
         );
         let out = render_status(&[&t], 40, false, false, None);
-        assert!(out.contains("sandbox window"), "window rows locate in the sandbox: {out}");
-        assert!(!out.contains("host"), "window rows must not claim host: {out}");
+        assert!(
+            out.contains("sandbox window"),
+            "window rows locate in the sandbox: {out}"
+        );
+        assert!(
+            !out.contains("host"),
+            "window rows must not claim host: {out}"
+        );
     }
 
     #[test]
     fn render_plain_task_shows_host_location() {
         let t = task();
         let out = render_status(&[&t], 40, false, false, None);
-        assert!(out.contains("host"), "plain rows keep the host location: {out}");
+        assert!(
+            out.contains("host"),
+            "plain rows keep the host location: {out}"
+        );
     }
 
     #[test]
@@ -865,7 +884,10 @@ mod tests {
         assert!(first_lines[3].starts_with('·'), "exited shows · : {out}");
 
         let colored = render_status(&[&working], 40, false, true, None);
-        assert!(colored.contains("\x1b[38;5;208m●\x1b[0m"), "working mark is orange: {colored}");
+        assert!(
+            colored.contains("\x1b[38;5;208m●\x1b[0m"),
+            "working mark is orange: {colored}"
+        );
     }
 
     #[test]
@@ -876,7 +898,10 @@ mod tests {
             [].into(),
         );
         let out = render_status(&[&t], 40, false, false, Some(&by_task));
-        assert!(out.contains("fixing sidebar legend"), "topic by task id: {out}");
+        assert!(
+            out.contains("fixing sidebar legend"),
+            "topic by task id: {out}"
+        );
         assert_eq!(out.lines().count(), 3, "topic line added under the row");
 
         // Fallback: topic keyed by the recorded zellij pane id.
@@ -914,9 +939,15 @@ mod tests {
             "compact legend in narrow sidebar: {compact}"
         );
         let narrow = render_status(&[&t], 20, true, false, None);
-        assert!(!narrow.contains("needs input"), "too narrow drops legend: {narrow}");
+        assert!(
+            !narrow.contains("needs input"),
+            "too narrow drops legend: {narrow}"
+        );
         let oneshot = render_status(&[&t], 40, false, false, None);
-        assert!(!oneshot.contains("needs input"), "legend is watch-only: {oneshot}");
+        assert!(
+            !oneshot.contains("needs input"),
+            "legend is watch-only: {oneshot}"
+        );
     }
 
     #[test]
@@ -955,7 +986,6 @@ mod tests {
         assert!(resolve_task(&db, "0").is_err(), "ambiguous/unknown errors");
     }
 }
-
 
 // ── Pane management (ported from the pre-split main.rs during the
 // origin/main integration) ────────────────────────────────────────────────────

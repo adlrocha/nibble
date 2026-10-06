@@ -19,7 +19,7 @@ use crate::sandbox::podman::PodmanSandbox;
 use crate::sandbox::{container_working_dir, pi_session_dir_name, SandboxHealth};
 use crate::session::pi::{
     discover_pi_session_in_container, ensure_agent_skills_symlink, list_pi_sessions_for_cwd,
-    mount_agent_config_dir, pick_pi_session, pi_resume_command, pi_session_path_candidates,
+    mount_agent_config_dir, pi_resume_command, pi_session_path_candidates, pick_pi_session,
     PiSessionPick,
 };
 
@@ -191,7 +191,16 @@ pub(crate) fn cmd_sandbox_spawn(db: &Database, opts: SpawnOptions) -> Result<Str
                             eprintln!("Attach with:");
                             eprintln!("  nibble sandbox attach {}", tid);
                         } else {
-                            cmd_sandbox_attach(db, tid.clone(), fresh, false, hermes, pi, omp, None)?;
+                            cmd_sandbox_attach(
+                                db,
+                                tid.clone(),
+                                fresh,
+                                false,
+                                hermes,
+                                pi,
+                                omp,
+                                None,
+                            )?;
                         }
                         return Ok(tid.clone());
                     }
@@ -452,7 +461,8 @@ pub(crate) fn cmd_sandbox_spawn(db: &Database, opts: SpawnOptions) -> Result<Str
             let pi_slug = pi_session_dir_name(&container_working_dir(&repo));
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_secs(5));
-                if let Some(host_path) = discover_pi_session_in_container(&cid, &pi_slug, dir_name) {
+                if let Some(host_path) = discover_pi_session_in_container(&cid, &pi_slug, dir_name)
+                {
                     let home = dirs::home_dir().unwrap_or_default();
                     let cp = if host_path.starts_with(&home) {
                         std::path::PathBuf::from("/home/node")
@@ -613,12 +623,14 @@ fn install_spawn_agent(container_id: &str, pi_impl: Option<PiImplementation>) {
                                 // mounted ~/.omp/agent/extensions, so this is benign.
                                 eprintln!("  Tools:     ⚠️  omp install {ext} exited non-zero (needs bun in the sandbox; extensions already in ~/.omp/agent/extensions on the host are available via the mount)");
                             } else {
-                                eprintln!("  Tools:     ⚠️  {ext_cmd} install {ext} exited non-zero");
+                                eprintln!(
+                                    "  Tools:     ⚠️  {ext_cmd} install {ext} exited non-zero"
+                                );
                             }
                         }
-                        Err(e) => eprintln!(
-                            "  Tools:     ⚠️  {ext_cmd} install {ext} failed to run: {e}"
-                        ),
+                        Err(e) => {
+                            eprintln!("  Tools:     ⚠️  {ext_cmd} install {ext} failed to run: {e}")
+                        }
                     }
                 }
             }
@@ -683,7 +695,14 @@ fn run_repo_setup_script(repo: &std::path::Path, container_id: &str) -> Result<(
         println!("  Setup:     running .nibble/setup.sh …");
         let setup_path = format!("{}/.nibble/setup.sh", container_cwd);
         let status = std::process::Command::new("podman")
-            .args(["exec", "--user", "node", container_id, "/bin/bash", &setup_path])
+            .args([
+                "exec",
+                "--user",
+                "node",
+                container_id,
+                "/bin/bash",
+                &setup_path,
+            ])
             .status()
             .context("Failed to run .nibble/setup.sh")?;
         if status.success() {
@@ -708,8 +727,11 @@ fn inject_sandbox_context(repo: &std::path::Path, repo_name: &str, container_id:
     let toolchains = crate::sandbox::context::detect_toolchains(repo);
     let agents_md = crate::sandbox::context::build_sandbox_agents_md(repo_name, &toolchains);
     let container_cwd = container_working_dir(repo);
-    match crate::sandbox::context::inject_sandbox_claude_md(container_id, &container_cwd, &agents_md)
-    {
+    match crate::sandbox::context::inject_sandbox_claude_md(
+        container_id,
+        &container_cwd,
+        &agents_md,
+    ) {
         Ok(()) => {
             if toolchains.is_empty() {
                 println!("  Context:   AGENTS.md + CLAUDE.md updated (no toolchain detected)");
@@ -724,7 +746,6 @@ fn inject_sandbox_context(repo: &std::path::Path, repo_name: &str, container_id:
         Err(e) => eprintln!("  Warning:   Could not write AGENTS.md/CLAUDE.md: {e:#}"),
     }
 }
-
 
 /// List all tracked sandboxes, auto-cleaning gone entries.
 pub(crate) fn cmd_sandbox_list(db: &Database) -> Result<()> {
@@ -1309,7 +1330,6 @@ fn resolve_attach_agent(
     Ok(agent)
 }
 
-
 /// Whether this task is a `--btw` side-session window.
 pub(crate) fn is_btw_window(task: &Task) -> bool {
     task.context
@@ -1390,10 +1410,7 @@ pub(crate) fn build_window_task(
     task.repo_path = parent.repo_path.clone();
     task.context = Some(TaskContext {
         url: None,
-        project_path: parent
-            .context
-            .as_ref()
-            .and_then(|c| c.project_path.clone()),
+        project_path: parent.context.as_ref().and_then(|c| c.project_path.clone()),
         session_id: None,
         claude_session_id: None,
         extra,
@@ -1441,7 +1458,6 @@ pub(crate) fn cmd_sandbox_attach(
             let _ = db.update_task(&task);
         }
     }
-
 
     let container_id = task
         .container_id
@@ -1551,10 +1567,8 @@ pub(crate) fn cmd_sandbox_attach(
         });
         match stored {
             Some(id) => Some(id),
-            None => {
-                latest_main_child_value(db, &task.task_id, |c| c.claude_session_id.clone())?
-                    .filter(|id| !id.starts_with("ses_"))
-            }
+            None => latest_main_child_value(db, &task.task_id, |c| c.claude_session_id.clone())?
+                .filter(|id| !id.starts_with("ses_")),
         }
     };
 
@@ -1660,7 +1674,10 @@ pub(crate) fn cmd_sandbox_attach(
                 let pi_cmd = if let Some(cp) = maybe_cp {
                     // Stored path exists — use it, but still refresh the DB record
                     // so the link survives if the user switched sessions.
-                    eprintln!("  Session:   resuming stored {bin} session {}", cp.display());
+                    eprintln!(
+                        "  Session:   resuming stored {bin} session {}",
+                        cp.display()
+                    );
                     let mut updated_task = task.clone();
                     if let Some(ref mut ctx) = updated_task.context {
                         ctx.extra.insert(
@@ -1808,9 +1825,7 @@ pub(crate) fn cmd_sandbox_attach(
                     "Attaching to sandbox {} ({}) [{bin}]…",
                     task.title, container_id
                 );
-                eprintln!(
-                    "(Exit {bin} or press Ctrl+C to detach — the container keeps running)"
-                );
+                eprintln!("(Exit {bin} or press Ctrl+C to detach — the container keeps running)");
             }
         }
         SelectedAgent::Claude => {
@@ -1890,14 +1905,20 @@ mod tests {
         let w = build_window_task(&p, SelectedAgent::Omp, Some(7), 42, 2, false);
         assert_eq!(w.agent_type, AgentType::Unknown("omp".to_string()));
         assert_eq!(w.pid, Some(42));
-        assert_eq!(w.container_name, None, "window rows keep host-pid reconcile");
+        assert_eq!(
+            w.container_name, None,
+            "window rows keep host-pid reconcile"
+        );
         assert_eq!(w.repo_path, p.repo_path);
         let ctx = w.context.as_ref().unwrap();
         assert_eq!(
             ctx.extra.get("parent_task_id").unwrap(),
             &serde_json::Value::String("parent-1".to_string())
         );
-        assert_eq!(ctx.extra.get("window"), Some(&serde_json::Value::Bool(true)));
+        assert_eq!(
+            ctx.extra.get("window"),
+            Some(&serde_json::Value::Bool(true))
+        );
         assert_eq!(ctx.extra.get("btw"), None, "main windows are not btw");
         assert_eq!(
             ctx.extra.get("zellij_pane_id"),
@@ -1949,7 +1970,10 @@ mod tests {
             .expect("main window session id found");
         assert_eq!(claude, "sid-new", "btw never supplies resume state");
         let pi = latest_main_child_value(&db, "parent-1", |c| {
-            c.extra.get("pi_session_path").and_then(|v| v.as_str()).map(String::from)
+            c.extra
+                .get("pi_session_path")
+                .and_then(|v| v.as_str())
+                .map(String::from)
         })
         .unwrap()
         .expect("main window session path found");
