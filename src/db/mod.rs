@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{TimeZone, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -1001,23 +1001,6 @@ impl Database {
         Ok(())
     }
 
-    /// Mark a single cron job as running=true/false (used by the background thread).
-    pub fn set_cron_job_running(&self, id: i64, running: bool) -> Result<()> {
-        self.conn.execute(
-            "UPDATE cron_jobs SET running = ?1 WHERE id = ?2",
-            params![running as i32, id],
-        )?;
-        Ok(())
-    }
-
-    /// Clear the running flag on all cron jobs.  Called on daemon startup to
-    /// recover from a crash where in-flight jobs were left with running=1.
-    pub fn reset_all_cron_running_flags(&self) -> Result<()> {
-        self.conn
-            .execute("UPDATE cron_jobs SET running = 0 WHERE running = 1", [])?;
-        Ok(())
-    }
-
     pub fn get_cron_job(&self, id: i64) -> Result<Option<CronJob>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_path, label, schedule, prompt, enabled, skip_if_running,
@@ -1090,22 +1073,6 @@ impl Database {
         Ok(count > 0)
     }
 
-    /// Get all cron jobs that are due to run (next_run <= now and enabled)
-    pub fn get_due_cron_jobs(&self, now: DateTime<Utc>) -> Result<Vec<CronJob>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, repo_path, label, schedule, prompt, enabled, skip_if_running,
-                    running, last_run, next_run, expires_at, created_at
-             FROM cron_jobs WHERE enabled = 1 AND next_run <= ?1
-             ORDER BY next_run ASC",
-        )?;
-
-        let jobs = stmt
-            .query_map(params![now.timestamp()], |row| self.row_to_cron_job(row))?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        Ok(jobs)
-    }
-
     fn row_to_cron_job(&self, row: &rusqlite::Row) -> rusqlite::Result<CronJob> {
         let last_run_ts: Option<i64> = row.get(8)?;
         let next_run_ts: i64 = row.get(9)?;
@@ -1126,25 +1093,6 @@ impl Database {
             expires_at: expires_ts.map(|ts| Utc.timestamp_opt(ts, 0).unwrap()),
             created_at: Utc.timestamp_opt(created_ts, 0).unwrap(),
         })
-    }
-
-    /// Return all sandbox tasks for a given repo path, newest first.
-    pub fn get_tasks_by_repo_path(&self, repo_path: &str) -> Result<Vec<Task>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, task_id, agent_type, title, status, created_at, updated_at,
-                    completed_at, pid, ppid, monitor_pid, attention_reason,
-                    exit_code, context, metadata, container_id, container_name,
-                    repo_path, worktree_path, sandbox_type, sandbox_config
-             FROM tasks
-             WHERE repo_path = ?1 AND sandbox_type != 'none'
-             ORDER BY created_at DESC, id DESC",
-        )?;
-
-        let tasks = stmt
-            .query_map(params![repo_path], |row| self.row_to_task(row))?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        Ok(tasks)
     }
 
     /// Return the task for `task_id`, creating a placeholder when missing.

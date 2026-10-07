@@ -12,7 +12,6 @@ mod hermes;
 mod lm;
 mod memory;
 mod models;
-mod privacy_filter;
 mod quota_watch;
 mod sandbox;
 mod session;
@@ -66,7 +65,7 @@ fn main() -> Result<()> {
         Commands::Sidebar {
             install,
             uninstall,
-            focus,
+            focus: _, // bare `nibble sidebar` focuses too — flag kept for CLI compat
             close,
         } => {
             if install || uninstall {
