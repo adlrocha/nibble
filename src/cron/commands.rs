@@ -4,7 +4,6 @@
 use crate::cron;
 use crate::db::Database;
 use crate::models;
-use crate::models::AgentType;
 use crate::sandbox::podman::PodmanSandbox;
 use crate::sandbox::SandboxHealth;
 use anyhow::{Context, Result};
@@ -335,23 +334,4 @@ pub(crate) fn resolve_cron_id(db: &Database, id_or_label: &str) -> Result<i64> {
         return Ok(job.id.unwrap());
     }
     anyhow::bail!("Cron job '{}' not found (tried as label)", id_or_label)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum SelectedAgent {
-    Claude,
-    Pi,
-    Omp,
-    Hermes,
-}
-
-impl std::fmt::Display for SelectedAgent {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SelectedAgent::Claude => write!(f, "Claude Code"),
-            SelectedAgent::Pi => write!(f, "pi"),
-            SelectedAgent::Omp => write!(f, "omp"),
-            SelectedAgent::Hermes => write!(f, "hermes"),
-        }
-    }
 }

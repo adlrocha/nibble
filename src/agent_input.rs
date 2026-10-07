@@ -14,8 +14,7 @@
 use anyhow::{bail, Context, Result};
 
 use crate::models::{SandboxType, Task};
-use crate::sandbox::podman::PodmanSandbox;
-use crate::sandbox::{container_working_dir, ContainerStatus};
+use crate::sandbox::container_working_dir;
 
 /// Send `message` to the Claude session running inside a Podman sandbox.
 ///
@@ -67,32 +66,6 @@ pub fn inject_returning_child(task: &Task, message: &str) -> Result<std::process
         .map(container_working_dir)
         .unwrap_or_else(|| "/workspace".to_string());
     spawn_inject(container_id, session_id, &task.task_id, &cwd, message)
-}
-
-/// Check if the container is healthy enough to accept an inject.
-///
-/// Returns `Ok(())` if the container is running and exec works.
-/// Returns an error with a descriptive message if not.
-pub fn check_container_health(container_id: &str) -> Result<()> {
-    let sandbox = PodmanSandbox::new();
-    match sandbox.status(container_id) {
-        Ok(ContainerStatus::Running) => Ok(()),
-        Ok(ContainerStatus::Stopped) => {
-            bail!(
-                "Container is stopped — restart it with `agent-sandbox resume {}`",
-                &container_id[..container_id.len().min(8)]
-            )
-        }
-        Ok(ContainerStatus::Paused) => {
-            bail!("Container is paused — unpause it first")
-        }
-        Ok(ContainerStatus::Unknown) => {
-            bail!("Container status unknown — it may have been removed")
-        }
-        Err(e) => {
-            bail!("Failed to check container status: {e}")
-        }
-    }
 }
 
 // ── Container injection ───────────────────────────────────────────────────────

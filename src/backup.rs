@@ -161,11 +161,10 @@ pub fn create_backup(output: Option<PathBuf>, include_sessions: bool) -> Result<
     let mut file_count: usize = 0;
     let mut byte_count: u64 = 0;
 
-    // Source subtrees: (absolute dir, zip prefix, apply ~/.nibble skip-rules).
+    // Source subtrees: (absolute dir, zip prefix).
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Cannot find home directory"))?;
     let corpus_root = source.join("sessions");
-    let mut sources: Vec<(PathBuf, PathBuf, bool)> =
-        vec![(source.clone(), PathBuf::from(".nibble"), true)];
+    let mut sources: Vec<(PathBuf, PathBuf)> = vec![(source.clone(), PathBuf::from(".nibble"))];
     if include_sessions {
         for rel in [
             ".pi/agent/sessions",
@@ -187,14 +186,14 @@ pub fn create_backup(output: Option<PathBuf>, include_sessions: bool) -> Result<
                 continue;
             }
             if dir.exists() {
-                sources.push((dir, PathBuf::from(rel), false));
+                sources.push((dir, PathBuf::from(rel)));
             } else {
                 eprintln!("  (no {} — skipped)", rel);
             }
         }
     }
 
-    for (src_raw, zip_prefix, apply_skip) in &sources {
+    for (src_raw, zip_prefix) in &sources {
         println!("Backing up {} ...", src_raw.display());
 
         // Resolve a symlinked source root (the consolidated session layout
