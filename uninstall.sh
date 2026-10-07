@@ -77,7 +77,7 @@ fi
 step "Stopping services"
 
 for svc in nibble-listener nibble-resume nibble-reset nibble-cleanup nibble-web \
-           nibble-privacy-proxy nibble-usage; do
+           nibble-usage; do
     if systemctl --user is-active --quiet "$svc.service" 2>/dev/null; then
         systemctl --user stop "$svc.service"
         ok "Stopped $svc.service"
@@ -94,7 +94,7 @@ done
 step "Removing systemd services"
 
 for svc in nibble-listener nibble-resume nibble-reset nibble-cleanup nibble-web \
-           nibble-privacy-proxy nibble-usage; do
+           nibble-usage; do
     if [ -f "$SYSTEMD_DIR/$svc.service" ]; then
         systemctl --user disable "$svc.service" 2>/dev/null || true
         rm -f "$SYSTEMD_DIR/$svc.service"
