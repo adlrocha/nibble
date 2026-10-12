@@ -35,6 +35,6 @@ jobs:
       group: nibble-review-${{ github.event.pull_request.number || github.event.issue.number || github.event.inputs.pr_number }}
       cancel-in-progress: true
     steps:
-      - uses: adlrocha/nibble-review@main
+      - uses: adlrocha/nibble-review@v1
         with:
           api-key: ${{ secrets.OPENCODE_API_KEY }}
