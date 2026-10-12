@@ -241,24 +241,52 @@ pub struct DateRange {
     pub until: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// Path-boundary repo match: true when workspace `ws` is exactly `repo` or
+/// a subdirectory of it. Unlike substring matching this rejects sibling
+/// repos sharing a prefix (`/work/nibble` vs `/work/nibble-review`), and
+/// never matches short inputs like `.` against every transcript path.
+pub fn workspace_matches_repo(ws: &str, repo: &str) -> bool {
+    let repo = repo.trim_end_matches('/');
+    !repo.is_empty()
+        && (ws == repo
+            || ws
+                .strip_prefix(repo)
+                .is_some_and(|rest| rest.starts_with('/')))
+}
+
 /// List sessions grouped by date (today, yesterday, etc.).
+/// `repo_pred` receives each session and decides whether it belongs to the
+/// requested repo (see [`session::cli::repo_predicate`]).
 pub fn list_sessions_grouped(
     agent_filter: Option<&str>,
-    repo_filter: Option<&str>,
+    repo_pred: Option<&dyn Fn(&SessionInfo) -> bool>,
     date_range: Option<DateRange>,
     limit: usize,
 ) -> Result<Vec<SessionGroup>> {
-    let mut sessions = list_all_sessions()?;
+    list_sessions_grouped_with_home(
+        dirs::home_dir().unwrap_or_default().as_ref(),
+        agent_filter,
+        repo_pred,
+        date_range,
+        limit,
+    )
+}
+
+fn list_sessions_grouped_with_home(
+    home: &std::path::Path,
+    agent_filter: Option<&str>,
+    repo_pred: Option<&dyn Fn(&SessionInfo) -> bool>,
+    date_range: Option<DateRange>,
+    limit: usize,
+) -> Result<Vec<SessionGroup>> {
+    let mut sessions = list_all_sessions_with_home(home)?;
 
     // Apply filters
     if let Some(a) = agent_filter {
         sessions.retain(|s| s.agent == a);
     }
-    if let Some(r) = repo_filter {
-        sessions.retain(|s| {
-            s.workspace.as_ref().is_some_and(|w| w.contains(r))
-                || s.path.to_string_lossy().contains(r)
-        });
+    if let Some(pred) = repo_pred {
+        sessions.retain(|s| pred(s));
     }
     if let Some(range) = date_range {
         if let Some(since_dt) = range.since {
@@ -990,6 +1018,75 @@ mod tests {
         let path = write_temp_file(temp.path(), "sess-2.jsonl", content);
         let cwd = extract_claude_cwd(&path);
         assert_eq!(cwd, None);
+    }
+
+    // ── Repo filtering ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn workspace_matches_repo_path_boundaries() {
+        let repo = "/home/u/work/nibble";
+        assert!(workspace_matches_repo(repo, repo));
+        assert!(workspace_matches_repo("/home/u/work/nibble/scripts", repo));
+        // Sibling repos sharing a prefix must not match.
+        assert!(!workspace_matches_repo("/home/u/work/nibble-review", repo));
+        assert!(!workspace_matches_repo("/home/u/work", repo));
+        // Trailing slashes on either side don't change the answer.
+        assert!(workspace_matches_repo(
+            "/home/u/work/nibble/",
+            "/home/u/work/nibble/"
+        ));
+        assert!(workspace_matches_repo(
+            "/home/u/work/nibble",
+            "/home/u/work/nibble/"
+        ));
+    }
+
+    #[test]
+    fn list_sessions_grouped_repo_predicate_keeps_only_that_repo() {
+        // Regression: `session list --repo .` used to substring-match "."
+        // against every transcript path, listing sessions from every repo.
+        // A repo predicate must keep only sessions whose workspace is the
+        // repo itself or a subdirectory of it.
+        let home = tempfile::tempdir().unwrap();
+        for slug in [
+            "--home--u--work--nibble--",
+            "--home--u--work--nibble--scripts--",
+            "--home--u--work--nibble-review--",
+            "--home--u--work--other--",
+        ] {
+            let dir = home.path().join(format!(".pi/agent/sessions/{}", slug));
+            std::fs::create_dir_all(&dir).unwrap();
+            let cwd = format!("/{}/", slug.trim_matches('-').replace("--", "/"));
+            let cwd = cwd.trim_end_matches('/');
+            write_temp_file(
+                &dir,
+                &format!("2026-10-12T10-00-00-000Z_{}.jsonl", slug.replace("--", "")),
+                &format!(
+                    r#"{{\"type\":\"session\",\"version\":3,\"id\":\"{}\",\"timestamp\":\"2026-10-12T10:00:00Z\",\"cwd\":\"{}\"}}"#,
+                    slug.replace("--", ""),
+                    cwd
+                ),
+            );
+        }
+
+        let repo = "/home/u/work/nibble";
+        let pred = |s: &SessionInfo| {
+            s.workspace
+                .as_deref()
+                .is_some_and(|w| workspace_matches_repo(w, repo))
+        };
+        let groups =
+            list_sessions_grouped_with_home(home.path(), None, Some(&pred), None, 50).unwrap();
+        let kept: Vec<&str> = groups
+            .iter()
+            .flat_map(|g| g.sessions.iter().filter_map(|s| s.workspace.as_deref()))
+            .collect();
+        assert_eq!(
+            kept.len(),
+            2,
+            "nibble + nibble/scripts, not the other repos"
+        );
+        assert!(kept.iter().all(|w| workspace_matches_repo(w, repo)));
     }
 
     // ── Title extraction ───────────────────────────────────────────────────────

@@ -69,28 +69,10 @@ pub(crate) fn cmd_session_list(
 
     let effective_limit = last.unwrap_or(limit);
 
-    let groups = session::list_sessions_grouped(
-        agent.as_deref(),
-        repo.as_deref(),
-        date_range,
-        effective_limit,
-    )?;
-
-    if groups.is_empty() || groups.iter().all(|g| g.sessions.is_empty()) {
-        println!("No sessions found.");
-        return Ok(());
-    }
-
-    // Build memory count lookup per session_id
-    let memories = memory::store::list_memories(None, None, None, None).unwrap_or_default();
-    let mut memory_counts: HashMap<String, usize> = HashMap::new();
-    for m in &memories {
-        if let Some(sid) = &m.session_id {
-            *memory_counts.entry(sid.clone()).or_insert(0) += 1;
-        }
-    }
-
-    // Build lookup maps from session identifiers → project_path
+    // Build lookup maps from session identifiers → project_path before
+    // listing: the repo/sandbox filters need them to map sandbox sessions
+    // (whose workspace is a container path like /nibble) back to the host
+    // repo they belong to.
     let tasks = db.list_tasks().unwrap_or_default();
     let mut claude_task_repo: HashMap<String, String> = HashMap::new();
     let mut pi_task_repo: HashMap<String, String> = HashMap::new();
@@ -127,19 +109,40 @@ pub(crate) fn cmd_session_list(
         }
     }
 
+    let repo_pred = repo
+        .as_deref()
+        .map(|r| repo_predicate(r, &claude_task_repo, &pi_task_repo));
+    let repo_pred_dyn = repo_pred
+        .as_ref()
+        .map(|f| f as &dyn Fn(&session::SessionInfo) -> bool);
+
+    let groups = session::list_sessions_grouped(
+        agent.as_deref(),
+        repo_pred_dyn,
+        date_range,
+        effective_limit,
+    )?;
+
+    if groups.is_empty() || groups.iter().all(|g| g.sessions.is_empty()) {
+        println!("No sessions found.");
+        return Ok(());
+    }
+
+    // Build memory count lookup per session_id
+    let memories = memory::store::list_memories(None, None, None, None).unwrap_or_default();
+    let mut memory_counts: HashMap<String, usize> = HashMap::new();
+    for m in &memories {
+        if let Some(sid) = &m.session_id {
+            *memory_counts.entry(sid.clone()).or_insert(0) += 1;
+        }
+    }
+
     // When --sandbox is given, filter groups to exact repo matches.
     let groups = if let Some(repo) = &sandbox_repo {
         let mut filtered = groups;
         for group in &mut filtered {
             group.sessions.retain(|s| {
-                let resolved_repo = match s.agent.as_str() {
-                    "claude" => claude_task_repo.get(&s.session_id).cloned(),
-                    "pi" | "omp" => pi_task_repo
-                        .get(&s.path.to_string_lossy().to_string())
-                        .cloned(),
-                    _ => None,
-                };
-                resolved_repo.as_deref() == Some(repo)
+                session_repo(s, &claude_task_repo, &pi_task_repo) == Some(repo.as_str())
             });
         }
         filtered.retain(|g| !g.sessions.is_empty());
@@ -167,13 +170,7 @@ pub(crate) fn cmd_session_list(
             let sid = &s.session_id[..s.session_id.len().min(8)];
 
             // Resolve workspace: prefer task project_path for sandbox sessions
-            let resolved_ws = match s.agent.as_str() {
-                "claude" => claude_task_repo.get(&s.session_id).cloned(),
-                "pi" | "omp" => pi_task_repo
-                    .get(&s.path.to_string_lossy().to_string())
-                    .cloned(),
-                _ => None,
-            };
+            let resolved_ws = session_repo(s, &claude_task_repo, &pi_task_repo).map(str::to_string);
             let ws = session::format_workspace(resolved_ws.as_deref().or(s.workspace.as_deref()));
 
             let agent_short = memory::format::agent_short_name(&s.agent);
@@ -217,6 +214,54 @@ pub(crate) fn cmd_session_list(
     }
     println!();
     Ok(())
+}
+
+/// Resolve a session to its repo (host project path) via the task DB:
+/// claude sessions by session ID, pi/omp sessions by transcript path.
+/// Sandbox sessions record a container cwd (e.g. `/nibble`), so this is the
+/// only way to map them back to the host repo they belong to.
+fn session_repo<'a>(
+    s: &session::SessionInfo,
+    claude_task_repo: &'a HashMap<String, String>,
+    pi_task_repo: &'a HashMap<String, String>,
+) -> Option<&'a str> {
+    match s.agent.as_str() {
+        "claude" => claude_task_repo.get(&s.session_id).map(String::as_str),
+        "pi" | "omp" => pi_task_repo
+            .get(&s.path.to_string_lossy().to_string())
+            .map(String::as_str),
+        _ => None,
+    }
+}
+
+/// Build the repo filter predicate for `session list --repo`.
+///
+/// Inputs that resolve to an existing path (`.`, `~/x`, relative dirs) are
+/// canonicalized and matched with path boundaries: the repo matches its own
+/// sessions and subdirectory sessions, never sibling repos sharing a prefix
+/// (`nibble` vs `nibble-review`). Inputs that don't exist on disk fall back
+/// to workspace substring matching. Sandbox sessions (container cwd) are
+/// matched through the task DB maps instead.
+pub(crate) fn repo_predicate<'a>(
+    filter: &str,
+    claude_task_repo: &'a HashMap<String, String>,
+    pi_task_repo: &'a HashMap<String, String>,
+) -> impl Fn(&session::SessionInfo) -> bool + 'a {
+    let (filter, is_path) = match resolve_sandbox_repo_path(filter) {
+        Ok(canon) => (canon, true),
+        Err(_) => (filter.to_string(), false),
+    };
+    move |s| {
+        let matches_repo = |w: &str| {
+            if is_path {
+                session::workspace_matches_repo(w, &filter)
+            } else {
+                !filter.is_empty() && w.contains(filter.as_str())
+            }
+        };
+        s.workspace.as_deref().is_some_and(matches_repo)
+            || session_repo(s, claude_task_repo, pi_task_repo).is_some_and(matches_repo)
+    }
 }
 
 pub(crate) fn cmd_session_info(id: &str) -> Result<()> {
@@ -291,4 +336,120 @@ pub(crate) fn cmd_session_read(id: &str, raw: bool) -> Result<()> {
         let _ = child.wait();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::SessionInfo;
+
+    fn mk_session(agent: &str, sid: &str, workspace: Option<&str>, path: &str) -> SessionInfo {
+        SessionInfo {
+            agent: agent.to_string(),
+            session_id: sid.to_string(),
+            workspace: workspace.map(str::to_string),
+            path: std::path::PathBuf::from(path),
+            modified: None,
+            size_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn repo_predicate_matches_repo_and_subdirs_not_siblings() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("nibble");
+        std::fs::create_dir_all(&repo).unwrap();
+        let sibling = temp.path().join("nibble-review");
+        std::fs::create_dir_all(&sibling).unwrap();
+        let canon = repo.canonicalize().unwrap().to_string_lossy().to_string();
+        let empty_claude: HashMap<String, String> = HashMap::new();
+        let empty_pi: HashMap<String, String> = HashMap::new();
+
+        let pred = repo_predicate(&canon, &empty_claude, &empty_pi);
+        assert!(pred(&mk_session("pi", "s1", Some(&canon), "/x/s1.jsonl")));
+        assert!(pred(&mk_session(
+            "pi",
+            "s2",
+            Some(&format!("{}/scripts", canon)),
+            "/x/s2.jsonl"
+        )));
+        // Sibling repo sharing the prefix must not match.
+        assert!(!pred(&mk_session(
+            "pi",
+            "s3",
+            Some(&sibling.to_string_lossy()),
+            "/x/s3.jsonl"
+        )));
+        // No workspace and no DB link → no match.
+        assert!(!pred(&mk_session("pi", "s4", None, "/x/s4.jsonl")));
+    }
+
+    #[test]
+    fn repo_predicate_matches_sandbox_sessions_via_task_maps() {
+        // Sandbox sessions record the container cwd (/nibble) as workspace;
+        // the task DB maps them back to the host repo path.
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("nibble");
+        std::fs::create_dir_all(&repo).unwrap();
+        let canon = repo.canonicalize().unwrap().to_string_lossy().to_string();
+
+        let mut claude_map: HashMap<String, String> = HashMap::new();
+        claude_map.insert("sess-1".to_string(), canon.clone());
+        let mut pi_map: HashMap<String, String> = HashMap::new();
+        pi_map.insert(
+            "/home/node/.pi/agent/sessions/--nibble--/t.jsonl".to_string(),
+            canon.clone(),
+        );
+        let empty: HashMap<String, String> = HashMap::new();
+
+        let pred = repo_predicate(&canon, &claude_map, &empty);
+        assert!(pred(&mk_session(
+            "claude",
+            "sess-1",
+            Some("/nibble"),
+            "/x/sess-1.jsonl"
+        )));
+        assert!(!pred(&mk_session(
+            "claude",
+            "sess-9",
+            Some("/other"),
+            "/x/sess-9.jsonl"
+        )));
+
+        let pred = repo_predicate(&canon, &empty, &pi_map);
+        assert!(pred(&mk_session(
+            "pi",
+            "t",
+            Some("/nibble"),
+            "/home/node/.pi/agent/sessions/--nibble--/t.jsonl"
+        )));
+    }
+
+    #[test]
+    fn repo_predicate_substring_fallback_for_non_paths() {
+        // Inputs that don't exist on disk keep substring semantics.
+        let empty_claude: HashMap<String, String> = HashMap::new();
+        let empty_pi: HashMap<String, String> = HashMap::new();
+        let pred = repo_predicate("does-not-exist-anywhere", &empty_claude, &empty_pi);
+        assert!(pred(&mk_session(
+            "pi",
+            "s1",
+            Some("/a/does-not-exist-anywhere/b"),
+            "/x/s1.jsonl"
+        )));
+        assert!(!pred(&mk_session(
+            "pi",
+            "s2",
+            Some("/a/other"),
+            "/x/s2.jsonl"
+        )));
+        // Empty filter must not match everything (the old `.` bug class).
+        let pred = repo_predicate("", &empty_claude, &empty_pi);
+        assert!(!pred(&mk_session(
+            "pi",
+            "s3",
+            Some("/anywhere"),
+            "/x/s3.jsonl"
+        )));
+    }
 }
