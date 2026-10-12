@@ -626,7 +626,9 @@ pub enum SessionAction {
         /// Filter by agent type: claude, pi, hermes
         #[arg(short, long)]
         agent: Option<String>,
-        /// Filter by repo/workspace path substring
+        /// Filter by repo: paths (".", "~", relative) resolve like other commands
+        /// and match the repo plus its subdirectories; plain strings match
+        /// workspace substrings
         #[arg(short, long)]
         repo: Option<String>,
         /// Filter to sessions for a specific sandbox repo (same path resolution as attach)
