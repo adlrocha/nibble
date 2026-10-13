@@ -35,6 +35,9 @@ jobs:
       group: nibble-review-${{ github.event.pull_request.number || github.event.issue.number || github.event.inputs.pr_number }}
       cancel-in-progress: true
     steps:
-      - uses: adlrocha/nibble-review@v1
+      # Pinned to the full commit SHA of v1 (mutable tags on an action holding
+      # write permissions + secrets are a supply-chain risk). Dependabot keeps this updated.
+      # Requires the OPENCODE_API_KEY repository secret — see README before first run.
+      - uses: adlrocha/nibble-review@8eea18aa5a522ec8238d4128d3545c67567a2d13 # v1
         with:
           api-key: ${{ secrets.OPENCODE_API_KEY }}
