@@ -202,6 +202,16 @@ fn main() -> Result<()> {
                 }
                 db.update_task(&task)?;
             }
+            ReportAction::Topic {
+                task_id,
+                text,
+                replace,
+            } => {
+                let mut task = db.ensure_task_or_create(&task_id)?;
+                if status::apply_topic(&mut task, &text, replace) {
+                    db.update_task(&task)?;
+                }
+            }
             ReportAction::Status {
                 task_id,
                 state,

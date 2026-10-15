@@ -263,6 +263,21 @@ pub enum ReportAction {
         #[arg(short, long)]
         message: Option<String>,
     },
+
+    /// Record what a task is about, shown as its sidebar topic line
+    ///
+    /// Called by agent hooks with each user prompt. Only the first
+    /// substantive prompt is kept (slash commands are skipped) unless
+    /// `--replace` is given; `--replace` with empty text clears the topic.
+    Topic {
+        /// Task ID
+        task_id: String,
+        /// Prompt or summary text (first line is kept, whitespace collapsed)
+        text: String,
+        /// Overwrite an existing topic instead of keeping the first one
+        #[arg(long)]
+        replace: bool,
+    },
 }
 
 /// Agent-selection flags shared by `sandbox spawn` and `sandbox attach`.

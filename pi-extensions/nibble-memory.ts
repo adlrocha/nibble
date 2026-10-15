@@ -3,7 +3,8 @@
  *
  * Live-captures session events to the nibble memory system, mirroring
  * Claude Code's hook-based capture:
- *   - input:         user messages
+ *   - input:         user messages (the first is also reported as the
+ *                      task's sidebar topic)
  *   - message_end:   assistant messages
  *   - tool_call:     records tool inputs (paired with tool_execution_end)
  *   - tool_execution_end: records tool outputs
@@ -175,6 +176,24 @@ const reportStatus = (taskId: string, state: string, message?: string): void => 
 	runNibble(args);
 };
 
+// First substantive prompt becomes the task's sidebar topic; nibble keeps
+// the first one and ignores later prompts and slash commands.
+const reportTopic = (taskId: string, text: string): void => {
+	if (!taskId || !text.trim()) return;
+
+	try {
+		execSync(
+			`nibble report topic '${taskId.replace(/'/g, "'\\''")}' '${text.replace(/'/g, "'\\''")}'`,
+			{
+				timeout: 5000,
+				stdio: "pipe",
+				env: { ...process.env, NIBBLE_AGENT_TYPE: agentType() },
+			},
+		);
+	} catch {
+		// Non-fatal: topic reporting is best-effort
+	}
+};
 
 // ─── Extension ───────────────────────────────────────────────────────────────
 
@@ -191,6 +210,7 @@ export default function (pi: ExtensionAPI) {
 		if (!taskId) return;
 		reportStatus(taskId, "working");
 		if (event.text?.trim()) {
+			reportTopic(taskId, event.text);
 			capture(taskId, "user", event.text);
 		}
 	});

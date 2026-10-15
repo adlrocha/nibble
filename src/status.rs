@@ -3,9 +3,10 @@
 //!
 //! Producers (claude hooks, pi/omp extension events, wrappers) report status
 //! transitions; this module validates and persists them, renders a compact
-//! two-line-per-task table (plus a dim topic line from the agent's zellij pane
-//! title when present) for narrow panes, and can open the view as a zellij
-//! side panel in the current session.
+//! two-line-per-task table (plus a dim topic line — the task's first prompt
+//! reported via `nibble report topic`, else the agent's zellij pane title) for
+//! narrow panes, and can open the view as a zellij side panel in the current
+//! session.
 
 use anyhow::{Context, Result};
 
@@ -45,6 +46,62 @@ pub(crate) fn apply_status_transition(task: &mut Task, state: &str, message: Opt
     }
     task.updated_at = now;
     true
+}
+
+/// `context.extra` key holding the task's topic (what the agent is doing).
+const TOPIC_KEY: &str = "topic";
+/// Longest topic stored; the sidebar truncates further to the pane width.
+const TOPIC_MAX_CHARS: usize = 120;
+
+/// Reduce a prompt to a one-line topic: first non-empty line, whitespace
+/// collapsed, capped. `None` for empty text and slash commands (`/clear`,
+/// `/model …`), which say nothing about the task.
+fn normalize_topic(text: &str) -> Option<String> {
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
+    if line.starts_with('/') {
+        return None;
+    }
+    let collapsed = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    Some(truncate_chars(&collapsed, TOPIC_MAX_CHARS))
+}
+
+/// Record a reported topic on the task. Keeps the first substantive prompt
+/// unless `replace`; `replace` with empty text clears it (e.g. `/clear`).
+/// Returns whether the task changed. `updated_at` is left alone: the age in
+/// the sidebar tracks agent activity, not topic edits.
+pub(crate) fn apply_topic(task: &mut Task, text: &str, replace: bool) -> bool {
+    let has_topic = topic_of(task).is_some();
+    if has_topic && !replace {
+        return false;
+    }
+    let ctx = task
+        .context
+        .get_or_insert_with(|| crate::models::TaskContext {
+            url: None,
+            project_path: None,
+            session_id: None,
+            claude_session_id: None,
+            extra: HashMap::new(),
+        });
+    match normalize_topic(text) {
+        Some(topic) => {
+            ctx.extra
+                .insert(TOPIC_KEY.to_string(), serde_json::Value::String(topic));
+            true
+        }
+        None if replace && text.trim().is_empty() => ctx.extra.remove(TOPIC_KEY).is_some(),
+        None => false,
+    }
+}
+
+/// The topic recorded via `nibble report topic`, if any.
+pub(crate) fn topic_of(task: &Task) -> Option<&str> {
+    task.context
+        .as_ref()?
+        .extra
+        .get(TOPIC_KEY)?
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
 }
 
 /// DB-level status report used by quota-watch and other long-running
@@ -175,7 +232,8 @@ pub(crate) type PaneTopics = (HashMap<String, String>, HashMap<u32, String>);
 /// Render the status list for a terminal `width` columns wide.
 /// Two lines per task so narrow (sidebar) panes stay readable, plus a dim
 /// topic line when the agent's pane title reports one. `numbered` prefixes
-/// `N)` keys for the interactive watch mode (max 9) and appends the legend.
+/// `N)` keys for the interactive watch mode (`1`–`9`, then letters; see
+/// [`row_key`]) and appends the legend.
 pub(crate) fn render_status(
     tasks: &[&Task],
     width: usize,
@@ -216,10 +274,9 @@ pub(crate) fn render_status(
                 }
             });
 
-        let key = if numbered && i < 9 {
-            format!("{}\u{1b}[2m)\u{1b}[0m", i + 1)
-        } else {
-            " ".to_string()
+        let key = match row_key(i).filter(|_| numbered) {
+            Some(k) => format!("{k}\u{1b}[2m)\u{1b}[0m"),
+            None => " ".to_string(),
         };
         let title_width = width.saturating_sub(4).max(10);
         out.push_str(&format!(
@@ -249,20 +306,21 @@ pub(crate) fn render_status(
         } else {
             out.push_str(&format!("   {detail}\n"));
         }
-        // Dim topic line from the agent's pane title, when one is reported.
-        if let Some((by_task, by_pane)) = topics {
-            let topic = by_task
+        // Dim topic line: the reported topic (first prompt), else the agent's
+        // pane title when it says more than the repo name.
+        let pane_topic = topics.and_then(|(by_task, by_pane)| {
+            by_task
                 .get(&task.task_id)
                 .or_else(|| pane_id_of(task).and_then(|id| by_pane.get(&id)))
                 .map(|s| s.trim())
-                .filter(|s| !s.is_empty());
-            if let Some(topic) = topic {
-                let text = truncate_chars(topic, width.saturating_sub(3).max(10));
-                if color {
-                    out.push_str(&format!("\x1b[2m   {text}\x1b[0m\n"));
-                } else {
-                    out.push_str(&format!("   {text}\n"));
-                }
+                .filter(|s| !s.is_empty() && !echoes_title(s, &task.title))
+        });
+        if let Some(topic) = topic_of(task).or(pane_topic) {
+            let text = truncate_chars(topic, width.saturating_sub(3).max(10));
+            if color {
+                out.push_str(&format!("\x1b[2m   {text}\x1b[0m\n"));
+            } else {
+                out.push_str(&format!("   {text}\n"));
             }
         }
     }
@@ -275,6 +333,33 @@ pub(crate) fn render_status(
     }
     out
 }
+
+/// Whether a pane title only repeats the task's repo label — nibble names
+/// agent panes `[repo:branch]` and pi titles itself `π - repo`, which would
+/// duplicate the row's title instead of saying what the agent is doing.
+fn echoes_title(pane_title: &str, task_title: &str) -> bool {
+    let strip = |s: &str| {
+        s.trim_matches(|c: char| c.is_whitespace() || matches!(c, '[' | ']' | '-'))
+            .to_string()
+    };
+    let pane = strip(pane_title);
+    let title = strip(task_title);
+    let repo = title.split(':').next().unwrap_or_default();
+    pane == title || pane == repo
+}
+
+/// Selection key for the `idx`-th row in watch mode: `1`–`9`, then `a`–`z`
+/// skipping `q` (quit) — one keystroke per agent for up to 34 rows.
+fn row_key(idx: usize) -> Option<char> {
+    ROW_KEYS.chars().nth(idx)
+}
+
+/// Inverse of [`row_key`]: the row a pressed key selects.
+fn key_row(key: u8) -> Option<usize> {
+    ROW_KEYS.bytes().position(|k| k == key)
+}
+
+const ROW_KEYS: &str = "123456789abcdefghijklmnoprstuvwxyz";
 
 /// Explains the activity marks so the sidebar pane is self-describing.
 /// Dropped when the pane is too narrow to fit even the compact form.
@@ -493,13 +578,9 @@ pub(crate) fn cmd_status(db: &Database, watch: bool, json: bool, all: bool) -> R
             .unwrap_or(40)
             .max(20);
         let tasks = collect_status_tasks(db, all)?;
-        // Topic lines come from zellij pane titles — sidebar (watch) only,
-        // matching the pre-merge renderer; a no-op outside zellij.
-        let topics = if watch {
-            Some(zellij_pane_topics())
-        } else {
-            None
-        };
+        // Pane-title topics (fallback when no topic was reported) — sidebar
+        // (watch) only, matching the pre-merge renderer; a no-op outside zellij.
+        let topics = if watch { Some(zellij_pane_topics()) } else { None };
         let body = render_status(
             &tasks.iter().collect::<Vec<_>>(),
             width,
@@ -542,17 +623,16 @@ pub(crate) fn cmd_status(db: &Database, watch: bool, json: bool, all: bool) -> R
                             quit = true;
                             break;
                         }
-                        b'1'..=b'9' => {
-                            let idx = (key - b'1') as usize;
+                        other => {
+                            let Some(idx) = key_row(other) else { continue };
                             notice = Some(match tasks.get(idx) {
                                 Some(t) => match focus_agent_pane(&t.task_id, pane_id_of(t)) {
                                     Ok(()) => format!("→ {}", t.title.trim()),
                                     Err(e) => e.to_string(),
                                 },
-                                None => format!("no row {idx}"),
+                                None => format!("no row {}", other as char),
                             });
                         }
-                        _ => {}
                     }
                 }
                 if quit {
@@ -968,6 +1048,97 @@ mod tests {
         // No topic reported → plain two-line row, no stray line.
         let out = render_status(&[&t], 40, false, false, None);
         assert_eq!(out.lines().count(), 2, "no topic, no extra line: {out}");
+    }
+
+    #[test]
+    fn topic_keeps_first_substantive_prompt() {
+        let mut t = task();
+        assert!(
+            !apply_topic(&mut t, "/clear", false),
+            "slash commands skipped"
+        );
+        assert!(!apply_topic(&mut t, "  \n ", false), "blank text skipped");
+        assert!(topic_of(&t).is_none());
+
+        assert!(apply_topic(&mut t, "\n  Add a   topic\nline two", false));
+        assert_eq!(topic_of(&t), Some("Add a topic"), "first line, collapsed");
+        assert!(
+            !apply_topic(&mut t, "yes", false),
+            "follow-ups keep the first"
+        );
+        assert_eq!(topic_of(&t), Some("Add a topic"));
+
+        assert!(apply_topic(&mut t, "new direction", true));
+        assert_eq!(topic_of(&t), Some("new direction"));
+        assert!(apply_topic(&mut t, "", true), "replace with empty clears");
+        assert!(topic_of(&t).is_none());
+        assert!(!apply_topic(&mut t, "", true), "clearing twice is a no-op");
+    }
+
+    #[test]
+    fn topic_is_capped() {
+        let mut t = task();
+        apply_topic(&mut t, &"x".repeat(500), false);
+        assert_eq!(
+            topic_of(&t).map(|s| s.chars().count()),
+            Some(TOPIC_MAX_CHARS + 1)
+        );
+    }
+
+    #[test]
+    fn reported_topic_wins_over_pane_title() {
+        let mut t = task();
+        apply_topic(&mut t, "fix the sidebar", false);
+        let panes: PaneTopics = (
+            [("t1".to_string(), "pane says".to_string())].into(),
+            [].into(),
+        );
+        let out = render_status(&[&t], 40, false, false, Some(&panes));
+        assert!(
+            out.contains("fix the sidebar") && !out.contains("pane says"),
+            "{out}"
+        );
+        // Reported topic shows even outside zellij (no pane topics).
+        let out = render_status(&[&t], 40, false, false, None);
+        assert!(out.contains("fix the sidebar"), "{out}");
+    }
+
+    #[test]
+    fn pane_title_echoing_repo_is_not_a_topic() {
+        assert!(echoes_title("[nibble:main]", "[nibble:main]"));
+        assert!(echoes_title("- shellment-platform", "[shellment-platform]"));
+        assert!(echoes_title("nibble", "[nibble:main]"));
+        assert!(!echoes_title("fixing sidebar legend", "[nibble:main]"));
+
+        let mut t = task();
+        t.title = "[nibble:main]".into();
+        let panes: PaneTopics = (
+            [("t1".to_string(), "[nibble:main]".to_string())].into(),
+            [].into(),
+        );
+        let out = render_status(&[&t], 40, false, false, Some(&panes));
+        assert_eq!(out.lines().count(), 2, "echoed title adds no line: {out}");
+    }
+
+    #[test]
+    fn row_keys_extend_past_nine_without_quit() {
+        assert_eq!(row_key(0), Some('1'));
+        assert_eq!(row_key(8), Some('9'));
+        assert_eq!(row_key(9), Some('a'));
+        assert_eq!(row_key(33), Some('z'));
+        assert_eq!(row_key(34), None);
+        assert!((0..34).all(|i| row_key(i) != Some('q')), "q stays quit");
+        assert!((0..34).all(|i| key_row(row_key(i).unwrap() as u8) == Some(i)));
+        assert_eq!(key_row(b'q'), None);
+        assert_eq!(key_row(b'0'), None);
+
+        let tasks: Vec<Task> = (0..12).map(|_| task()).collect();
+        let refs: Vec<&Task> = tasks.iter().collect();
+        let out = render_status(&refs, 40, true, false, None);
+        assert!(
+            out.contains("9\u{1b}[2m)") && out.contains("c\u{1b}[2m)"),
+            "{out}"
+        );
     }
 
     #[test]
