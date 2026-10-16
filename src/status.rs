@@ -74,15 +74,7 @@ pub(crate) fn apply_topic(task: &mut Task, text: &str, replace: bool) -> bool {
     if has_topic && !replace {
         return false;
     }
-    let ctx = task
-        .context
-        .get_or_insert_with(|| crate::models::TaskContext {
-            url: None,
-            project_path: None,
-            session_id: None,
-            claude_session_id: None,
-            extra: HashMap::new(),
-        });
+    let ctx = task.context.get_or_insert_default();
     match normalize_topic(text) {
         Some(topic) => {
             ctx.extra
@@ -1168,13 +1160,7 @@ mod tests {
     fn pane_id_read_from_context_extra() {
         let mut t = task();
         assert_eq!(pane_id_of(&t), None, "no context → no pane");
-        let mut ctx = crate::models::TaskContext {
-            url: None,
-            project_path: None,
-            session_id: None,
-            claude_session_id: None,
-            extra: std::collections::HashMap::new(),
-        };
+        let mut ctx = crate::models::TaskContext::default();
         ctx.extra.insert(
             "zellij_pane_id".to_string(),
             serde_json::Value::Number(42u32.into()),
