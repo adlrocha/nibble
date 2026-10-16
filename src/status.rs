@@ -568,7 +568,7 @@ pub(crate) fn cmd_status(db: &Database, watch: bool, json: bool, all: bool) -> R
         // on a dead pane forever otherwise (one zellij call + DB read per
         // second each).
         if let Some(id) = my_pane {
-            if frame % 10 == 0 && !pane_alive(id) {
+            if frame.is_multiple_of(10) && !pane_alive(id) {
                 break;
             }
         }
@@ -580,7 +580,11 @@ pub(crate) fn cmd_status(db: &Database, watch: bool, json: bool, all: bool) -> R
         let tasks = collect_status_tasks(db, all)?;
         // Pane-title topics (fallback when no topic was reported) — sidebar
         // (watch) only, matching the pre-merge renderer; a no-op outside zellij.
-        let topics = if watch { Some(zellij_pane_topics()) } else { None };
+        let topics = if watch {
+            Some(zellij_pane_topics())
+        } else {
+            None
+        };
         let body = render_status(
             &tasks.iter().collect::<Vec<_>>(),
             width,
@@ -1017,7 +1021,7 @@ mod tests {
 
     #[test]
     fn render_topic_line_from_pane_title() {
-        let mut t = task(); // task_id "t1"
+        let t = task(); // task_id "t1"
         let by_task: PaneTopics = (
             [("t1".to_string(), "fixing sidebar legend".to_string())].into(),
             [].into(),
@@ -1193,7 +1197,12 @@ mod tests {
         let pane = |id: u32, tab_id: u32, is_plugin: bool| ZellijPane {
             id,
             is_plugin,
-            title: if is_plugin { "zellij:tab-bar" } else { "[malone-suite:main]" }.into(),
+            title: if is_plugin {
+                "zellij:tab-bar"
+            } else {
+                "[malone-suite:main]"
+            }
+            .into(),
             pane_columns: 80,
             pane_x: 0,
             tab_id,
@@ -1364,7 +1373,7 @@ fn tab_columns(panes: &[ZellijPane], tab_id: u32) -> u16 {
         .unwrap_or(80)
 }
 
-fn sidebar_in_tab<'a>(panes: &'a [ZellijPane], tab_id: u32) -> Option<&'a ZellijPane> {
+fn sidebar_in_tab(panes: &[ZellijPane], tab_id: u32) -> Option<&ZellijPane> {
     panes.iter().find(|p| {
         !p.is_plugin && p.tab_id == tab_id && is_sidebar_pane(&p.title, p.pane_command.as_deref())
     })

@@ -1425,6 +1425,7 @@ pub(crate) fn build_window_task(
 /// for the lifetime of the sandbox — `--fresh` backs up the conversation history for that
 /// UUID (rename to .jsonl.bak, never deleted) rather than minting a new one, so
 /// re-attaches always use the same ID.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn cmd_sandbox_attach(
     db: &Database,
     task_id: String,

@@ -793,8 +793,9 @@ fn continue_host(task: &Task, msg: &str) -> Result<&'static str> {
         .current_dir(cwd)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    let uses_stdin;
-    match &task.agent_type {
+    // Claude without -p reads the message from stdin; the pi family takes
+    // it as a `-p` argument instead.
+    let uses_stdin = match &task.agent_type {
         AgentType::ClaudeCode => {
             let sid = task
                 .context
@@ -802,20 +803,20 @@ fn continue_host(task: &Task, msg: &str) -> Result<&'static str> {
                 .and_then(|c| c.claude_session_id.as_deref())
                 .context("no claude_session_id")?;
             cmd.args(["--resume", sid, "--dangerously-skip-permissions"]);
-            uses_stdin = true;
+            true
         }
         AgentType::Omp => {
             let path = pi_session_ref(task)?;
             cmd.args(["--resume", &path, "--auto-approve", "-p", msg]);
-            uses_stdin = false;
+            false
         }
         AgentType::Pi => {
             let path = pi_session_ref(task)?;
             cmd.args(["--session", &path, "-p", msg]);
-            uses_stdin = false;
+            false
         }
         other => anyhow::bail!("unsupported host agent type: {other:?}"),
-    }
+    };
 
     cmd.stdin(if uses_stdin {
         Stdio::piped()

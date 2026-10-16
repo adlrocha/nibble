@@ -531,9 +531,6 @@ impl Database {
         Ok(tasks)
     }
 
-    /// Return the total number of bot messages recorded for `task_id`.
-    /// Used by the safety-net to detect new notifications added after an inject started,
-
     /// Read a value from the key-value store.
     pub fn kv_get(&self, key: &str) -> Result<Option<String>> {
         let val = self
@@ -887,14 +884,11 @@ impl Database {
     }
 
     /// Aggregate usage grouped by one of: "model", "provider", "sandbox" (cwd).
+    /// Rendered rows plus the covered `[earliest, latest]` timestamp window.
     /// `since_ts` filters to ts >= since_ts; pass 0 to include all rows.
     /// Returns earliest and latest ts among matched rows so the caller can
     /// render the actual covered window.
-    pub fn token_usage_summary(
-        &self,
-        group_by: &str,
-        since_ts: i64,
-    ) -> Result<(Vec<TokenUsageSummaryRow>, Option<(i64, i64)>)> {
+    pub fn token_usage_summary(&self, group_by: &str, since_ts: i64) -> Result<TokenUsageSummary> {
         // (display bucket, raw model, raw api_provider) per grouping.
         let (bucket_sql, model_sql, api_provider_sql) = match group_by {
             "provider" => ("provider", "NULL", "NULL"),
@@ -1140,6 +1134,10 @@ impl Database {
             .ok_or_else(|| anyhow::anyhow!("inserted task {} not readable back", task_id))
     }
 }
+
+/// Rendered token-usage summary rows plus the covered `[earliest, latest]`
+/// timestamp window (see [`Database::token_usage_summary`]).
+pub type TokenUsageSummary = (Vec<TokenUsageSummaryRow>, Option<(i64, i64)>);
 
 #[derive(Debug, Clone)]
 pub struct TokenUsageSummaryRow {

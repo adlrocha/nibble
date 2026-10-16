@@ -300,7 +300,6 @@ pub(crate) fn cmd_cron_run(db: &Database, id: i64) -> Result<()> {
 }
 
 /// Find a healthy sandbox for the given repo path. Returns None if no healthy container exists.
-
 pub(crate) fn find_healthy_sandbox_for_repo(
     db: &Database,
     repo_path: &str,
@@ -319,8 +318,7 @@ pub(crate) fn find_healthy_sandbox_for_repo(
     }
 }
 
-/// List all tracked sandboxes, auto-cleaning gone entries.
-
+/// Resolve a cron job reference (numeric id or label) to its row id.
 pub(crate) fn resolve_cron_id(db: &Database, id_or_label: &str) -> Result<i64> {
     // Try numeric first
     if let Ok(n) = id_or_label.parse::<i64>() {
