@@ -69,7 +69,21 @@ pub struct SessionInfo {
     pub workspace: Option<String>,
     pub path: PathBuf,
     pub modified: Option<std::time::SystemTime>,
+    /// Timestamp of the transcript's own last event, when the file carries
+    /// RFC3339 `timestamp` records (claude and pi-family transcripts do).
+    /// Restored or synced transcripts can carry a fresh mtime with months-old
+    /// content, so this is the reliable recency signal (see
+    /// [`SessionInfo::effective_time`]).
+    pub content_time: Option<std::time::SystemTime>,
     pub size_bytes: u64,
+}
+
+impl SessionInfo {
+    /// Best-known recency of the conversation: the transcript's own last
+    /// event timestamp when available, else the file mtime.
+    pub fn effective_time(&self) -> Option<std::time::SystemTime> {
+        self.content_time.or(self.modified)
+    }
 }
 
 /// Cached session title (lazy-generated, persisted).
@@ -291,7 +305,7 @@ fn list_sessions_grouped_with_home(
     if let Some(range) = date_range {
         if let Some(since_dt) = range.since {
             sessions.retain(|s| {
-                s.modified
+                s.effective_time()
                     .map(|m| {
                         let dt: chrono::DateTime<chrono::Utc> = m.into();
                         dt >= since_dt
@@ -301,7 +315,7 @@ fn list_sessions_grouped_with_home(
         }
         if let Some(until_dt) = range.until {
             sessions.retain(|s| {
-                s.modified
+                s.effective_time()
                     .map(|m| {
                         let dt: chrono::DateTime<chrono::Utc> = m.into();
                         dt < until_dt
@@ -311,11 +325,11 @@ fn list_sessions_grouped_with_home(
         }
     }
 
-    // Sort by modified time descending
+    // Sort by effective recency (transcript content, else mtime) descending
     sessions.sort_by(|a, b| {
-        b.modified
+        b.effective_time()
             .unwrap_or(std::time::UNIX_EPOCH)
-            .cmp(&a.modified.unwrap_or(std::time::UNIX_EPOCH))
+            .cmp(&a.effective_time().unwrap_or(std::time::UNIX_EPOCH))
     });
 
     sessions.truncate(limit);
@@ -326,7 +340,7 @@ fn list_sessions_grouped_with_home(
     let yesterday = now.pred_opt().unwrap_or(now);
 
     for session in sessions {
-        let session_date = session.modified.map(|m| {
+        let session_date = session.effective_time().map(|m| {
             let dt: chrono::DateTime<chrono::Local> = m.into();
             dt.date_naive()
         });
@@ -359,11 +373,64 @@ pub fn list_all_sessions() -> Result<Vec<SessionInfo>> {
     list_all_sessions_with_home(dirs::home_dir().unwrap_or_default().as_ref())
 }
 
+/// Longest tail of a transcript scanned for its last event timestamp.
+/// Large transcripts (multi-MB sessions are common) make a full read per
+/// listing prohibitive; the last records are within a few KB of the end.
+const TAIL_SCAN_BYTES: u64 = 64 * 1024;
+
+/// Extract the newest RFC3339 `timestamp` from a transcript's tail.
+///
+/// Scans the last [`TAIL_SCAN_BYTES`] of the file backwards and returns the
+/// last parseable `timestamp` field. Line-oriented JSONL transcripts are
+/// append-ordered, so the last timestamped record is the conversation's
+/// most recent event. Gzipped archives are skipped (their tail is
+/// compressed bytes); callers fall back to mtime via
+/// [`SessionInfo::effective_time`].
+fn last_event_timestamp(path: &std::path::Path) -> Option<std::time::SystemTime> {
+    use std::io::{Read, Seek, SeekFrom};
+    if path.extension().and_then(|e| e.to_str()) == Some("gz") {
+        return None;
+    }
+    let mut file = fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let start = len.saturating_sub(TAIL_SCAN_BYTES);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).ok()?;
+    let mut tail = String::from_utf8_lossy(&buf).into_owned();
+    // When the window starts mid-file, the first "line" is a partial
+    // record continued from before the window — drop it so a truncated
+    // JSON prefix can't be misread.
+    if start > 0 {
+        tail = tail
+            .split_once('\n')
+            .map(|(_, rest)| rest)
+            .unwrap_or("")
+            .to_string();
+    }
+    tail.lines()
+        .rev()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|v| {
+            v.get("timestamp")
+                .and_then(|t| t.as_str())
+                .map(String::from)
+        })
+        .find_map(|ts| chrono::DateTime::parse_from_rfc3339(&ts).ok())
+        .map(std::time::SystemTime::from)
+}
+
 fn list_all_sessions_with_home(home: &std::path::Path) -> Result<Vec<SessionInfo>> {
     let mut sessions = Vec::new();
     sessions.extend(list_pi_family_sessions_with_home(home, ".pi", "pi")?);
     sessions.extend(list_pi_family_sessions_with_home(home, ".omp", "omp")?);
     sessions.extend(list_claude_sessions_with_home(home)?);
+
+    // Transcript timestamps override mtime as the recency signal: restored,
+    // synced or touched files carry a fresh mtime with old content.
+    for s in &mut sessions {
+        s.content_time = last_event_timestamp(&s.path);
+    }
 
     // Sort by modified time descending (most recent first)
     sessions.sort_by(|a, b| {
@@ -515,6 +582,7 @@ fn list_pi_family_sessions_with_home(
                 workspace,
                 path,
                 modified,
+                content_time: None,
                 size_bytes,
             });
         }
@@ -672,6 +740,7 @@ fn list_claude_sessions_with_home(home: &std::path::Path) -> Result<Vec<SessionI
                 workspace,
                 path,
                 modified,
+                content_time: None,
                 size_bytes,
             });
         }
@@ -1021,6 +1090,148 @@ mod tests {
     }
 
     // ── Repo filtering ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn last_event_timestamp_reads_last_timestamped_line() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = write_temp_file(
+            temp.path(),
+            "s.jsonl",
+            concat!(
+                "{\"type\":\"user\",\"timestamp\":\"2026-02-12T09:51:44.958Z\"}\n",
+                "{\"type\":\"assistant\",\"timestamp\":\"2026-02-12T09:55:11.634Z\"}\n",
+                "{\"type\":\"summary\"}\n",
+            ),
+        );
+        let ts = last_event_timestamp(&path).unwrap();
+        let dt: chrono::DateTime<chrono::Utc> = ts.into();
+        assert_eq!(dt.to_rfc3339(), "2026-02-12T09:55:11.634+00:00");
+    }
+
+    #[test]
+    fn last_event_timestamp_survives_truncated_tail_line() {
+        let temp = tempfile::tempdir().unwrap();
+        // Last write stopped mid-record (crash/interrupt): the partial JSON
+        // must be skipped, not misparsed.
+        let path = write_temp_file(
+            temp.path(),
+            "s.jsonl",
+            concat!(
+                "{\"type\":\"user\",\"timestamp\":\"2026-03-01T10:00:00Z\"}\n",
+                "{\"type\":\"assistant\",\"timestamp\":\"2026-0",
+            ),
+        );
+        let ts = last_event_timestamp(&path).unwrap();
+        let dt: chrono::DateTime<chrono::Utc> = ts.into();
+        assert_eq!(dt.to_rfc3339(), "2026-03-01T10:00:00+00:00");
+    }
+
+    #[test]
+    fn last_event_timestamp_only_reads_tail_of_large_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("big.jsonl");
+        // One filler line longer than TAIL_SCAN_BYTES, then the real final
+        // record: the scanner must drop the partial filler prefix and still
+        // find the closing timestamp.
+        let filler = format!(
+            "{{\"type\":\"filler\",\"data\":\"{}\"}}\n",
+            "x".repeat(80 * 1024)
+        );
+        let mut content = filler;
+        content.push_str("{\"type\":\"user\",\"timestamp\":\"2026-01-05T08:00:00Z\"}\n");
+        std::fs::write(&path, content).unwrap();
+        let ts = last_event_timestamp(&path).unwrap();
+        let dt: chrono::DateTime<chrono::Utc> = ts.into();
+        assert_eq!(dt.to_rfc3339(), "2026-01-05T08:00:00+00:00");
+    }
+
+    #[test]
+    fn last_event_timestamp_none_without_timestamps() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = write_temp_file(temp.path(), "s.jsonl", "{\"type\":\"opaque\"}\n");
+        assert_eq!(last_event_timestamp(&path), None);
+        assert_eq!(
+            last_event_timestamp(temp.path().join("missing.jsonl").as_path()),
+            None
+        );
+    }
+
+    #[test]
+    fn last_event_timestamp_skips_gz_archives() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("s.jsonl.gz");
+        let mut enc = flate2::write::GzEncoder::new(
+            std::fs::File::create(&path).unwrap(),
+            flate2::Compression::fast(),
+        );
+        enc.write_all(b"{\"timestamp\":\"2026-01-01T00:00:00Z\"}\n")
+            .unwrap();
+        drop(enc.finish().unwrap());
+        assert_eq!(last_event_timestamp(&path), None);
+    }
+
+    #[test]
+    fn effective_time_prefers_content_over_mtime() {
+        let now = std::time::SystemTime::now();
+        let old = std::time::SystemTime::UNIX_EPOCH;
+        let mut s = SessionInfo {
+            agent: "claude".into(),
+            session_id: "s".into(),
+            workspace: None,
+            path: PathBuf::from("/x"),
+            modified: Some(now),
+            content_time: Some(old),
+            size_bytes: 0,
+        };
+        assert_eq!(s.effective_time(), Some(old));
+        s.content_time = None;
+        assert_eq!(s.effective_time(), Some(now));
+        s.modified = None;
+        assert_eq!(s.effective_time(), None);
+    }
+
+    #[test]
+    fn grouping_uses_content_timestamps_not_mtime() {
+        // Regression: transcripts bulk-restored today carry a fresh mtime but
+        // months-old content; they must group by their own last event, not
+        // land under "Today".
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join(".claude/projects/-home-u-work-nibble");
+        std::fs::create_dir_all(&dir).unwrap();
+        write_temp_file(
+            &dir,
+            "0aaa1111-2222-3333-4444-555566667777.jsonl",
+            concat!(
+                "{\"type\":\"user\",\"cwd\":\"/home/u/work/nibble\",\"timestamp\":\"2026-02-12T09:51:44.958Z\"}\n",
+                "{\"type\":\"assistant\",\"cwd\":\"/home/u/work/nibble\",\"timestamp\":\"2026-02-12T09:55:11.634Z\"}\n",
+            ),
+        );
+        // No date filter: grouping alone must reflect the transcript date.
+        let groups = list_sessions_grouped_with_home(home.path(), None, None, None, 50).unwrap();
+        let labels: Vec<&str> = groups.iter().map(|g| g.label.as_str()).collect();
+        assert_eq!(labels, vec!["February 12, 2026"], "not Today: {labels:?}");
+
+        // --today must exclude the old-content session even with a fresh mtime.
+        let now = chrono::Local::now();
+        let start_of_day = now
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_local_timezone(chrono::Local)
+            .unwrap();
+        let groups = list_sessions_grouped_with_home(
+            home.path(),
+            None,
+            None,
+            Some(DateRange {
+                since: Some(start_of_day.with_timezone(&chrono::Utc)),
+                until: None,
+            }),
+            50,
+        )
+        .unwrap();
+        assert!(groups.iter().all(|g| g.sessions.is_empty()));
+    }
 
     #[test]
     fn workspace_matches_repo_path_boundaries() {
