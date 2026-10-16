@@ -381,8 +381,6 @@ const TAIL_SCAN_BYTES: u64 = 64 * 1024;
 /// we are willing to walk (64 chunks ≈ 4 MB) before giving up on it.
 const BACKTRACK_CHUNK_BYTES: u64 = 64 * 1024;
 const BACKTRACK_MAX_CHUNKS: u64 = 64;
-/// How much of a record's start is examined for its header timestamp.
-const RECORD_HEADER_BYTES: u64 = 8 * 1024;
 
 /// Extract the newest RFC3339 `timestamp` from a transcript.
 ///
@@ -394,12 +392,15 @@ const RECORD_HEADER_BYTES: u64 = 8 * 1024;
 ///    [`TAIL_SCAN_BYTES`] and take the last parseable `timestamp`.
 /// 2. The newest record spans the window start (header cut off) but its
 ///    `timestamp` lies inside the window — raw-scan the window text.
-/// 3. Walk backwards from EOF to the final record's start and read its
-///    header timestamp — handles final records larger than the window.
-/// 4. Last resort: the file head window, preferring its newest timestamp.
+/// 3. Walk backwards from EOF to the final record's start and scan the
+///    whole record for its timestamp — handles final records larger than
+///    the window, wherever in the record the field sits.
 ///
-/// Gzipped archives are skipped (their tail is compressed bytes); callers
-/// fall back to mtime via [`SessionInfo::effective_time`].
+/// When even the final record yields nothing datable, returns None and
+/// callers fall back to mtime via [`SessionInfo::effective_time`] —
+/// guessing from earlier records would date the session by an event that
+/// is not the newest one. Gzipped archives are always skipped (their tail
+/// is compressed bytes).
 fn last_event_timestamp(path: &std::path::Path) -> Option<std::time::SystemTime> {
     if path.extension().and_then(|e| e.to_str()) == Some("gz") {
         return None;
@@ -426,19 +427,17 @@ fn last_event_timestamp(path: &std::path::Path) -> Option<std::time::SystemTime>
         return Some(ts);
     }
     // 3) Final record larger than the window: find where it starts and
-    //    read the timestamp from its header.
-    if let Some(ts) = final_record_timestamp(&mut file, len) {
-        return Some(ts);
-    }
-    // 4) Give up precisely: prefer the newest timestamp near the file head.
-    let head = read_range(&mut file, 0, len.min(RECORD_HEADER_BYTES * 8))?;
-    scan_timestamps(&head).pop()
+    //    scan the whole record for its own timestamp.
+    final_record_timestamp(&mut file, len)
 }
 
 /// Timestamp of the final record, found by walking backwards from EOF
 /// (excluding the record's own terminating newline) to the previous
-/// record's terminator — the final record's start — then scanning its
-/// header. Returns None when the walk exceeds [`BACKTRACK_MAX_CHUNKS`].
+/// record's terminator — the final record's start — then scanning the
+/// record's full text. The first timestamp in document order is the
+/// record's own (headers lead; later matches would be quoted content).
+/// Returns None when the walk exceeds [`BACKTRACK_MAX_CHUNKS`] or the
+/// record carries no parseable timestamp.
 fn final_record_timestamp(file: &mut fs::File, len: u64) -> Option<std::time::SystemTime> {
     for chunk in 1..=BACKTRACK_MAX_CHUNKS {
         // Exclusive upper bound skips the final record's terminator so a
@@ -453,9 +452,8 @@ fn final_record_timestamp(file: &mut fs::File, len: u64) -> Option<std::time::Sy
         let text = read_range(file, start, end)?;
         if let Some(nl) = text.rfind('\n') {
             let record_start = start + nl as u64 + 1;
-            let header_end = record_start.saturating_add(RECORD_HEADER_BYTES).min(len);
-            let header = read_range(file, record_start, header_end)?;
-            return scan_timestamps(&header).into_iter().next();
+            let record = read_range(file, record_start, len)?;
+            return scan_timestamps(&record).into_iter().next();
         }
     }
     None
@@ -1245,6 +1243,26 @@ mod tests {
         let ts = last_event_timestamp(&path).unwrap();
         let dt: chrono::DateTime<chrono::Utc> = ts.into();
         assert_eq!(dt.to_rfc3339(), "2026-05-01T12:00:00+00:00");
+    }
+
+    #[test]
+    fn last_event_timestamp_deep_in_giant_final_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("deep-ts.jsonl");
+        // The final record's timestamp sits ~20 KB into a >64 KB record —
+        // beyond the tail window AND beyond any small header bound — with
+        // more payload after it. The whole-record scan must reach it.
+        let mut content =
+            String::from("{\"type\":\"user\",\"timestamp\":\"2026-01-01T09:00:00Z\"}\n");
+        content.push_str("{\"type\":\"assistant\",\"data\":\"");
+        content.push_str(&"a".repeat(20 * 1024));
+        content.push_str("\",\"timestamp\":\"2026-06-15T18:30:00Z\",\"more\":\"");
+        content.push_str(&"b".repeat(90 * 1024));
+        content.push_str("\"}\n");
+        std::fs::write(&path, content).unwrap();
+        let ts = last_event_timestamp(&path).unwrap();
+        let dt: chrono::DateTime<chrono::Utc> = ts.into();
+        assert_eq!(dt.to_rfc3339(), "2026-06-15T18:30:00+00:00");
     }
 
     #[test]
