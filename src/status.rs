@@ -791,7 +791,7 @@ fn sidebar_install() -> Result<()> {
     println!("sidebar. Restart zellij to pick it up — running sessions keep");
     println!("their current layout.");
     println!();
-    println!("In the sidebar: 1-9 jumps to that agent's pane, q quits.");
+    println!("In the sidebar: 1-9 then a-z (q quits) jumps to that agent's pane.");
     Ok(())
 }
 
@@ -953,13 +953,7 @@ mod tests {
     #[test]
     fn render_window_task_shows_sandbox_location() {
         let mut t = task();
-        let ctx = t.context.get_or_insert_with(|| TaskContext {
-            url: None,
-            project_path: None,
-            session_id: None,
-            claude_session_id: None,
-            extra: HashMap::new(),
-        });
+        let ctx = t.context.get_or_insert_default();
         ctx.extra.insert(
             "parent_task_id".to_string(),
             serde_json::Value::String("parent-1".to_string()),
@@ -1675,7 +1669,7 @@ fn terminal_pane_tab(panes: &[ZellijPane], id: u32) -> Option<u32> {
         .map(|p| p.tab_id)
 }
 
-/// Jump to an agent's pane from the sidebar's digit keys. The pane is found
+/// Jump to an agent's pane from the sidebar's jump keys (1-9, a-z). The pane is found
 /// through `AGENT_TASK_ID` in its command (attach panes carry it); the
 /// task's recorded pane id is the fallback. Crosses tabs when needed.
 pub(crate) fn focus_agent_pane(task_id: &str, recorded_pane: Option<u32>) -> Result<()> {

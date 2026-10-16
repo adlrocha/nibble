@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 *)",
+      "Bash(timeout 15 ssh -o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=accept-new gimli 'echo CONNECTED as $\\(whoami\\)@$\\(hostname\\); for p in ~/.local/state/syncthing/config.xml ~/.config/syncthing/config.xml; do [ -f \"$p\" ] && echo \"CONFIG:$p\"; done')",
+      "Bash(git --no-pager log --oneline -5)",
+      "Bash(git -C /home/adlrocha/workspace/personal/nibble status)",
+      "Bash(gh --version)",
+      "Bash(gh api *)",
+      "Read(//home/adlrocha/.ssh/**)",
+      "Read(//home/adlrocha/**)",
+      "Read(//home/adlrocha/.config/zellij/**)",
+      "Bash([ -f \"$F\" ])",
+      "Bash(command -v tailscale)",
+      "Bash(tailscale status *)",
+      "Read(//etc/**)",
+      "Bash(nvim --version)",
+      "Bash(ssh *)",
+      "Bash(set -e)",
+      "Bash(mkdir -p ~/.config/nvim/plugin ~/.local/bin)",
+      "Bash(rsync -aL -o BatchMode=yes lily:.config/nvim/plugin/osc52.lua ~/.config/nvim/plugin/osc52.lua)",
+      "Bash(rsync -aL -o BatchMode=yes lily:.local/bin/clip ~/.local/bin/clip)",
+      "Bash(chmod +x ~/.local/bin/clip)"
+    ]
+  }
+}

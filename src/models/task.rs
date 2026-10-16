@@ -179,7 +179,7 @@ impl FromStr for TaskStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TaskContext {
     pub url: Option<String>,
     pub project_path: Option<String>,

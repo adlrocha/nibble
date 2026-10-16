@@ -15,8 +15,8 @@
  *   - session_start:   reports the session file path to nibble (eager
  *                      task→session mapping so attach never has to guess
  *                      which session belongs to this task after a reboot)
- *                      and, inside zellij, the pane id so the sidebar's
- *                      1-9 jumps and `nibble goto` can focus this session
+ *                      and, inside zellij, the pane id so the sidebar
+ *                      jump keys and `nibble goto` can focus this session
  *   - agent_start:     status → running (also retries session-path and
  *                      pane-id reports)
  *   - agent_settled:   status → completed (only when the session is idle,
@@ -132,7 +132,7 @@ const reportSessionPath = (taskId: string, path: string): void => {
 
 const reportPaneId = (taskId: string): void => {
 	if (!taskId) return;
-	// Pane mapping for the sidebar's 1-9 jumps and `nibble goto`; only
+	// Pane mapping for the sidebar's jump keys (1-9, a-z) and `nibble goto`; only
 	// meaningful for host agents living in a zellij pane. The pid powers
 	// liveness reconcile so a killed agent's row disappears even if its
 	// pane stays open.
@@ -177,22 +177,14 @@ const reportStatus = (taskId: string, state: string, message?: string): void => 
 };
 
 // First substantive prompt becomes the task's sidebar topic; nibble keeps
-// the first one and ignores later prompts and slash commands.
+// the first one and ignores later prompts and slash commands. Routed
+// through the serialized runNibble queue like every other report — a
+// synchronous execSync here stalls prompt acceptance while the tasks DB
+// writer is busy.
 const reportTopic = (taskId: string, text: string): void => {
 	if (!taskId || !text.trim()) return;
 
-	try {
-		execSync(
-			`nibble report topic '${taskId.replace(/'/g, "'\\''")}' '${text.replace(/'/g, "'\\''")}'`,
-			{
-				timeout: 5000,
-				stdio: "pipe",
-				env: { ...process.env, NIBBLE_AGENT_TYPE: agentType() },
-			},
-		);
-	} catch {
-		// Non-fatal: topic reporting is best-effort
-	}
+	runNibble(["report", "topic", taskId, text]);
 };
 
 // ─── Extension ───────────────────────────────────────────────────────────────
