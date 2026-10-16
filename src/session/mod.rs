@@ -373,51 +373,93 @@ pub fn list_all_sessions() -> Result<Vec<SessionInfo>> {
     list_all_sessions_with_home(dirs::home_dir().unwrap_or_default().as_ref())
 }
 
-/// Longest tail of a transcript scanned for its last event timestamp.
+/// Longest window of a transcript scanned for event timestamps.
 /// Large transcripts (multi-MB sessions are common) make a full read per
 /// listing prohibitive; the last records are within a few KB of the end.
 const TAIL_SCAN_BYTES: u64 = 64 * 1024;
 
-/// Extract the newest RFC3339 `timestamp` from a transcript's tail.
+/// Extract the newest RFC3339 `timestamp` from a transcript.
 ///
-/// Scans the last [`TAIL_SCAN_BYTES`] of the file backwards and returns the
-/// last parseable `timestamp` field. Line-oriented JSONL transcripts are
-/// append-ordered, so the last timestamped record is the conversation's
-/// most recent event. Gzipped archives are skipped (their tail is
-/// compressed bytes); callers fall back to mtime via
-/// [`SessionInfo::effective_time`].
+/// Line-oriented JSONL transcripts are append-ordered, so the last
+/// timestamped record is the conversation's most recent event. Scanning is
+/// layered, because a final record can be larger than the scan window:
+///
+/// 1. Exact — parse complete JSONL records in the last
+///    [`TAIL_SCAN_BYTES`] and take the last parseable `timestamp`.
+/// 2. The newest record spans the window start (header cut off) but its
+///    `timestamp` lies inside the window — raw-scan the window text.
+/// 3. The newest record alone exceeds the window (multi-MB tool outputs
+///    are common) — its header sits at the record start, which for such
+///    files is the file head; first timestamp found there.
+///
+/// Gzipped archives are skipped (their tail is compressed bytes); callers
+/// fall back to mtime via [`SessionInfo::effective_time`].
 fn last_event_timestamp(path: &std::path::Path) -> Option<std::time::SystemTime> {
-    use std::io::{Read, Seek, SeekFrom};
     if path.extension().and_then(|e| e.to_str()) == Some("gz") {
         return None;
     }
     let mut file = fs::File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
-    let start = len.saturating_sub(TAIL_SCAN_BYTES);
+    let tail = read_window(&mut file, len.saturating_sub(TAIL_SCAN_BYTES))?;
+
+    // 1) Exact: newest complete, parseable record in the window.
+    let exact = tail
+        .lines()
+        .rev()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find_map(|v| {
+            v.get("timestamp")
+                .and_then(|t| t.as_str())
+                .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+        });
+    if let Some(dt) = exact {
+        return Some(dt.into());
+    }
+    // 2) Newest record spans the window start; timestamp inside the window.
+    if let Some(ts) = scan_timestamps(&tail).pop() {
+        return Some(ts);
+    }
+    // 3) Newest record alone exceeds the window: its header is at the
+    //    record start — the file head for such single-record tails.
+    let head = read_window(&mut file, 0)?;
+    scan_timestamps(&head).into_iter().next()
+}
+
+/// Read from `start` to EOF as lossy UTF-8. A trailing window that starts
+/// mid-record is fine: truncated JSON fails to parse in the exact path and
+/// the raw scan wants timestamps from cut-off records too.
+fn read_window(file: &mut fs::File, start: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
     file.seek(SeekFrom::Start(start)).ok()?;
     let mut buf = Vec::new();
     file.read_to_end(&mut buf).ok()?;
-    let mut tail = String::from_utf8_lossy(&buf).into_owned();
-    // When the window starts mid-file, the first "line" is a partial
-    // record continued from before the window — drop it so a truncated
-    // JSON prefix can't be misread.
-    if start > 0 {
-        tail = tail
-            .split_once('\n')
-            .map(|(_, rest)| rest)
-            .unwrap_or("")
-            .to_string();
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// Extract RFC3339 timestamps from raw transcript text in document order,
+/// without requiring well-formed JSON lines. Fallback for records that
+/// span a scan-window boundary, where line-based JSON parsing can't help.
+fn scan_timestamps(text: &str) -> Vec<std::time::SystemTime> {
+    const KEY: &str = "\"timestamp\"";
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(rel) = text[from..].find(KEY) {
+        let after_key = from + rel + KEY.len();
+        let rest = &text[after_key..];
+        // Position of the value's opening quote (":" precedes it).
+        let Some(open) = rest.find('"') else {
+            break;
+        };
+        let value = &rest[open + 1..];
+        let Some(close) = value.find('"') else {
+            break;
+        };
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&value[..close]) {
+            out.push(dt.into());
+        }
+        from = after_key + open + 1 + close + 1;
     }
-    tail.lines()
-        .rev()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .filter_map(|v| {
-            v.get("timestamp")
-                .and_then(|t| t.as_str())
-                .map(String::from)
-        })
-        .find_map(|ts| chrono::DateTime::parse_from_rfc3339(&ts).ok())
-        .map(std::time::SystemTime::from)
+    out
 }
 
 fn list_all_sessions_with_home(home: &std::path::Path) -> Result<Vec<SessionInfo>> {
@@ -1143,6 +1185,44 @@ mod tests {
         let ts = last_event_timestamp(&path).unwrap();
         let dt: chrono::DateTime<chrono::Utc> = ts.into();
         assert_eq!(dt.to_rfc3339(), "2026-01-05T08:00:00+00:00");
+    }
+
+    #[test]
+    fn last_event_timestamp_final_record_larger_than_window() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("huge-final.jsonl");
+        // A single final record bigger than TAIL_SCAN_BYTES: after dropping
+        // the partial window prefix nothing parseable remains, so the
+        // header timestamp must come from the file-head scan.
+        let mut content = String::from(
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-05-01T12:00:00Z\",\"tool_output\":\"",
+        );
+        content.push_str(&"y".repeat(160 * 1024));
+        content.push_str("\"}\n");
+        std::fs::write(&path, content).unwrap();
+        let ts = last_event_timestamp(&path).unwrap();
+        let dt: chrono::DateTime<chrono::Utc> = ts.into();
+        assert_eq!(dt.to_rfc3339(), "2026-05-01T12:00:00+00:00");
+    }
+
+    #[test]
+    fn last_event_timestamp_record_spanning_window_start() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("spanning.jsonl");
+        // Final record straddles the window start: its header (with the
+        // timestamp) is cut off, but the timestamp itself lies inside the
+        // window — the raw scan must find it where line parsing can't.
+        let mut content =
+            String::from("{\"type\":\"old\",\"timestamp\":\"2026-04-01T00:00:00Z\"}\n");
+        content.push_str("{\"type\":\"assistant\",\"data\":\"");
+        content.push_str(&"z".repeat(70 * 1024));
+        content.push_str("\",\"timestamp\":\"2026-04-02T06:30:00Z\",\"more\":\"");
+        content.push_str(&"z".repeat(10 * 1024));
+        content.push_str("\"}\n");
+        std::fs::write(&path, content).unwrap();
+        let ts = last_event_timestamp(&path).unwrap();
+        let dt: chrono::DateTime<chrono::Utc> = ts.into();
+        assert_eq!(dt.to_rfc3339(), "2026-04-02T06:30:00+00:00");
     }
 
     #[test]
