@@ -3,7 +3,8 @@
  *
  * Live-captures session events to the nibble memory system, mirroring
  * Claude Code's hook-based capture:
- *   - input:         user messages
+ *   - input:         user messages (the first is also reported as the
+ *                      task's sidebar topic)
  *   - message_end:   assistant messages
  *   - tool_call:     records tool inputs (paired with tool_execution_end)
  *   - tool_execution_end: records tool outputs
@@ -14,8 +15,8 @@
  *   - session_start:   reports the session file path to nibble (eager
  *                      task→session mapping so attach never has to guess
  *                      which session belongs to this task after a reboot)
- *                      and, inside zellij, the pane id so the sidebar's
- *                      1-9 jumps and `nibble goto` can focus this session
+ *                      and, inside zellij, the pane id so the sidebar
+ *                      jump keys and `nibble goto` can focus this session
  *   - agent_start:     status → running (also retries session-path and
  *                      pane-id reports)
  *   - agent_settled:   status → completed (only when the session is idle,
@@ -131,7 +132,7 @@ const reportSessionPath = (taskId: string, path: string): void => {
 
 const reportPaneId = (taskId: string): void => {
 	if (!taskId) return;
-	// Pane mapping for the sidebar's 1-9 jumps and `nibble goto`; only
+	// Pane mapping for the sidebar's jump keys (1-9, a-z) and `nibble goto`; only
 	// meaningful for host agents living in a zellij pane. The pid powers
 	// liveness reconcile so a killed agent's row disappears even if its
 	// pane stays open.
@@ -175,6 +176,16 @@ const reportStatus = (taskId: string, state: string, message?: string): void => 
 	runNibble(args);
 };
 
+// First substantive prompt becomes the task's sidebar topic; nibble keeps
+// the first one and ignores later prompts and slash commands. Routed
+// through the serialized runNibble queue like every other report — a
+// synchronous execSync here stalls prompt acceptance while the tasks DB
+// writer is busy.
+const reportTopic = (taskId: string, text: string): void => {
+	if (!taskId || !text.trim()) return;
+
+	runNibble(["report", "topic", taskId, text]);
+};
 
 // ─── Extension ───────────────────────────────────────────────────────────────
 
@@ -191,6 +202,7 @@ export default function (pi: ExtensionAPI) {
 		if (!taskId) return;
 		reportStatus(taskId, "working");
 		if (event.text?.trim()) {
+			reportTopic(taskId, event.text);
 			capture(taskId, "user", event.text);
 		}
 	});

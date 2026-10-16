@@ -63,7 +63,7 @@ impl PricingTable {
         // Longest-prefix fallback for variants like `claude-opus-4-7-thinking`.
         let mut best: Option<(&String, &ModelPrice)> = None;
         for (key, price) in models {
-            if model.starts_with(key.as_str()) && best.map_or(true, |(k, _)| key.len() > k.len()) {
+            if model.starts_with(key.as_str()) && best.is_none_or(|(k, _)| key.len() > k.len()) {
                 best = Some((key, price));
             }
         }

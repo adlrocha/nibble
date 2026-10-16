@@ -403,6 +403,19 @@ pub fn memory_dir() -> PathBuf {
     PathBuf::from(home).join(".nibble").join("memory")
 }
 
+fn default_lm_service_unit() -> String {
+    "/etc/systemd/system/llama-server.service".to_string()
+}
+
+impl Default for LmConfig {
+    fn default() -> Self {
+        Self {
+            model_dirs: default_lm_model_dirs(),
+            service_unit: default_lm_service_unit(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -549,18 +562,5 @@ update_on_spawn = false
     fn test_claude_config_absent_defaults() {
         let config: Config = toml::from_str("").unwrap();
         assert!(config.claude.update_on_spawn);
-    }
-}
-
-fn default_lm_service_unit() -> String {
-    "/etc/systemd/system/llama-server.service".to_string()
-}
-
-impl Default for LmConfig {
-    fn default() -> Self {
-        Self {
-            model_dirs: default_lm_model_dirs(),
-            service_unit: default_lm_service_unit(),
-        }
     }
 }
