@@ -205,8 +205,8 @@ pub fn create_backup(output: Option<PathBuf>, include_sessions: bool) -> Result<
 
         // Walk the subtree and add every file / empty directory.
         // Use into_iter() so we can skip whole subtrees (e.g. cache/).
-        let mut walker = WalkDir::new(&src).follow_links(false).into_iter();
-        while let Some(entry) = walker.next() {
+        let walker = WalkDir::new(&src).follow_links(false).into_iter();
+        for entry in walker {
             let entry = entry?;
             let path = entry.path();
             let rel = path.strip_prefix(&src).with_context(|| {

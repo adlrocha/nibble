@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::io::BufRead;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// True for pi-family session transcripts, including omp's gzipped archives
 /// (`.jsonl.gz`, produced by `omp gc --apply` — archived, never deleted).
@@ -523,7 +523,7 @@ fn list_pi_family_sessions_with_home(
     Ok(sessions)
 }
 
-fn extract_pi_header(path: &PathBuf) -> (String, Option<String>) {
+fn extract_pi_header(path: &Path) -> (String, Option<String>) {
     // omp writes a {"type":"title"} record before the session header, so scan
     // the first few lines rather than only the first (gz-aware).
     if let Some(reader) = open_session_reader(path) {

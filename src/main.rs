@@ -131,13 +131,7 @@ fn main() -> Result<()> {
                 session_id,
             } => {
                 let mut task = db.ensure_task_or_create(&task_id)?;
-                let ctx = task.context.get_or_insert_with(|| TaskContext {
-                    url: None,
-                    project_path: None,
-                    session_id: None,
-                    claude_session_id: None,
-                    extra: HashMap::new(),
-                });
+                let ctx = task.context.get_or_insert_default();
                 // Route to the agent-specific field.
                 // All sandbox tasks write claude_session_id when the ID is a UUID.
                 // ses_ prefix (legacy) is ignored.
@@ -158,13 +152,7 @@ fn main() -> Result<()> {
             }
             ReportAction::SessionPath { task_id, path } => {
                 let mut task = db.ensure_task_or_create(&task_id)?;
-                let ctx = task.context.get_or_insert_with(|| TaskContext {
-                    url: None,
-                    project_path: None,
-                    session_id: None,
-                    claude_session_id: None,
-                    extra: HashMap::new(),
-                });
+                let ctx = task.context.get_or_insert_default();
                 // Authoritative mapping written by the agent extension at session
                 // start; the attach flow reads the same key.
                 ctx.extra.insert(
@@ -179,13 +167,7 @@ fn main() -> Result<()> {
                 pid,
             } => {
                 let mut task = db.ensure_task_or_create(&task_id)?;
-                let ctx = task.context.get_or_insert_with(|| TaskContext {
-                    url: None,
-                    project_path: None,
-                    session_id: None,
-                    claude_session_id: None,
-                    extra: HashMap::new(),
-                });
+                let ctx = task.context.get_or_insert_default();
                 // Pane of the running agent — written by the pi/omp
                 // extension (ZELLIJ_PANE_ID) so sidebar digit-jumps and
                 // `nibble goto` can focus bare-launched sessions too.
@@ -201,6 +183,16 @@ fn main() -> Result<()> {
                     task.pid = Some(pid);
                 }
                 db.update_task(&task)?;
+            }
+            ReportAction::Topic {
+                task_id,
+                text,
+                replace,
+            } => {
+                let mut task = db.ensure_task_or_create(&task_id)?;
+                if status::apply_topic(&mut task, &text, replace) {
+                    db.update_task(&task)?;
+                }
             }
             ReportAction::Status {
                 task_id,
@@ -816,8 +808,6 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod session_recovery_tests {
     use super::*;
-    use crate::models::TaskContext;
-    use std::collections::HashMap;
 
     #[test]
     fn report_session_path_stores_pi_session_path() {
@@ -831,13 +821,7 @@ mod session_recovery_tests {
             None,
         );
         db.insert_task(&task).unwrap();
-        let ctx = task.context.get_or_insert_with(|| TaskContext {
-            url: None,
-            project_path: None,
-            session_id: None,
-            claude_session_id: None,
-            extra: HashMap::new(),
-        });
+        let ctx = task.context.get_or_insert_default();
         ctx.extra.insert(
             "pi_session_path".to_string(),
             serde_json::Value::String(
