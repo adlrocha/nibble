@@ -224,6 +224,7 @@ pub(crate) fn pick_pi_session(
             workspace: None,
             path: path.clone(),
             modified: Some(*mtime),
+            content_time: None,
             size_bytes: std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
         };
         let title = crate::session::get_session_title(&info);

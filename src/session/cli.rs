@@ -165,7 +165,7 @@ pub(crate) fn cmd_session_list(
         println!("\n{} ({})", group.label, group.sessions.len());
         println!("{}", "─".repeat(max_title_width + 67));
         for s in &group.sessions {
-            let time = session::format_time(s.modified);
+            let time = session::format_time(s.effective_time());
             let title = session::get_session_title(s);
             let sid = &s.session_id[..s.session_id.len().min(8)];
 
@@ -302,7 +302,7 @@ pub(crate) fn cmd_session_info(id: &str) -> Result<()> {
         println!("{:12}{}", "Repo:", ws);
     }
     println!("{:12}{}", "Transcript:", s.path.display());
-    if let Some(m) = s.modified {
+    if let Some(m) = s.effective_time() {
         println!("{:12}{}", "Updated:", session::format_time(Some(m)));
     }
     println!("{:12}{}", "Size:", session::format_size(s.size_bytes));
@@ -350,6 +350,7 @@ mod tests {
             workspace: workspace.map(str::to_string),
             path: std::path::PathBuf::from(path),
             modified: None,
+            content_time: None,
             size_bytes: 0,
         }
     }
