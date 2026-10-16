@@ -377,6 +377,12 @@ pub fn list_all_sessions() -> Result<Vec<SessionInfo>> {
 /// Large transcripts (multi-MB sessions are common) make a full read per
 /// listing prohibitive; the last records are within a few KB of the end.
 const TAIL_SCAN_BYTES: u64 = 64 * 1024;
+/// Backward-walk step when locating the final record's start, and how far
+/// we are willing to walk (64 chunks ≈ 4 MB) before giving up on it.
+const BACKTRACK_CHUNK_BYTES: u64 = 64 * 1024;
+const BACKTRACK_MAX_CHUNKS: u64 = 64;
+/// How much of a record's start is examined for its header timestamp.
+const RECORD_HEADER_BYTES: u64 = 8 * 1024;
 
 /// Extract the newest RFC3339 `timestamp` from a transcript.
 ///
@@ -388,9 +394,9 @@ const TAIL_SCAN_BYTES: u64 = 64 * 1024;
 ///    [`TAIL_SCAN_BYTES`] and take the last parseable `timestamp`.
 /// 2. The newest record spans the window start (header cut off) but its
 ///    `timestamp` lies inside the window — raw-scan the window text.
-/// 3. The newest record alone exceeds the window (multi-MB tool outputs
-///    are common) — its header sits at the record start, which for such
-///    files is the file head; first timestamp found there.
+/// 3. Walk backwards from EOF to the final record's start and read its
+///    header timestamp — handles final records larger than the window.
+/// 4. Last resort: the file head window, preferring its newest timestamp.
 ///
 /// Gzipped archives are skipped (their tail is compressed bytes); callers
 /// fall back to mtime via [`SessionInfo::effective_time`].
@@ -400,7 +406,7 @@ fn last_event_timestamp(path: &std::path::Path) -> Option<std::time::SystemTime>
     }
     let mut file = fs::File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
-    let tail = read_window(&mut file, len.saturating_sub(TAIL_SCAN_BYTES))?;
+    let tail = read_range(&mut file, len.saturating_sub(TAIL_SCAN_BYTES), len)?;
 
     // 1) Exact: newest complete, parseable record in the window.
     let exact = tail
@@ -419,20 +425,53 @@ fn last_event_timestamp(path: &std::path::Path) -> Option<std::time::SystemTime>
     if let Some(ts) = scan_timestamps(&tail).pop() {
         return Some(ts);
     }
-    // 3) Newest record alone exceeds the window: its header is at the
-    //    record start — the file head for such single-record tails.
-    let head = read_window(&mut file, 0)?;
-    scan_timestamps(&head).into_iter().next()
+    // 3) Final record larger than the window: find where it starts and
+    //    read the timestamp from its header.
+    if let Some(ts) = final_record_timestamp(&mut file, len) {
+        return Some(ts);
+    }
+    // 4) Give up precisely: prefer the newest timestamp near the file head.
+    let head = read_range(&mut file, 0, len.min(RECORD_HEADER_BYTES * 8))?;
+    scan_timestamps(&head).pop()
 }
 
-/// Read from `start` to EOF as lossy UTF-8. A trailing window that starts
-/// mid-record is fine: truncated JSON fails to parse in the exact path and
-/// the raw scan wants timestamps from cut-off records too.
-fn read_window(file: &mut fs::File, start: u64) -> Option<String> {
+/// Timestamp of the final record, found by walking backwards from EOF
+/// (excluding the record's own terminating newline) to the previous
+/// record's terminator — the final record's start — then scanning its
+/// header. Returns None when the walk exceeds [`BACKTRACK_MAX_CHUNKS`].
+fn final_record_timestamp(file: &mut fs::File, len: u64) -> Option<std::time::SystemTime> {
+    for chunk in 1..=BACKTRACK_MAX_CHUNKS {
+        // Exclusive upper bound skips the final record's terminator so a
+        // chunk-1 hit is a genuine record boundary.
+        let end = len
+            .saturating_sub(1)
+            .saturating_sub(chunk * BACKTRACK_CHUNK_BYTES);
+        if end == 0 {
+            break;
+        }
+        let start = end.saturating_sub(BACKTRACK_CHUNK_BYTES);
+        let text = read_range(file, start, end)?;
+        if let Some(nl) = text.rfind('\n') {
+            let record_start = start + nl as u64 + 1;
+            let header_end = record_start.saturating_add(RECORD_HEADER_BYTES).min(len);
+            let header = read_range(file, record_start, header_end)?;
+            return scan_timestamps(&header).into_iter().next();
+        }
+    }
+    None
+}
+
+/// Read `[start, end)` as lossy UTF-8. Windows that start mid-record are
+/// fine: truncated JSON fails to parse in the exact path and the raw scan
+/// wants timestamps from cut-off records too.
+fn read_range(file: &mut fs::File, start: u64, end: u64) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
+    if end <= start {
+        return Some(String::new());
+    }
     file.seek(SeekFrom::Start(start)).ok()?;
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf).ok()?;
+    let mut buf = vec![0u8; (end - start) as usize];
+    file.read_exact(&mut buf).ok()?;
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
@@ -1191,10 +1230,13 @@ mod tests {
     fn last_event_timestamp_final_record_larger_than_window() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("huge-final.jsonl");
-        // A single final record bigger than TAIL_SCAN_BYTES: after dropping
-        // the partial window prefix nothing parseable remains, so the
-        // header timestamp must come from the file-head scan.
-        let mut content = String::from(
+        // Multi-record file whose FINAL record alone exceeds the tail
+        // window: nothing parseable remains in the window, so the record's
+        // own header timestamp must be found via the backward walk — not
+        // the earlier record's date.
+        let mut content =
+            String::from("{\"type\":\"user\",\"timestamp\":\"2026-01-01T09:00:00Z\"}\n");
+        content.push_str(
             "{\"type\":\"assistant\",\"timestamp\":\"2026-05-01T12:00:00Z\",\"tool_output\":\"",
         );
         content.push_str(&"y".repeat(160 * 1024));
