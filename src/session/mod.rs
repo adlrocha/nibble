@@ -388,19 +388,18 @@ const BACKTRACK_MAX_CHUNKS: u64 = 64;
 /// timestamped record is the conversation's most recent event. Scanning is
 /// layered, because a final record can be larger than the scan window:
 ///
-/// 1. Exact — parse complete JSONL records in the last
-///    [`TAIL_SCAN_BYTES`] and take the last parseable `timestamp`.
-/// 2. The newest record spans the window start (header cut off) but its
-///    `timestamp` lies inside the window — raw-scan the window text.
-/// 3. Walk backwards from EOF to the final record's start and scan the
-///    whole record for its timestamp — handles final records larger than
-///    the window, wherever in the record the field sits.
+/// 1. Exact — parse complete JSONL records in the last [`TAIL_SCAN_BYTES`]
+///    and take the newest `timestamp` among them. A small timestamp-less
+///    trailing record (e.g. a summary) does not hide an earlier record's
+///    date inside the window.
+/// 2. When the window holds no timestamped record at all — typically one
+///    final record larger than the window — walk backwards from EOF to
+///    that record's start and read its top-level `timestamp` by parsing
+///    the whole record as JSON. If it carries none, return None: dating
+///    by any earlier record would use an event that is not the newest.
 ///
-/// When even the final record yields nothing datable, returns None and
-/// callers fall back to mtime via [`SessionInfo::effective_time`] —
-/// guessing from earlier records would date the session by an event that
-/// is not the newest one. Gzipped archives are always skipped (their tail
-/// is compressed bytes).
+/// Callers fall back to mtime on None via [`SessionInfo::effective_time`].
+/// Gzipped archives are always skipped (their tail is compressed bytes).
 fn last_event_timestamp(path: &std::path::Path) -> Option<std::time::SystemTime> {
     if path.extension().and_then(|e| e.to_str()) == Some("gz") {
         return None;
@@ -422,22 +421,17 @@ fn last_event_timestamp(path: &std::path::Path) -> Option<std::time::SystemTime>
     if let Some(dt) = exact {
         return Some(dt.into());
     }
-    // 2) Newest record spans the window start; timestamp inside the window.
-    if let Some(ts) = scan_timestamps(&tail).pop() {
-        return Some(ts);
-    }
-    // 3) Final record larger than the window: find where it starts and
-    //    scan the whole record for its own timestamp.
+    // 2) Oversized final record: locate it and parse it whole.
     final_record_timestamp(&mut file, len)
 }
 
-/// Timestamp of the final record, found by walking backwards from EOF
-/// (excluding the record's own terminating newline) to the previous
-/// record's terminator — the final record's start — then scanning the
-/// record's full text. The first timestamp in document order is the
-/// record's own (headers lead; later matches would be quoted content).
-/// Returns None when the walk exceeds [`BACKTRACK_MAX_CHUNKS`] or the
-/// record carries no parseable timestamp.
+/// Top-level `timestamp` of the final record, found by walking backwards
+/// from EOF (excluding the record's own terminating newline) to the
+/// previous record's terminator — the final record's start — then parsing
+/// the record as JSON. Only the record's own top-level field counts:
+/// timestamps embedded in payload content are ignored. Returns None when
+/// the walk exceeds [`BACKTRACK_MAX_CHUNKS`] or the record is not JSON
+/// with a parseable top-level timestamp.
 fn final_record_timestamp(file: &mut fs::File, len: u64) -> Option<std::time::SystemTime> {
     for chunk in 1..=BACKTRACK_MAX_CHUNKS {
         // Exclusive upper bound skips the final record's terminator so a
@@ -453,7 +447,12 @@ fn final_record_timestamp(file: &mut fs::File, len: u64) -> Option<std::time::Sy
         if let Some(nl) = text.rfind('\n') {
             let record_start = start + nl as u64 + 1;
             let record = read_range(file, record_start, len)?;
-            return scan_timestamps(&record).into_iter().next();
+            let dt = serde_json::from_str::<serde_json::Value>(&record)
+                .ok()?
+                .get("timestamp")
+                .and_then(|t| t.as_str())
+                .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())?;
+            return Some(dt.into());
         }
     }
     None
@@ -471,32 +470,6 @@ fn read_range(file: &mut fs::File, start: u64, end: u64) -> Option<String> {
     let mut buf = vec![0u8; (end - start) as usize];
     file.read_exact(&mut buf).ok()?;
     Some(String::from_utf8_lossy(&buf).into_owned())
-}
-
-/// Extract RFC3339 timestamps from raw transcript text in document order,
-/// without requiring well-formed JSON lines. Fallback for records that
-/// span a scan-window boundary, where line-based JSON parsing can't help.
-fn scan_timestamps(text: &str) -> Vec<std::time::SystemTime> {
-    const KEY: &str = "\"timestamp\"";
-    let mut out = Vec::new();
-    let mut from = 0;
-    while let Some(rel) = text[from..].find(KEY) {
-        let after_key = from + rel + KEY.len();
-        let rest = &text[after_key..];
-        // Position of the value's opening quote (":" precedes it).
-        let Some(open) = rest.find('"') else {
-            break;
-        };
-        let value = &rest[open + 1..];
-        let Some(close) = value.find('"') else {
-            break;
-        };
-        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&value[..close]) {
-            out.push(dt.into());
-        }
-        from = after_key + open + 1 + close + 1;
-    }
-    out
 }
 
 fn list_all_sessions_with_home(home: &std::path::Path) -> Result<Vec<SessionInfo>> {
