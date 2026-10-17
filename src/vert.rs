@@ -2,8 +2,8 @@
 //!
 //! The keybind splits the focused pane and runs this in the new one, so the
 //! working directory is the repo the user was looking at. When vert is not
-//! installed, or exits with an error, the pane stays open until Enter so the
-//! message can be read before `close_on_exit` closes it.
+//! installed, cannot start, or exits with an error, the pane stays open
+//! until Enter so the message can be read before `close_on_exit` closes it.
 
 use anyhow::{Context, Result};
 use std::io::{BufRead, Write};
@@ -47,7 +47,11 @@ fn run_vert(
             wait_for_enter(input, out)?;
             Ok(127)
         }
-        Err(e) => Err(e).context("could not start vert"),
+        Err(e) => {
+            write!(out, "could not start vert: {e}\n\nPress Enter to close.")?;
+            wait_for_enter(input, out)?;
+            Ok(126)
+        }
     }
 }
 
@@ -105,13 +109,27 @@ mod tests {
     }
 
     #[test]
-    fn other_launch_errors_are_returned() {
-        let mut input: &[u8] = b"";
+    fn other_launch_errors_keep_pane_open() {
+        let (code, out) = run(|| Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)));
+        assert_eq!(code, 126);
+        assert!(out.contains("could not start vert"));
+        assert!(out.contains("Press Enter to close."));
+    }
+
+    #[test]
+    fn unreadable_stdin_is_an_error() {
+        struct Broken;
+        impl std::io::Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("closed"))
+            }
+        }
+        let mut input = std::io::BufReader::new(Broken);
         let mut out = Vec::new();
         let err = run_vert(&mut input, &mut out, || {
-            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
         })
         .unwrap_err();
-        assert!(err.to_string().contains("could not start vert"));
+        assert!(err.to_string().contains("could not read from stdin"));
     }
 }
