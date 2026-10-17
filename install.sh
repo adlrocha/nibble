@@ -433,6 +433,9 @@ if "$BIN_DIR/nibble" sandbox build $SANDBOX_BUILD_ARGS; then
     ok "Sandbox image ready: nibble-sandbox:latest"
 else
     warn "Sandbox image build failed."
+    if [ "$(uname -s)" = "Darwin" ]; then
+        warn "On macOS podman runs in a VM; start it first: podman machine init && podman machine start"
+    fi
     warn "Retry with: ./install.sh --rebuild"
 fi
 

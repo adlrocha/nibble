@@ -35,3 +35,13 @@ jobs:
           # vert is not installed on the runner: expect the install hint.
           out=$(~/.local/bin/nibble vert </dev/null || true)
           echo "$out" | grep -q 'raw.githubusercontent.com/adlrocha/vert'
+
+      - name: Keybindings land in zellij's macOS config dir
+        run: |
+          dir="$HOME/Library/Application Support/org.Zellij-Contributors.Zellij"
+          test ! -e "$HOME/.config/zellij"
+          mkdir -p "$dir"
+          ~/.local/bin/nibble keybinds --install
+          grep -q 'managed by nibble' "$dir/config.kdl"
+          ~/.local/bin/nibble keybinds --uninstall
+          test ! -e "$dir/config.kdl"
