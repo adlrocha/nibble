@@ -126,7 +126,7 @@ fn uninstall_at(path: &Path) -> Result<()> {
 /// an interrupted write never leaves a truncated config. Symlinks are
 /// followed and the target keeps its permissions.
 fn write_atomic(path: &Path, body: &str) -> Result<()> {
-    let target = link_target(path);
+    let target = link_target(path)?;
     let dir = target
         .parent()
         .filter(|d| !d.as_os_str().is_empty())
@@ -149,23 +149,23 @@ fn write_atomic(path: &Path, body: &str) -> Result<()> {
 
 /// Where writes to `path` should land: the file its symlinks point to, even
 /// when that file does not exist yet, so a dotfiles link is never replaced.
-fn link_target(path: &Path) -> PathBuf {
+/// A symlink loop is refused rather than overwritten.
+fn link_target(path: &Path) -> Result<PathBuf> {
     if let Ok(real) = std::fs::canonicalize(path) {
-        return real;
+        return Ok(real);
     }
-    // canonicalize fails on a dangling link; walk it by hand (bounded, so a
-    // link loop falls back to writing the last hop).
+    // canonicalize fails on a dangling link; walk it by hand.
     let mut current = path.to_path_buf();
     for _ in 0..40 {
         let Ok(next) = std::fs::read_link(&current) else {
-            break;
+            return Ok(current);
         };
         current = match current.parent() {
             Some(dir) if next.is_relative() => dir.join(next),
             _ => next,
         };
     }
-    current
+    bail!("{} is a symlink loop; not writing to it", path.display())
 }
 
 /// The section placed inside an existing `keybinds` block.
@@ -417,21 +417,23 @@ mod tests {
     }
 
     #[test]
-    fn link_target_follows_chains_and_stops_on_loops() {
+    fn link_target_follows_chains_and_refuses_loops() {
         let tmp = tempfile::tempdir().unwrap();
         let a = tmp.path().join("a");
         let b = tmp.path().join("b");
         let missing = tmp.path().join("missing");
         std::os::unix::fs::symlink(&b, &a).unwrap();
         std::os::unix::fs::symlink(&missing, &b).unwrap();
-        assert_eq!(link_target(&a), missing);
+        assert_eq!(link_target(&a).unwrap(), missing);
 
         let x = tmp.path().join("x");
         let y = tmp.path().join("y");
         std::os::unix::fs::symlink(&y, &x).unwrap();
         std::os::unix::fs::symlink(&x, &y).unwrap();
-        let end = link_target(&x);
-        assert!(end == x || end == y);
+        let err = link_target(&x).unwrap_err();
+        assert!(err.to_string().contains("symlink loop"));
+        assert!(write_atomic(&x, "body").is_err());
+        assert!(x.is_symlink() && y.is_symlink());
     }
 
     #[test]
