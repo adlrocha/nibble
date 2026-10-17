@@ -119,9 +119,9 @@ step "Removing zellij keybindings"
 if [ -n "$NIBBLE_BIN" ] && [ -x "$NIBBLE_BIN" ]; then
     "$NIBBLE_BIN" keybinds --uninstall \
         && ok "Removed nibble keybindings from zellij config" \
-        || warn "Could not remove them. Delete the '>>> managed by nibble' section from ~/.config/zellij/config.kdl"
+        || warn "Could not remove them. Delete the '>>> managed by nibble' section from your zellij config (config.kdl, or \$ZELLIJ_CONFIG_FILE)"
 else
-    warn "nibble binary not found. Delete the '>>> managed by nibble' section from ~/.config/zellij/config.kdl"
+    warn "nibble binary not found. Delete the '>>> managed by nibble' section from your zellij config (config.kdl, or \$ZELLIJ_CONFIG_FILE)"
 fi
 
 # ── 5. Remove binaries ───────────────────────────────────────────────────────

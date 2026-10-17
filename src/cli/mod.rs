@@ -64,8 +64,9 @@ pub enum Commands {
 
     /// Manage nibble's zellij keybindings (Alt a: sidebar, Alt v: vert)
     Keybinds {
-        /// Add the bindings to ~/.config/zellij/config.kdl (re-running
-        /// replaces them; bindings outside nibble's section are untouched)
+        /// Add the bindings to `$ZELLIJ_CONFIG_FILE`, or
+        /// `~/.config/zellij/config.kdl` when unset (re-running replaces
+        /// them; bindings outside nibble's section are untouched)
         #[arg(long, conflicts_with = "uninstall")]
         install: bool,
         /// Remove nibble's section from config.kdl
