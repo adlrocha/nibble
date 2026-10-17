@@ -62,6 +62,21 @@ pub enum Commands {
         close: bool,
     },
 
+    /// Manage nibble's zellij keybindings (Alt a: sidebar, Alt v: vert)
+    Keybinds {
+        /// Add the bindings to `$ZELLIJ_CONFIG_FILE`, or
+        /// `~/.config/zellij/config.kdl` when unset (re-running replaces
+        /// them; bindings outside nibble's section are untouched)
+        #[arg(long, conflicts_with = "uninstall")]
+        install: bool,
+        /// Remove nibble's section from config.kdl
+        #[arg(long)]
+        uninstall: bool,
+    },
+
+    /// Open vert on the repo in the current directory (the Alt v pane)
+    Vert,
+
     /// Inject a message into a running sandbox agent (bypasses Telegram)
     Inject {
         /// Task ID of the agent to inject into

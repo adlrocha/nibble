@@ -330,6 +330,9 @@ mod tests {
         let mut volumes = Vec::new();
         mount_agent_config_dir(&PathBuf::from(home), ".omp", &mut volumes).unwrap();
 
+        // The overlay uses the resolved path (macOS tempdirs live under the
+        // /var -> /private/var symlink).
+        let corpus = corpus.canonicalize().unwrap();
         let overlay = format!("{}:/home/node/.omp/agent/sessions:rw", corpus.display());
         assert!(
             volumes.contains(&overlay),

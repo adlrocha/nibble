@@ -1,0 +1,47 @@
+name: macOS install
+
+# install.sh must keep working on macOS; this runs it end to end on a real
+# Mac runner (Linux-only steps such as systemd units only warn there).
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and test
+        run: cargo test
+
+      - name: Run install.sh
+        run: ./install.sh </dev/null
+
+      - name: Smoke-test the installed binary
+        env:
+          ZELLIJ_CONFIG_DIR: ${{ runner.temp }}/zellij
+        run: |
+          ~/.local/bin/nibble --help >/dev/null
+          ~/.local/bin/nibble keybinds --install
+          grep -q 'managed by nibble' "$ZELLIJ_CONFIG_DIR/config.kdl"
+          ~/.local/bin/nibble keybinds --uninstall
+          test ! -e "$ZELLIJ_CONFIG_DIR/config.kdl"
+          # vert is not installed on the runner: expect the install hint.
+          out=$(~/.local/bin/nibble vert </dev/null || true)
+          echo "$out" | grep -q 'raw.githubusercontent.com/adlrocha/vert'
+
+      - name: Keybindings land in zellij's macOS config dir
+        run: |
+          dir="$HOME/Library/Application Support/org.Zellij-Contributors.Zellij"
+          test ! -e "$HOME/.config/zellij"
+          mkdir -p "$dir"
+          ~/.local/bin/nibble keybinds --install
+          grep -q 'managed by nibble' "$dir/config.kdl"
+          ~/.local/bin/nibble keybinds --uninstall
+          test ! -e "$dir/config.kdl"

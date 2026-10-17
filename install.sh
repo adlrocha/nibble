@@ -433,6 +433,9 @@ if "$BIN_DIR/nibble" sandbox build $SANDBOX_BUILD_ARGS; then
     ok "Sandbox image ready: nibble-sandbox:latest"
 else
     warn "Sandbox image build failed."
+    if [ "$(uname -s)" = "Darwin" ]; then
+        warn "On macOS podman runs in a VM; start it first: podman machine init && podman machine start"
+    fi
     warn "Retry with: ./install.sh --rebuild"
 fi
 
@@ -734,6 +737,22 @@ if grep -q "AGENT_TASK_ID" "$CLAUDE_SETTINGS" 2>/dev/null; then
 fi
 
 bash "$REPO_DIR/scripts/setup-claude-hooks.sh"
+
+# ── 6b. Zellij keybindings ───────────────────────────────────────────────────
+# Alt-a jumps to the agents sidebar; Alt-v splits the pane and opens vert on
+# its repo. Written as a marked section inside config.kdl's keybinds block;
+# re-running replaces it and never edits the user's own bindings.
+step "Installing zellij keybindings"
+
+if command -v zellij >/dev/null 2>&1; then
+    "$BIN_DIR/nibble" keybinds --install \
+        && ok "Alt a: agents sidebar, Alt v: vert (restart zellij if they don't fire)" \
+        || warn "Could not install zellij keybindings. Run manually: nibble keybinds --install"
+    command -v vert >/dev/null 2>&1 \
+        || warn "vert not found; Alt v will show how to install it"
+else
+    warn "zellij not found. Keybindings skipped; run later: nibble keybinds --install"
+fi
 
 # ── 7. Memory system setup ──────────────────────────────────────────────────
 step "Setting up memory system"
