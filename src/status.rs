@@ -742,7 +742,7 @@ layout {
 
 const MANAGED_MARKER: &str = "// managed by nibble";
 
-fn zellij_config_dir() -> std::path::PathBuf {
+pub(crate) fn zellij_config_dir() -> std::path::PathBuf {
     std::env::var_os("ZELLIJ_CONFIG_DIR")
         .map(std::path::PathBuf::from)
         .or_else(|| dirs::home_dir().map(|h| h.join(".config/zellij")))

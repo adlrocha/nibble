@@ -113,6 +113,17 @@ if systemctl --user daemon-reload 2>/dev/null; then
     ok "systemd daemon reloaded"
 fi
 
+# ── 4b. Remove zellij keybindings (before removing binary) ──────────────────
+step "Removing zellij keybindings"
+
+if [ -n "$NIBBLE_BIN" ] && [ -x "$NIBBLE_BIN" ]; then
+    "$NIBBLE_BIN" keybinds --uninstall \
+        && ok "Removed nibble keybindings from zellij config" \
+        || warn "Could not remove them. Delete the '>>> managed by nibble' section from ~/.config/zellij/config.kdl"
+else
+    warn "nibble binary not found. Delete the '>>> managed by nibble' section from ~/.config/zellij/config.kdl"
+fi
+
 # ── 5. Remove binaries ───────────────────────────────────────────────────────
 step "Removing binaries"
 
