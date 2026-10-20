@@ -9,6 +9,7 @@ mod db;
 mod format;
 #[path = "sandbox/hermes.rs"]
 mod hermes;
+mod keybinds;
 mod lm;
 mod memory;
 mod models;
@@ -17,6 +18,7 @@ mod sandbox;
 mod session;
 mod status;
 mod usage;
+mod vert;
 mod web;
 
 use anyhow::{Context, Result};
@@ -76,6 +78,15 @@ fn main() -> Result<()> {
                 // focus (or bare `nibble sidebar`): open + focus the pane
                 status::open_sidebar_pane()?;
                 status::focus_sidebar_pane()?;
+            }
+        }
+        Commands::Keybinds { install, uninstall } => {
+            keybinds::cmd_keybinds(install, uninstall)?;
+        }
+        Commands::Vert => {
+            let code = vert::cmd_vert()?;
+            if code != 0 {
+                std::process::exit(code);
             }
         }
         Commands::Goto { task } => {

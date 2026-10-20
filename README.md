@@ -506,6 +506,9 @@ Network is host-mode, so services started inside the container (e.g. `npm run de
 | `nibble sidebar` | Open the agent-status side panel in the current zellij tab |
 | `nibble sidebar --install` | Always-on sidebar: every zellij tab gets a status pane |
 | `nibble goto <task>` | Jump zellij focus to the pane hosting an agent |
+| `nibble keybinds --install` | Add zellij keybindings (Alt a: sidebar, Alt v: vert) to `config.kdl` (or `$ZELLIJ_CONFIG_FILE`); run by `install.sh` |
+| `nibble keybinds --uninstall` | Remove nibble's section from the zellij config (bindings outside it are untouched) |
+| `nibble vert` | Open vert on the current repo, or show how to install it (the Alt v pane) |
 | `nibble prune` | Mark stale processes as exited |
 | `nibble sandbox spawn <repo>` | Start a sandboxed agent |
 | `nibble sandbox list` | List open sandboxes |

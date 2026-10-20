@@ -742,11 +742,44 @@ layout {
 
 const MANAGED_MARKER: &str = "// managed by nibble";
 
-fn zellij_config_dir() -> std::path::PathBuf {
-    std::env::var_os("ZELLIJ_CONFIG_DIR")
-        .map(std::path::PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|h| h.join(".config/zellij")))
-        .unwrap_or_else(|| std::path::PathBuf::from(".config/zellij"))
+/// Zellij's platform config dir name under `dirs::config_dir()` (its
+/// `ProjectDirs` for "org", "Zellij Contributors", "Zellij").
+#[cfg(target_os = "macos")]
+const ZELLIJ_PROJECT_DIR: &str = "org.Zellij-Contributors.Zellij";
+#[cfg(not(target_os = "macos"))]
+const ZELLIJ_PROJECT_DIR: &str = "zellij";
+
+/// The config dir zellij reads: `$ZELLIJ_CONFIG_DIR`, else the first that
+/// exists of `~/.config/zellij` and the platform dir (`$XDG_CONFIG_HOME/zellij`
+/// on Linux, `~/Library/Application Support/org.Zellij-Contributors.Zellij`
+/// on macOS). With neither present, `~/.config/zellij`, which zellij checks
+/// first once it exists.
+pub(crate) fn zellij_config_dir() -> PathBuf {
+    pick_zellij_config_dir(
+        std::env::var_os("ZELLIJ_CONFIG_DIR"),
+        dirs::home_dir(),
+        dirs::config_dir().map(|d| d.join(ZELLIJ_PROJECT_DIR)),
+        |p| p.is_dir(),
+    )
+}
+
+fn pick_zellij_config_dir(
+    env_dir: Option<std::ffi::OsString>,
+    home: Option<PathBuf>,
+    platform_dir: Option<PathBuf>,
+    exists: impl Fn(&std::path::Path) -> bool,
+) -> PathBuf {
+    if let Some(dir) = env_dir.filter(|d| !d.is_empty()) {
+        return PathBuf::from(dir);
+    }
+    let home_dir = home.map_or_else(
+        || PathBuf::from(".config/zellij"),
+        |h| h.join(".config/zellij"),
+    );
+    if exists(&home_dir) {
+        return home_dir;
+    }
+    platform_dir.filter(|d| exists(d)).unwrap_or(home_dir)
 }
 
 /// Install the always-on sidebar: every tab of every new zellij session gets
@@ -848,6 +881,30 @@ pub(crate) fn cmd_sidebar(install: bool, uninstall: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zellij_config_dir_follows_zellij_lookup_order() {
+        let home = Some(PathBuf::from("/h"));
+        let platform = Some(PathBuf::from("/xdg/zellij"));
+        let pick = |env: Option<&str>, existing: &[&str]| {
+            let existing: Vec<PathBuf> = existing.iter().map(PathBuf::from).collect();
+            pick_zellij_config_dir(env.map(Into::into), home.clone(), platform.clone(), |p| {
+                existing.iter().any(|e| e == p)
+            })
+        };
+        assert_eq!(pick(Some("/env"), &[]), PathBuf::from("/env"));
+        assert_eq!(pick(Some(""), &[]), PathBuf::from("/h/.config/zellij"));
+        assert_eq!(
+            pick(None, &["/h/.config/zellij", "/xdg/zellij"]),
+            PathBuf::from("/h/.config/zellij")
+        );
+        assert_eq!(pick(None, &["/xdg/zellij"]), PathBuf::from("/xdg/zellij"));
+        assert_eq!(pick(None, &[]), PathBuf::from("/h/.config/zellij"));
+        assert_eq!(
+            pick_zellij_config_dir(None, None, None, |_| false),
+            PathBuf::from(".config/zellij")
+        );
+    }
     use crate::models::AgentType;
     use crate::models::TaskContext;
     use std::collections::HashMap;
