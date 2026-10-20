@@ -7,7 +7,7 @@ nibble is a control plane for the coding agents you run every day. Claude Code, 
 What it aims for:
 
 - **Every session is tracked.** Each agent launch gets a status row, whether it came from a wrapper, a sandbox attach, a bare `claude -p`, or a script.
-- **No conversation is ever lost.** Transcripts are kept forever, can be resumed across agents and reboots, and are included in backups.
+- **No conversation is ever lost.** Transcripts are kept forever, can be resumed across agents and reboots, and can be archived with `nibble backup --sessions`.
 - **Isolation when you want it.** One long-lived sandbox per repo, with the toolchain installed before you attach, so agents can run anything without touching the host.
 - **Attention goes where it's needed.** A zellij sidebar shows blocked, working and idle agents. One key focuses the right pane.
 - **Spending is visible.** Token usage, subscription quotas and market prices sit next to the agents that drive them.
@@ -45,6 +45,7 @@ What it aims for:
 | 25 | **Backup / import** | ops | `nibble backup [--sessions]` zips all nibble state (optionally every pi/omp/claude transcript); `nibble import` merges it back without overwriting existing transcripts |
 | 26 | **zellij keybinds + vert** | dx | `nibble keybinds --install` adds `Alt a` (focus/open the sidebar) and `Alt v` (`nibble vert` on the current repo) to your zellij config |
 | 27 | **Local LLM models** | experimental | `nibble lm` lists and manages local model files |
+| 28 | **Kimi backend** | experimental | `claude --kimi` (via the installed claude wrapper) points Claude Code at `KIMI_BASE_URL` / `KIMI_API_KEY` for that session |
 
 ---
 
