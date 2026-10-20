@@ -42,7 +42,7 @@ What it aims for:
 | 22 | **Market token prices** | dx | `nibble-market` adds an analysis card to the Omarchy agents panel: blended €/Mtok per model family from public price sources, the 30-day trend, and what your tracked usage would cost today. See [docs/market.md](docs/market.md) |
 | 23 | **Token usage tracking** | dx | `nibble usage scan/report/pricing` — per-message token counts from Claude Code, pi and omp transcripts, priced with a bundled table plus user overrides. See [docs/usage-tracking.md](docs/usage-tracking.md) |
 | 24 | **Memory** | core | `nibble memory` — git-backed cross-session memories and lessons, captured by hooks and extensions and loadable as a context briefing. See [docs/memory.md](docs/memory.md) |
-| 25 | **Backup / import** | ops | `nibble backup [--sessions]` zips all nibble state (optionally every pi/omp/claude transcript); `nibble import` merges it back without overwriting existing transcripts |
+| 25 | **Backup / import** | ops | `nibble backup [--sessions]` zips all nibble state (optionally every pi/omp/claude transcript); `nibble import` restores `~/.nibble` (moving the current one aside) and merges transcripts back into `~/.pi`, `~/.omp` and `~/.claude`; a transcript that also exists in the backup is replaced by the backup copy |
 | 26 | **zellij keybinds + vert** | dx | `nibble keybinds --install` adds `Alt a` (focus/open the sidebar) and `Alt v` (`nibble vert` on the current repo) to your zellij config |
 | 27 | **Local LLM models** | experimental | `nibble lm` lists and manages local model files |
 | 28 | **Kimi backend** | experimental | `claude --kimi` (via the installed claude wrapper) points Claude Code at `KIMI_BASE_URL` / `KIMI_API_KEY` for that session |
@@ -539,7 +539,7 @@ Network is host-mode, so services started inside the container (e.g. `npm run de
 | `nibble memory <action>` | Search, write, load and sync cross-session memories and lessons |
 | `nibble cron <action>` | Add, list, edit, stop, start, kill or run scheduled sandbox prompts |
 | `nibble backup [--sessions]` | Zip all nibble state (optionally every agent transcript) |
-| `nibble import <zip>` | Restore a backup without overwriting existing transcripts |
+| `nibble import <zip>` | Restore a backup (current `~/.nibble` moved aside; transcripts merged, same-named ones replaced by the backup copy) |
 | `nibble lm <action>` | List and manage local LLM model files |
 | `nibble hermes init` | Start Hermes Agent sandbox (singleton) |
 | `nibble hermes attach` | Attach to Hermes CLI (auto-spawns if needed) |
