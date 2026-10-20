@@ -11,3 +11,6 @@ docs/session-notes/
 # Python bytecode from tooling
 __pycache__/
 .claude/settings.local.sync-conflict-*
+
+# Local worktrees and agent staging dirs (session transcripts, model configs)
+.worktrees/
