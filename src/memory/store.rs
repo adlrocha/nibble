@@ -275,7 +275,7 @@ pub fn list_memories(
     }
 
     // Sort by created_at descending (newest first)
-    entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    entries.sort_by_key(|m| std::cmp::Reverse(m.created_at));
 
     if let Some(limit) = limit {
         entries.truncate(limit);

@@ -1701,7 +1701,7 @@ pub(crate) fn cmd_sandbox_attach(
                     for root in roots {
                         candidates.extend(list_pi_sessions_for_cwd(&container_dir, root));
                     }
-                    candidates.sort_by(|a, b| b.1.cmp(&a.1));
+                    candidates.sort_by_key(|c| std::cmp::Reverse(c.1));
                     use std::io::IsTerminal;
                     let mut user_chose_fresh = false;
                     let host_path = if candidates.len() > 1 && std::io::stdin().is_terminal() {

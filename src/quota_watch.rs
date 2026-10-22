@@ -169,10 +169,9 @@ fn parse_time_of_day_utc(tod: &str, msg_ts: DateTime<Utc>) -> Option<DateTime<Ut
     let tod = tod.trim().to_lowercase();
     let (clock, meridiem) = if let Some(stripped) = tod.strip_suffix("pm") {
         (stripped, 12u32)
-    } else if let Some(stripped) = tod.strip_suffix("am") {
-        (stripped, 0u32)
     } else {
-        return None;
+        let stripped = tod.strip_suffix("am")?;
+        (stripped, 0u32)
     };
     let (h, m) = if let Some((hs, ms)) = clock.split_once(':') {
         (
