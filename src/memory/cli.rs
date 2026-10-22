@@ -1114,7 +1114,7 @@ pub fn handle_dedup(yes: bool) -> Result<()> {
             continue;
         }
         // Sort by created_at descending (newest first)
-        memories.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        memories.sort_by_key(|m| std::cmp::Reverse(m.created_at));
         let keep = &memories[0];
         println!(
             "Session {} has {} duplicates — keeping {} ({})",

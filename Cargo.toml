@@ -24,7 +24,10 @@ uuid = { version = "1.11", features = ["v4", "v5"] }
 dirs = "5.0"
 anyhow = "1.0"
 thiserror = "2.0"
-ureq = { version = "2.12", features = ["json"] }
+# native-certs: verify TLS against the system trust store (rustls-native-certs)
+# instead of the bundled webpki-roots list, which still trusts the compromised
+# eMudhra intermediates (Oct 2026 CA compromise) — see GHSA/eMudhra incident.
+ureq = { version = "2.12", features = ["json", "native-certs"] }
 toml = "0.8"
 serde_yaml = "0.9"
 tempfile = "3.13"
