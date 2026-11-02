@@ -56,30 +56,30 @@ const SHELLS: &[&str] = &[
 
 /// What nibble remembers about a mux session.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub(crate) struct Manifest {
+struct Manifest {
     /// When nibble last (re)created the session. Zellij pane ids restart
     /// from 0 in a new session, so only tasks registered after this moment
     /// can belong to its panes. `None` for an adopted session that nibble
     /// did not create (its pane ids are the ones tasks recorded).
-    pub epoch: Option<DateTime<Utc>>,
+    epoch: Option<DateTime<Utc>>,
     /// When the agent tabs below last changed.
-    pub updated_at: Option<DateTime<Utc>>,
-    pub tabs: Vec<MuxTab>,
+    updated_at: Option<DateTime<Utc>>,
+    tabs: Vec<MuxTab>,
 }
 
 /// One zellij tab and the agents in it, left to right.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) struct MuxTab {
-    pub name: String,
-    pub panes: Vec<MuxPane>,
+struct MuxTab {
+    name: String,
+    panes: Vec<MuxPane>,
 }
 
 /// One agent pane: the task to resume and where it ran.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) struct MuxPane {
-    pub task_id: String,
-    pub title: String,
-    pub cwd: Option<String>,
+struct MuxPane {
+    task_id: String,
+    title: String,
+    cwd: Option<String>,
 }
 
 // ── Entry point ────────────────────────────────────────────────────────────
@@ -111,7 +111,7 @@ pub(crate) fn cmd_mux(
 }
 
 /// Session names become file names and zellij arguments: keep them plain.
-pub(crate) fn validate_session_name(name: &str) -> Result<()> {
+fn validate_session_name(name: &str) -> Result<()> {
     let ok = !name.is_empty()
         && name.len() <= 64
         && !name.starts_with('-')
@@ -131,7 +131,7 @@ fn kv_key(name: &str) -> String {
     format!("{KV_PREFIX}{name}")
 }
 
-pub(crate) fn load_manifest(db: &Database, name: &str) -> Result<Option<Manifest>> {
+fn load_manifest(db: &Database, name: &str) -> Result<Option<Manifest>> {
     db.kv_get(&kv_key(name))?
         .map(|raw| {
             serde_json::from_str(&raw)
@@ -202,7 +202,7 @@ fn short_id(id: &str) -> &str {
 /// What `nibble mux NAME` does, decided from the session's zellij state and
 /// whether nibble holds a snapshot with agents in it.
 #[derive(Debug, PartialEq)]
-pub(crate) enum OpenPlan {
+enum OpenPlan {
     /// The session is running: attach to it.
     Attach,
     /// Rebuild the agent tabs from the snapshot. `discard_dead` deletes
@@ -218,13 +218,13 @@ pub(crate) enum OpenPlan {
 
 /// Zellij's view of a session name.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum ZellijState {
+enum ZellijState {
     Live,
     Dead,
     Missing,
 }
 
-pub(crate) fn plan_open(state: ZellijState, manifest: Option<&Manifest>) -> OpenPlan {
+fn plan_open(state: ZellijState, manifest: Option<&Manifest>) -> OpenPlan {
     let has_agents = manifest.is_some_and(|m| !m.tabs.is_empty());
     match state {
         ZellijState::Live => OpenPlan::Attach,
@@ -276,18 +276,6 @@ fn cmd_open(db: &Database, name: &str) -> Result<()> {
         }
         OpenPlan::Restore { discard_dead } => {
             let to_restore = restorable.unwrap_or_default();
-            if discard_dead {
-                let out = Command::new("zellij")
-                    .args(["delete-session", name])
-                    .output()
-                    .context("failed to run zellij delete-session")?;
-                if !out.status.success() {
-                    bail!(
-                        "could not delete zellij's dead copy of '{name}': {}",
-                        String::from_utf8_lossy(&out.stderr).trim()
-                    );
-                }
-            }
             let agents: usize = to_restore.tabs.iter().map(|t| t.panes.len()).sum();
             println!(
                 "Restoring {agents} agent(s) in {} tab(s) for mux session '{name}'...",
@@ -307,6 +295,21 @@ fn cmd_open(db: &Database, name: &str) -> Result<()> {
             manifest.epoch = Some(Utc::now());
             save_manifest(db, name, &manifest)?;
             spawn_watcher(name)?;
+            // Last step before zellij takes over: everything that could still
+            // fail (layout, record, watcher) is in place, so a failure above
+            // leaves zellij's dead copy to resurrect.
+            if discard_dead {
+                let out = Command::new("zellij")
+                    .args(["delete-session", name])
+                    .output()
+                    .context("failed to run zellij delete-session")?;
+                if !out.status.success() {
+                    bail!(
+                        "could not delete zellij's dead copy of '{name}': {}",
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    );
+                }
+            }
             let layout_arg = layout_path.to_string_lossy().to_string();
             Err(exec_zellij(&[
                 "--session",
@@ -406,7 +409,7 @@ fn zellij_session_state(name: &str) -> Result<ZellijState> {
 /// Find `name` in `zellij list-sessions --no-formatting` output, e.g.
 /// `main [Created 1day ago] (current)` or
 /// `old [Created 2days ago] (EXITED - attach to resurrect)`.
-pub(crate) fn parse_session_state(listing: &str, name: &str) -> ZellijState {
+fn parse_session_state(listing: &str, name: &str) -> ZellijState {
     listing
         .lines()
         .find(|line| line.split_whitespace().next() == Some(name))
@@ -440,12 +443,7 @@ const BARS_TAB_TEMPLATE: &str = "    default_tab_template {
 /// that shell). With `sidebar`, tabs get the template `nibble sidebar
 /// --install` puts in the default layout (an explicit layout replaces it);
 /// other custom default layouts are not carried over.
-pub(crate) fn render_layout(
-    tabs: &[MuxTab],
-    nibble_bin: &Path,
-    shell: &str,
-    sidebar: bool,
-) -> String {
+fn render_layout(tabs: &[MuxTab], nibble_bin: &Path, shell: &str, sidebar: bool) -> String {
     let mut out = String::from("// generated by `nibble mux` — rebuilt agent tabs\nlayout {\n");
     out.push_str(if sidebar {
         crate::status::SIDEBAR_TAB_TEMPLATE
@@ -517,7 +515,7 @@ fn sh_quote(s: &str) -> String {
 /// is a restored pane whose resume command has not registered its agent
 /// yet. Panes whose (known) foreground process is a plain shell hold no agent,
 /// and only agents `nibble mux` can resume are recorded.
-pub(crate) fn snapshot(
+fn snapshot(
     panes: &[ZellijPane],
     tasks: &[Task],
     session: &str,
@@ -593,12 +591,12 @@ fn mux_pane(task: &Task, pane: &ZellijPane) -> MuxPane {
 }
 
 /// Agents `plan_resume` knows how to bring back.
-pub(crate) fn resumable_agent(agent: &AgentType) -> bool {
+fn resumable_agent(agent: &AgentType) -> bool {
     matches!(agent, AgentType::ClaudeCode | AgentType::Pi)
 }
 
 /// Whether a pane's foreground command is a plain shell.
-pub(crate) fn is_shell(command: &str) -> bool {
+fn is_shell(command: &str) -> bool {
     let Some(program) = command.split_whitespace().next() else {
         return false;
     };
@@ -608,7 +606,7 @@ pub(crate) fn is_shell(command: &str) -> bool {
 
 /// The task id in a restored pane's command, as written by
 /// [`resume_invocation`] (`... mux --resume '<id>'; ...`).
-pub(crate) fn resume_target(command: &str) -> Option<String> {
+fn resume_target(command: &str) -> Option<String> {
     let mut words = command.split_whitespace();
     words.find(|w| *w == RESUME_FLAG)?;
     let id = words
@@ -620,7 +618,7 @@ pub(crate) fn resume_target(command: &str) -> Option<String> {
 
 /// Task ids are UUIDs or `<agent>-<uuid>`: plain enough to embed in a
 /// shell command without quoting surprises.
-pub(crate) fn is_task_id(id: &str) -> bool {
+fn is_task_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 128
         && id
@@ -631,8 +629,9 @@ pub(crate) fn is_task_id(id: &str) -> bool {
 // ── Watcher ────────────────────────────────────────────────────────────────
 
 /// Start the snapshot watcher for `name` in the background, detached from
-/// this terminal. A second watcher for the same session exits at once (see
-/// the lock in `run_watcher`), so calling this on every open is safe.
+/// this terminal. A second watcher for the same session waits up to
+/// `LOCK_WAIT` for the lock in `run_watcher` and exits if it never gets it,
+/// so calling this on every open is safe.
 fn spawn_watcher(name: &str) -> Result<()> {
     let exe = std::env::current_exe().context("cannot locate nibble binary")?;
     let log_dir = crate::db::ensure_data_dir()?.join("logs");
@@ -668,7 +667,7 @@ fn spawn_watcher(name: &str) -> Result<()> {
 /// consecutive samples agree, so a session caught mid-teardown (panes
 /// closing one by one while it is killed) never overwrites a good snapshot.
 #[derive(Default)]
-pub(crate) struct Debounce {
+struct Debounce {
     pending: Option<Vec<MuxTab>>,
 }
 
@@ -817,12 +816,12 @@ fn record(db: &Database, name: &str, panes: &[ZellijPane], debounce: &mut Deboun
 
 /// How to bring one recorded agent back.
 #[derive(Debug, PartialEq)]
-pub(crate) struct ResumePlan {
-    pub program: PathBuf,
-    pub args: Vec<String>,
-    pub cwd: Option<PathBuf>,
+struct ResumePlan {
+    program: PathBuf,
+    args: Vec<String>,
+    cwd: Option<PathBuf>,
     /// Sandbox container to start before attaching, when it is stopped.
-    pub container: Option<String>,
+    container: Option<String>,
 }
 
 /// Work out the command that resumes `task`'s conversation.
@@ -831,7 +830,7 @@ pub(crate) struct ResumePlan {
 /// status like any other launch): Claude with `--resume <session>`, pi with
 /// `--session <file>`. Sandbox windows re-run `nibble sandbox attach` on
 /// their repo with the window's own session. Other agents are not resumable.
-pub(crate) fn plan_resume(
+fn plan_resume(
     task: &Task,
     parent: Option<&Task>,
     wrappers_dir: &Path,
@@ -915,7 +914,7 @@ pub(crate) fn plan_resume(
 /// A nibble agent wrapper is not installed: fixable by re-running
 /// install.sh, so restores stop instead of skipping the agent.
 #[derive(Debug)]
-pub(crate) struct MissingWrapper(PathBuf);
+struct MissingWrapper(PathBuf);
 
 impl std::fmt::Display for MissingWrapper {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

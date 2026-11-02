@@ -786,6 +786,13 @@ pub(crate) fn zellij_config_dir() -> PathBuf {
     )
 }
 
+/// The config file zellij loads: `ZELLIJ_CONFIG_FILE` when set, otherwise
+/// `config.kdl` in the config dir.
+pub(crate) fn resolve_config_path(file: Option<std::ffi::OsString>, dir: PathBuf) -> PathBuf {
+    file.filter(|f| !f.is_empty())
+        .map_or_else(|| dir.join("config.kdl"), PathBuf::from)
+}
+
 fn pick_zellij_config_dir(
     env_dir: Option<std::ffi::OsString>,
     home: Option<PathBuf>,
@@ -810,8 +817,7 @@ fn pick_zellij_config_dir(
 /// names (the side-by-side `nibble.kdl` install path asks users to set it).
 pub(crate) fn sidebar_is_default_layout() -> bool {
     let dir = zellij_config_dir();
-    let config_path =
-        crate::keybinds::resolve_config_path(std::env::var_os("ZELLIJ_CONFIG_FILE"), dir.clone());
+    let config_path = resolve_config_path(std::env::var_os("ZELLIJ_CONFIG_FILE"), dir.clone());
     let config = std::fs::read_to_string(config_path).ok();
     let layout = default_layout_path(config.as_deref(), &dir.join("layouts"));
     std::fs::read_to_string(layout).is_ok_and(|body| body.contains(MANAGED_MARKER))
@@ -1284,6 +1290,23 @@ layout {
 }
 "#;
         assert_eq!(SIDEBAR_LAYOUT, expected);
+    }
+
+    #[test]
+    fn config_file_env_wins_over_the_config_dir() {
+        let dir = PathBuf::from("/cfg");
+        assert_eq!(
+            resolve_config_path(Some("/other.kdl".into()), dir.clone()),
+            PathBuf::from("/other.kdl")
+        );
+        assert_eq!(
+            resolve_config_path(Some(std::ffi::OsString::new()), dir.clone()),
+            dir.join("config.kdl")
+        );
+        assert_eq!(
+            resolve_config_path(None, dir.clone()),
+            dir.join("config.kdl")
+        );
     }
 
     #[test]
