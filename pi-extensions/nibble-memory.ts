@@ -79,10 +79,13 @@ const shellQuote = (s: string): string => `'${s.replace(/'/g, "'\\''")}'`;
 // report.
 // 32 Ki UTF-16 units is at most 96 KiB of UTF-8, under the 128 KiB cap.
 const MAX_ARG_CHARS = 32 * 1024;
-const fitArg = (s: string): string =>
-	s.length <= MAX_ARG_CHARS
-		? s
-		: `${s.slice(0, MAX_ARG_CHARS)}\n… [${s.length - MAX_ARG_CHARS} more characters not captured]`;
+const fitArg = (s: string): string => {
+	if (s.length <= MAX_ARG_CHARS) return s;
+	// Never end on half of a surrogate pair, so the kept text stays valid.
+	const high = s.charCodeAt(MAX_ARG_CHARS - 1);
+	const end = high >= 0xd800 && high <= 0xdbff ? MAX_ARG_CHARS - 1 : MAX_ARG_CHARS;
+	return `${s.slice(0, end)}\n… [${s.length - end} more characters not captured]`;
+};
 
 let nibbleQueue: Promise<void> = Promise.resolve();
 const runNibble = (args: string[]): void => {
