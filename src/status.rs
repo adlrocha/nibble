@@ -181,7 +181,7 @@ fn state_mark(state: &SidebarState, color: bool) -> String {
 }
 
 /// Host-process liveness (sandbox tasks have no meaningful host pid).
-fn pid_alive(pid: i32) -> bool {
+pub(crate) fn pid_alive(pid: i32) -> bool {
     #[cfg(target_os = "linux")]
     {
         std::path::Path::new(&format!("/proc/{pid}")).exists()

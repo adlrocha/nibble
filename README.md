@@ -422,6 +422,40 @@ each agent is working on.
 
 Requires zellij ≥ 0.42 for pane jumping (`zellij action focus-pane-id`).
 
+### Recoverable zellij sessions (`nibble mux`)
+
+Start your agents inside a nibble-managed zellij session and they come back
+after you kill the session by mistake, zellij crashes, or the machine reboots:
+
+```bash
+nibble mux            # open the session named "main" (attach if it is running)
+nibble mux work       # any other name
+nibble mux work --show    # which agents nibble would bring back, per tab
+nibble mux work --forget  # drop that record (the next open starts empty)
+```
+
+While the session runs, a background watcher records which agent is in which
+tab every few seconds. An agent you close yourself drops out of the record;
+agents that die with the session stay in it. When the session is gone,
+`nibble mux NAME` rebuilds those tabs and each pane resumes its own
+conversation: Claude Code with `--resume <session>`, pi with
+`--session <file>`, sandbox agents with `nibble sandbox attach` (starting the
+container if it is stopped). When the agent exits, the pane drops to your
+shell in the same directory.
+
+To start recording a session you already have open, run `nibble mux NAME`
+inside it, where NAME is that session's name. Opening a different session
+while inside zellij is refused: detach first.
+
+What comes back: agent panes (Claude Code and pi, on the host or in a
+sandbox), grouped into their tabs, in their working directories. Panes
+without an agent (editors, servers, plain shells) are not rebuilt, and
+zellij's own saved copy of the dead session is discarded so the name can be
+reused. With no agents recorded, `nibble mux` leaves resurrection to zellij.
+Agents must have been started through the nibble wrappers or hooks (the
+default after `install.sh`) so nibble knows their pane and session. The
+watcher logs to `~/.nibble/logs/mux-NAME.log`.
+
 ---
 
 ## Status Line
@@ -519,6 +553,7 @@ Network is host-mode, so services started inside the container (e.g. `npm run de
 | `nibble sidebar` | Open the agent-status side panel in the current zellij tab |
 | `nibble sidebar --install` | Always-on sidebar: every zellij tab gets a status pane |
 | `nibble goto <task>` | Jump zellij focus to the pane hosting an agent |
+| `nibble mux [name]` | Open a named zellij session whose agents come back after a crash or reboot (`--show`, `--forget`) |
 | `nibble keybinds --install` | Add zellij keybindings (Alt a: sidebar, Alt v: vert) to `config.kdl` (or `$ZELLIJ_CONFIG_FILE`); run by `install.sh` |
 | `nibble keybinds --uninstall` | Remove nibble's section from the zellij config (bindings outside it are untouched) |
 | `nibble vert` | Open vert on the current repo, or show how to install it (the Alt v pane) |
@@ -571,6 +606,7 @@ src/
 ├── sandbox/                 # Podman sandboxes, Hermes, git worktrees
 ├── sandbox_instructions/    # AGENTS.md blocks injected into sandboxed repos
 ├── status.rs                # `nibble status` / sidebar / `report status`
+├── mux.rs                   # `nibble mux`: recoverable zellij sessions
 ├── session/                 # Session discovery, picker, transcript reading
 ├── quota_watch.rs           # Quota auto-continue daemon
 ├── usage/                   # Token usage scanning, pricing, reports

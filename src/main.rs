@@ -13,6 +13,7 @@ mod keybinds;
 mod lm;
 mod memory;
 mod models;
+mod mux;
 mod quota_watch;
 mod sandbox;
 mod session;
@@ -83,6 +84,15 @@ fn main() -> Result<()> {
         Commands::Keybinds { install, uninstall } => {
             keybinds::cmd_keybinds(install, uninstall)?;
         }
+        Commands::Mux {
+            name,
+            show,
+            forget,
+            watch,
+            resume,
+        } => {
+            mux::cmd_mux(&db, &name, show, forget, watch, resume.as_deref())?;
+        }
         Commands::Vert => {
             let code = vert::cmd_vert()?;
             if code != 0 {
@@ -112,18 +122,11 @@ fn main() -> Result<()> {
                     ppid,
                 );
                 let mut extra = HashMap::new();
-                if let Some(pane_id) = zellij_pane_id {
-                    extra.insert(
-                        "zellij_pane_id".to_string(),
-                        serde_json::Value::Number(pane_id.into()),
-                    );
-                }
-                if let Some(session) = zellij_session {
-                    extra.insert(
-                        "zellij_session_name".to_string(),
-                        serde_json::Value::String(session),
-                    );
-                }
+                // Explicit flags first; the wrapper's own zellij env fills
+                // what it did not pass (the pi wrapper sends no session).
+                models::stamp_zellij(&mut extra, zellij_pane_id, zellij_session.as_deref());
+                let (env_pane, env_session) = models::zellij_env();
+                models::stamp_zellij(&mut extra, env_pane, env_session.as_deref());
                 task.context = Some(TaskContext {
                     url: None,
                     project_path: Some(cwd),
@@ -183,9 +186,17 @@ fn main() -> Result<()> {
                 // extension (ZELLIJ_PANE_ID) so sidebar digit-jumps and
                 // `nibble goto` can focus bare-launched sessions too.
                 ctx.extra.insert(
-                    "zellij_pane_id".to_string(),
+                    models::ZELLIJ_PANE_KEY.to_string(),
                     serde_json::Value::Number(pane_id.into()),
                 );
+                // Pane ids are per session: record which one, so `nibble
+                // mux` can map this pane back to the agent.
+                if let (_, Some(session)) = models::zellij_env() {
+                    ctx.extra.insert(
+                        models::ZELLIJ_SESSION_KEY.to_string(),
+                        serde_json::Value::String(session),
+                    );
+                }
                 // The agent's own pid: graceful sessions report exited on
                 // shutdown, but a killed one never gets the chance — the
                 // pid lets collect_status_tasks reconcile it away even if

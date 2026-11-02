@@ -1121,12 +1121,17 @@ impl Database {
                 .unwrap_or_else(|| "unknown".to_string())
         );
         let mut task = Task::new(task_id.to_string(), agent, title, None, None);
+        // Agents launched without a wrapper still say where they run, so
+        // sidebar jumps and `nibble mux` can find their pane.
+        let mut extra = HashMap::new();
+        let (pane, session) = crate::models::zellij_env();
+        crate::models::stamp_zellij(&mut extra, pane, session.as_deref());
         task.context = Some(TaskContext {
             url: None,
             project_path: cwd,
             session_id: None,
             claude_session_id: None,
-            extra: HashMap::new(),
+            extra,
         });
         self.insert_task(&task)?;
         // Read back so callers see the persisted row (id, timestamps).

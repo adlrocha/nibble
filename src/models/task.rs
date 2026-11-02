@@ -179,6 +179,47 @@ impl FromStr for TaskStatus {
     }
 }
 
+/// `TaskContext::extra` key: zellij pane id hosting the agent.
+pub const ZELLIJ_PANE_KEY: &str = "zellij_pane_id";
+/// `TaskContext::extra` key: zellij session hosting the agent. Pane ids are
+/// only unique within one session, so the pair locates the agent.
+pub const ZELLIJ_SESSION_KEY: &str = "zellij_session_name";
+
+/// Record the zellij pane and session an agent runs in, without replacing
+/// values a caller already set explicitly. `nibble mux` needs both to map a
+/// session's panes back to their agents.
+pub fn stamp_zellij(
+    extra: &mut HashMap<String, serde_json::Value>,
+    pane: Option<u32>,
+    session: Option<&str>,
+) {
+    if let Some(pane) = pane {
+        extra
+            .entry(ZELLIJ_PANE_KEY.to_string())
+            .or_insert_with(|| serde_json::Value::Number(pane.into()));
+    }
+    if let Some(session) = session.filter(|s| !s.is_empty()) {
+        extra
+            .entry(ZELLIJ_SESSION_KEY.to_string())
+            .or_insert_with(|| serde_json::Value::String(session.to_string()));
+    }
+}
+
+/// The zellij pane and session of the current process, from the variables
+/// zellij sets in every pane. `(None, None)` outside zellij.
+pub fn zellij_env() -> (Option<u32>, Option<String>) {
+    if std::env::var_os("ZELLIJ").is_none() {
+        return (None, None);
+    }
+    let pane = std::env::var("ZELLIJ_PANE_ID")
+        .ok()
+        .and_then(|p| p.parse::<u32>().ok());
+    let session = std::env::var("ZELLIJ_SESSION_NAME")
+        .ok()
+        .filter(|s| !s.is_empty());
+    (pane, session)
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TaskContext {
     pub url: Option<String>,
@@ -355,6 +396,22 @@ impl CronJob {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stamp_zellij_fills_only_missing_keys() {
+        let mut extra = HashMap::new();
+        stamp_zellij(&mut extra, Some(4), Some("main"));
+        assert_eq!(extra[ZELLIJ_PANE_KEY], serde_json::json!(4));
+        assert_eq!(extra[ZELLIJ_SESSION_KEY], serde_json::json!("main"));
+
+        // Explicit values win; empty sessions and None are ignored.
+        stamp_zellij(&mut extra, Some(9), Some("work"));
+        assert_eq!(extra[ZELLIJ_PANE_KEY], serde_json::json!(4));
+        assert_eq!(extra[ZELLIJ_SESSION_KEY], serde_json::json!("main"));
+        let mut empty = HashMap::new();
+        stamp_zellij(&mut empty, None, Some(""));
+        assert!(empty.is_empty());
+    }
 
     #[test]
     fn test_task_creation() {
