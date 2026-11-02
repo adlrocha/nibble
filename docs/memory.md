@@ -184,6 +184,7 @@ author_email = "nibble@local"
 
 - **LLM extraction is disabled**: We use heuristic summarization (first user message = title, turn counts, tool list). LLM-based extraction is planned for when a reliable local model is available.
 - **Session linkage uses task IDs**: `nibble memory by-session` takes the nibble task ID, not the agent's internal session ID. This is because memories are stored by task_id.
+- **Pi captures are capped per field**: the pi/omp extension passes each capture field to `nibble` as a command-line argument, and Linux caps one argument at 128 KiB. A field longer than 32 Ki UTF-16 units (for example a whole diff piped into `pi -p`) is cut there and ends with `… [N more characters not captured]`.
 - **Pi sessions require container paths**: Pi session paths are stored as container paths; the `by-session` lookup converts them back to host paths.
 
 ## Files

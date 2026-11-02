@@ -70,15 +70,39 @@ const shellQuote = (s: string): string => `'${s.replace(/'/g, "'\\''")}'`;
 // took seconds to be accepted. The queue keeps reporting off the hot path
 // and preserves per-session ordering (so a delayed `working` can't land
 // after `completed`).
+//
+// Linux caps a single argument at 128 KiB (MAX_ARG_STRLEN) and all of them
+// at ARG_MAX, and a prompt can be far larger (a tool piping a whole diff to
+// `pi -p`). Every argument is therefore capped, and a spawn that still
+// fails is dropped: it throws synchronously (E2BIG), which used to reject
+// the queue, crash pi with an unhandled rejection and skip every later
+// report.
+// 32 Ki UTF-16 units is at most 96 KiB of UTF-8, under the 128 KiB cap.
+const MAX_ARG_CHARS = 32 * 1024;
+const fitArg = (s: string): string => {
+	if (s.length <= MAX_ARG_CHARS) return s;
+	// Never end on half of a surrogate pair, so the kept text stays valid.
+	const high = s.charCodeAt(MAX_ARG_CHARS - 1);
+	const end = high >= 0xd800 && high <= 0xdbff ? MAX_ARG_CHARS - 1 : MAX_ARG_CHARS;
+	return `${s.slice(0, end)}\n… [${s.length - end} more characters not captured]`;
+};
+
 let nibbleQueue: Promise<void> = Promise.resolve();
 const runNibble = (args: string[]): void => {
 	nibbleQueue = nibbleQueue.then(
 		() =>
 			new Promise<void>((resolve) => {
-				const child = spawn("nibble", args, {
-					stdio: "ignore",
-					env: { ...process.env, NIBBLE_AGENT_TYPE: agentType() },
-				});
+				let child: ReturnType<typeof spawn>;
+				try {
+					child = spawn("nibble", args.map(fitArg), {
+						stdio: "ignore",
+						env: { ...process.env, NIBBLE_AGENT_TYPE: agentType() },
+					});
+				} catch {
+					// Best-effort reporting: never take the agent down.
+					resolve();
+					return;
+				}
 				const timer = setTimeout(() => child.kill("SIGKILL"), 15000);
 				child.on("error", () => {
 					clearTimeout(timer);
@@ -162,7 +186,7 @@ const reportStatus = (taskId: string, state: string, message?: string): void => 
 	// runs synchronously. Everything else is queued off the hot path.
 	if (state === "exited") {
 		try {
-			execSync(`nibble ${args.map(shellQuote).join(" ")}`, {
+			execSync(`nibble ${args.map(fitArg).map(shellQuote).join(" ")}`, {
 				timeout: 5000,
 				stdio: "pipe",
 				env: { ...process.env, NIBBLE_AGENT_TYPE: agentType() },
