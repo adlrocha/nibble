@@ -57,7 +57,7 @@ pub(crate) fn cmd_keybinds(install: bool, uninstall: bool) -> Result<()> {
 
 /// The config file zellij loads: `ZELLIJ_CONFIG_FILE` when set, otherwise
 /// `config.kdl` in the config dir.
-fn resolve_config_path(file: Option<OsString>, dir: PathBuf) -> PathBuf {
+pub(crate) fn resolve_config_path(file: Option<OsString>, dir: PathBuf) -> PathBuf {
     file.filter(|f| !f.is_empty())
         .map_or_else(|| dir.join("config.kdl"), PathBuf::from)
 }

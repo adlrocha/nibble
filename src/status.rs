@@ -805,10 +805,36 @@ fn pick_zellij_config_dir(
     platform_dir.filter(|d| exists(d)).unwrap_or(home_dir)
 }
 
-/// Whether zellij's default layout is the nibble-managed sidebar layout.
+/// Whether zellij's default layout is the nibble-managed sidebar layout:
+/// `layouts/default.kdl`, or whatever `default_layout` in the zellij config
+/// names (the side-by-side `nibble.kdl` install path asks users to set it).
 pub(crate) fn sidebar_is_default_layout() -> bool {
-    std::fs::read_to_string(zellij_config_dir().join("layouts").join("default.kdl"))
-        .is_ok_and(|body| body.contains(MANAGED_MARKER))
+    let dir = zellij_config_dir();
+    let config_path =
+        crate::keybinds::resolve_config_path(std::env::var_os("ZELLIJ_CONFIG_FILE"), dir.clone());
+    let config = std::fs::read_to_string(config_path).ok();
+    let layout = default_layout_path(config.as_deref(), &dir.join("layouts"));
+    std::fs::read_to_string(layout).is_ok_and(|body| body.contains(MANAGED_MARKER))
+}
+
+/// The layout file zellij starts new sessions with, from its config body:
+/// the `default_layout` name (a file in `layouts_dir`, `.kdl` optional) or
+/// path, else `layouts_dir/default.kdl`. Commented-out lines are ignored.
+fn default_layout_path(config: Option<&str>, layouts_dir: &std::path::Path) -> PathBuf {
+    let value = config.and_then(|body| {
+        body.lines().find_map(|line| {
+            let rest = line.trim().strip_prefix("default_layout")?;
+            let rest = rest.trim_start();
+            let quoted = rest.strip_prefix('"')?;
+            quoted.split('"').next().map(str::to_string)
+        })
+    });
+    match value.filter(|v| !v.is_empty()) {
+        Some(v) if v.contains('/') => PathBuf::from(v),
+        Some(v) if v.ends_with(".kdl") => layouts_dir.join(v),
+        Some(v) => layouts_dir.join(format!("{v}.kdl")),
+        None => layouts_dir.join("default.kdl"),
+    }
 }
 
 /// Install the always-on sidebar: every tab of every new zellij session gets
@@ -1258,6 +1284,23 @@ layout {
 }
 "#;
         assert_eq!(SIDEBAR_LAYOUT, expected);
+    }
+
+    #[test]
+    fn default_layout_path_follows_the_zellij_config() {
+        let dir = std::path::Path::new("/c/layouts");
+        assert_eq!(default_layout_path(None, dir), dir.join("default.kdl"));
+        let cfg = "// default_layout \"compact\"\ntheme \"x\"\n";
+        assert_eq!(default_layout_path(Some(cfg), dir), dir.join("default.kdl"));
+        let cfg = "keybinds {}\n  default_layout \"nibble\"\n";
+        assert_eq!(default_layout_path(Some(cfg), dir), dir.join("nibble.kdl"));
+        let cfg = "default_layout \"nibble.kdl\"";
+        assert_eq!(default_layout_path(Some(cfg), dir), dir.join("nibble.kdl"));
+        let cfg = "default_layout \"/abs/my.kdl\"";
+        assert_eq!(
+            default_layout_path(Some(cfg), dir),
+            PathBuf::from("/abs/my.kdl")
+        );
     }
 
     #[test]

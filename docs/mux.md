@@ -8,7 +8,7 @@ and directory.
 ```bash
 nibble mux                # open "main": attach if running, rebuild if gone
 nibble mux work           # any other name (letters, digits, - _ .)
-nibble mux work --show    # the agents nibble would bring back, per tab
+nibble mux work --show    # the recorded agents per tab, flagging any that can't come back
 nibble mux work --forget  # drop nibble's record for "work"
 ```
 
@@ -36,8 +36,9 @@ session. The record is kept in `~/.nibble/tasks.db` (`kv_store`, key
 
 One watcher runs per session (a lock in `~/.nibble/mux/NAME.lock`). It exits
 when the session has been gone for two samples, or after about a minute of
-failed samples (e.g. zellij missing from its `PATH`), so the next
-`nibble mux NAME` can start a fresh one.
+failed samples (e.g. zellij missing from its `PATH`). A watcher started for a
+freshly rebuilt session waits up to 90 seconds for the previous one to exit,
+so reopening right after a crash is still recorded.
 
 ## What happens on open
 
@@ -50,9 +51,12 @@ failed samples (e.g. zellij missing from its `PATH`), so the next
 | missing | no | start an empty session |
 
 "Agents to restore" means recorded agents whose resume can still be planned:
-the task is in the database, the agent type is supported, and its nibble
-wrapper is installed. Anything else is reported and skipped *before* zellij's
-dead copy is deleted, so a session with nothing restorable is left to zellij.
+the task is still in the database and the agent type is supported. Others
+are reported and skipped *before* zellij's dead copy is deleted, so a session
+with nothing restorable is left to zellij. A missing nibble wrapper stops the
+restore instead, with nothing touched: run `./install.sh` and open again.
+The saved record keeps every recorded agent until the rebuilt session's
+watcher records what actually came back.
 
 Rebuilding writes a layout to `~/.nibble/mux/NAME.kdl` and starts the session
 with it. Each agent pane runs `nibble mux --resume <task-id>`, which becomes:
@@ -64,6 +68,8 @@ with it. Each agent pane runs `nibble mux --resume <task-id>`, which becomes:
 | Sandbox window | `nibble sandbox attach <repo> [--pi] --session <id>`, starting the container first if it is stopped |
 
 When the agent exits, the pane drops to your `$SHELL` in the same directory.
+A recorded directory that no longer exists (a pruned worktree, a moved repo)
+is left out, so the pane opens in zellij's default directory instead.
 The resumed agents register as new tasks, and the record moves over to them
 within a few seconds, so a second crash restores the latest conversations.
 
@@ -73,8 +79,9 @@ within a few seconds, so a second crash restores the latest conversations.
   When nibble rebuilds a session, zellij's saved copy (which would have
   restored them) is deleted so the name can be reused.
 - Rebuilt tabs use zellij's tab bar and status bar, or the nibble sidebar
-  when `nibble sidebar --install` made it your default layout. Other custom
-  default layouts are not applied to rebuilt sessions.
+  when it is your default layout (`layouts/default.kdl` from
+  `nibble sidebar --install`, or the layout zellij's `default_layout` names).
+  Other custom default layouts are not applied to rebuilt sessions.
 - `--forget` only drops nibble's record, and refuses while the session is
   running (its watcher would write the agents straight back). If zellij
   still holds a saved copy of the dead session, the next open resurrects

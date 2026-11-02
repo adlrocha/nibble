@@ -46,6 +46,7 @@ What it aims for:
 | 26 | **zellij keybinds + vert** | dx | `nibble keybinds --install` adds `Alt a` (focus/open the sidebar) and `Alt v` (`nibble vert` on the current repo) to your zellij config |
 | 27 | **Local LLM models** | experimental | `nibble lm` lists and manages local model files |
 | 28 | **Kimi backend** | experimental | `claude --kimi` (via the installed claude wrapper) points Claude Code at `KIMI_BASE_URL` / `KIMI_API_KEY` for that session |
+| 29 | **Recoverable zellij sessions** | core | `nibble mux [name]` opens a named zellij session whose Claude Code and pi agents (host and sandbox) come back after a killed session, crash or reboot: a watcher records which agent is in which tab, and a gone session is rebuilt with each pane resuming its own conversation. See [docs/mux.md](docs/mux.md) |
 
 ---
 
@@ -430,7 +431,7 @@ after you kill the session by mistake, zellij crashes, or the machine reboots:
 ```bash
 nibble mux            # open the session named "main" (attach if it is running)
 nibble mux work       # any other name
-nibble mux work --show    # which agents nibble would bring back, per tab
+nibble mux work --show    # the recorded agents, per tab (flags any that can't come back)
 nibble mux work --forget  # drop nibble's record (refused while it runs)
 ```
 
@@ -443,7 +444,8 @@ host or in a sandbox), then drops to your shell when the agent exits. Run
 
 Only agent panes are rebuilt, and zellij's own saved copy of the session is
 discarded when nibble rebuilds it. Rebuilt tabs keep the nibble sidebar if
-it is your default layout, but not other custom layouts. Details, including
+it is your default layout (`default.kdl` or zellij's `default_layout`), but
+not other custom layouts. Details, including
 what `--forget` does: [docs/mux.md](docs/mux.md).
 
 ---

@@ -847,12 +847,10 @@ fn zellij_send(task: &Task, msg: &str) -> Result<Option<&'static str>> {
     };
 
     // Is the pane still there?
-    let panes = match crate::status::list_zellij_panes(Some(session)) {
-        Ok(panes) => panes,
-        Err(crate::status::PaneListError::Gone(_)) => return Ok(None), // session gone
-        Err(crate::status::PaneListError::Failed(e)) => {
-            anyhow::bail!("listing zellij panes: {e}")
-        }
+    // Any listing failure means no reachable pane: fall back to the
+    // headless resume rather than aborting the attempt.
+    let Ok(panes) = crate::status::list_zellij_panes(Some(session)) else {
+        return Ok(None);
     };
     let alive = panes.iter().any(|p| p.id == pane_id && !p.is_plugin);
     if !alive {

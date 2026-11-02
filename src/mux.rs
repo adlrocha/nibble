@@ -40,6 +40,10 @@ const GONE_POLLS: u32 = 2;
 /// Consecutive failed samples (zellij missing, unparseable output) before
 /// the watcher gives up and releases its lock (~1 min).
 const ERROR_POLLS: u32 = 20;
+/// How long a new watcher waits for the previous one (still sampling a
+/// session that just died) to release the lock. Covers its gone-detection
+/// and its sample-error budget.
+const LOCK_WAIT: Duration = Duration::from_secs(90);
 /// The flag a restored pane passes back to nibble; see [`resume_invocation`].
 const RESUME_FLAG: &str = "--resume";
 /// kv_store key prefix for session snapshots.
@@ -162,6 +166,10 @@ fn cmd_show(db: &Database, name: &str) -> Result<()> {
                 pane.title,
                 pane.cwd.as_deref().unwrap_or("?")
             );
+            // Same check a restore runs, so --show never promises more.
+            if let Err(e) = resume_plan_for(db, &pane.task_id) {
+                println!("      won't restore: {e:#}");
+            }
         }
     }
     Ok(())
@@ -250,9 +258,12 @@ fn cmd_open(db: &Database, name: &str) -> Result<()> {
     let state = zellij_session_state(name)?;
     let manifest = load_manifest(db, name)?;
     // Only agents that can actually be resumed count: zellij's dead copy is
-    // deleted for them, so check before anything is destroyed.
+    // deleted for them, so check before anything is destroyed. A missing
+    // wrapper aborts here (fixable: nothing has been touched yet).
     let restorable = match (&manifest, state) {
-        (Some(m), ZellijState::Dead | ZellijState::Missing) => Some(restorable(db, m)),
+        (Some(m), ZellijState::Dead | ZellijState::Missing) => Some(filter_restorable(m, &|id| {
+            resume_plan_for(db, id).map(drop)
+        })?),
         (m, _) => m.clone(),
     };
     match plan_open(state, restorable.as_ref()) {
@@ -264,7 +275,7 @@ fn cmd_open(db: &Database, name: &str) -> Result<()> {
             Err(exec_zellij(&["attach", name]))
         }
         OpenPlan::Restore { discard_dead } => {
-            let mut manifest = restorable.unwrap_or_default();
+            let to_restore = restorable.unwrap_or_default();
             if discard_dead {
                 let out = Command::new("zellij")
                     .args(["delete-session", name])
@@ -277,18 +288,22 @@ fn cmd_open(db: &Database, name: &str) -> Result<()> {
                     );
                 }
             }
-            let agents: usize = manifest.tabs.iter().map(|t| t.panes.len()).sum();
+            let agents: usize = to_restore.tabs.iter().map(|t| t.panes.len()).sum();
             println!(
                 "Restoring {agents} agent(s) in {} tab(s) for mux session '{name}'...",
-                manifest.tabs.len()
+                to_restore.tabs.len()
             );
             let nibble_bin = std::env::current_exe().context("cannot locate nibble binary")?;
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
             let sidebar = crate::status::sidebar_is_default_layout();
-            let layout = render_layout(&manifest.tabs, &nibble_bin, &shell, sidebar);
+            let tabs = without_missing_dirs(&to_restore.tabs, &|p| p.exists());
+            let layout = render_layout(&tabs, &nibble_bin, &shell, sidebar);
             let layout_path = mux_dir()?.join(format!("{name}.kdl"));
             std::fs::write(&layout_path, layout)
                 .with_context(|| format!("failed to write {}", layout_path.display()))?;
+            // Keep the full record (skipped panes included) until the new
+            // session's watcher records what actually came back.
+            let mut manifest = manifest.unwrap_or_default();
             manifest.epoch = Some(Utc::now());
             save_manifest(db, name, &manifest)?;
             spawn_watcher(name)?;
@@ -314,33 +329,53 @@ fn cmd_open(db: &Database, name: &str) -> Result<()> {
     }
 }
 
-/// The recorded agents whose resume can be planned, warning about the rest
-/// (task deleted, agent not resumable, wrapper missing). Empty tabs go.
-fn restorable(db: &Database, manifest: &Manifest) -> Manifest {
-    let tabs = manifest
-        .tabs
-        .iter()
+/// The recorded agents whose resume can be planned by `plan`, warning about
+/// the rest (task deleted, agent not resumable). Empty tabs go. A missing
+/// nibble wrapper is an error instead: it is fixable, so the restore stops
+/// before zellij's dead copy is touched.
+fn filter_restorable(manifest: &Manifest, plan: &dyn Fn(&str) -> Result<()>) -> Result<Manifest> {
+    let mut tabs = Vec::new();
+    for tab in &manifest.tabs {
+        let mut panes = Vec::new();
+        for pane in &tab.panes {
+            match plan(&pane.task_id) {
+                Ok(()) => panes.push(pane.clone()),
+                Err(e) if e.downcast_ref::<MissingWrapper>().is_some() => {
+                    return Err(e.context(format!("cannot restore '{}'", pane.title)));
+                }
+                Err(e) => eprintln!("nibble: not restoring '{}': {e:#}", pane.title),
+            }
+        }
+        if !panes.is_empty() {
+            tabs.push(MuxTab {
+                name: tab.name.clone(),
+                panes,
+            });
+        }
+    }
+    Ok(Manifest {
+        tabs,
+        ..manifest.clone()
+    })
+}
+
+/// The tabs with directories that no longer exist (a pruned worktree, a
+/// moved repo) dropped from their panes, so zellij opens those panes in its
+/// default directory instead of failing to start them.
+fn without_missing_dirs(tabs: &[MuxTab], exists: &dyn Fn(&Path) -> bool) -> Vec<MuxTab> {
+    tabs.iter()
         .map(|tab| MuxTab {
             name: tab.name.clone(),
             panes: tab
                 .panes
                 .iter()
-                .filter(|pane| match resume_plan_for(db, &pane.task_id) {
-                    Ok(_) => true,
-                    Err(e) => {
-                        eprintln!("nibble: not restoring '{}': {e:#}", pane.title);
-                        false
-                    }
+                .map(|pane| MuxPane {
+                    cwd: pane.cwd.clone().filter(|c| exists(Path::new(c))),
+                    ..pane.clone()
                 })
-                .cloned()
                 .collect(),
         })
-        .filter(|tab| !tab.panes.is_empty())
-        .collect();
-    Manifest {
-        tabs,
-        ..manifest.clone()
-    }
+        .collect()
 }
 
 /// Replace this process with zellij. Only returns on failure.
@@ -662,6 +697,25 @@ fn try_lock(name: &str) -> Result<Option<WatcherLock>> {
     try_lock_in(&mux_dir()?, name)
 }
 
+/// Retry [`try_lock_in`] every `interval` until `timeout` passes.
+fn wait_for_lock(
+    dir: &Path,
+    name: &str,
+    timeout: Duration,
+    interval: Duration,
+) -> Result<Option<WatcherLock>> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Some(lock) = try_lock_in(dir, name)? {
+            return Ok(Some(lock));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(interval);
+    }
+}
+
 /// `None` when another process (a running watcher) holds the lock.
 fn try_lock_in(dir: &Path, name: &str) -> Result<Option<WatcherLock>> {
     use std::os::fd::AsRawFd;
@@ -695,8 +749,10 @@ fn log_line(name: &str, msg: &str) {
 /// until the session has been gone for `GONE_POLLS` samples (or never
 /// appeared within `STARTUP_POLLS`).
 fn run_watcher(db: &Database, name: &str) -> Result<()> {
-    let Some(_lock) = try_lock(name)? else {
-        return Ok(()); // another watcher already records this session
+    // A watcher of the session's previous incarnation may still be noticing
+    // that it died: wait for it rather than leaving the new one unrecorded.
+    let Some(_lock) = wait_for_lock(&mux_dir()?, name, LOCK_WAIT, Duration::from_secs(1))? else {
+        return Ok(()); // another watcher records this (live) session
     };
     log_line(name, "watcher started");
     let mut debounce = Debounce::default();
@@ -846,10 +902,7 @@ pub(crate) fn plan_resume(
     };
     let program = wrappers_dir.join(wrapper);
     if !exists(&program) {
-        bail!(
-            "nibble wrapper {} is missing; run ./install.sh from the nibble repo",
-            program.display()
-        );
+        return Err(MissingWrapper(program).into());
     }
     Ok(ResumePlan {
         program,
@@ -858,6 +911,23 @@ pub(crate) fn plan_resume(
         container: None,
     })
 }
+
+/// A nibble agent wrapper is not installed: fixable by re-running
+/// install.sh, so restores stop instead of skipping the agent.
+#[derive(Debug)]
+pub(crate) struct MissingWrapper(PathBuf);
+
+impl std::fmt::Display for MissingWrapper {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "nibble wrapper {} is missing; run ./install.sh from the nibble repo",
+            self.0.display()
+        )
+    }
+}
+
+impl std::error::Error for MissingWrapper {}
 
 /// Where install.sh puts the agent wrappers (`~/.nibble/wrappers`).
 fn wrappers_dir() -> Result<PathBuf> {
@@ -1270,6 +1340,85 @@ mod tests {
         assert!(try_lock_in(dir.path(), "work").unwrap().is_some());
         drop(held);
         assert!(try_lock_in(dir.path(), "main").unwrap().is_some());
+    }
+
+    #[test]
+    fn wait_for_lock_takes_over_once_the_holder_exits() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let held = try_lock_in(dir.path(), "main").unwrap();
+        let tick = Duration::from_millis(10);
+        assert!(
+            wait_for_lock(dir.path(), "main", Duration::from_millis(30), tick)
+                .unwrap()
+                .is_none()
+        );
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            drop(held);
+        });
+        assert!(
+            wait_for_lock(dir.path(), "main", Duration::from_secs(5), tick)
+                .unwrap()
+                .is_some()
+        );
+        releaser.join().unwrap();
+    }
+
+    fn one_tab(panes: &[(&str, Option<&str>)]) -> Vec<MuxTab> {
+        vec![MuxTab {
+            name: "t".into(),
+            panes: panes
+                .iter()
+                .map(|(id, cwd)| MuxPane {
+                    task_id: (*id).into(),
+                    title: (*id).into(),
+                    cwd: cwd.map(str::to_string),
+                })
+                .collect(),
+        }]
+    }
+
+    #[test]
+    fn filter_restorable_skips_unplannable_and_stops_on_missing_wrapper() {
+        let mut manifest = Manifest {
+            epoch: Some(ts(1)),
+            tabs: one_tab(&[("ok", None), ("gone", None)]),
+            ..Default::default()
+        };
+        manifest.tabs.push(MuxTab {
+            name: "only-gone".into(),
+            panes: vec![MuxPane {
+                task_id: "gone".into(),
+                title: "gone".into(),
+                cwd: None,
+            }],
+        });
+        let plan = |id: &str| -> Result<()> {
+            match id {
+                "ok" => Ok(()),
+                "nowrap" => Err(MissingWrapper(PathBuf::from("/w/pi-wrapper")).into()),
+                _ => bail!("task {id} is no longer in nibble's database"),
+            }
+        };
+        let kept = filter_restorable(&manifest, &plan).unwrap();
+        assert_eq!(ids(&kept.tabs), vec![vec!["ok"]], "empty tabs dropped");
+        assert_eq!(kept.epoch, manifest.epoch);
+
+        let with_missing = Manifest {
+            tabs: one_tab(&[("ok", None), ("nowrap", None)]),
+            ..Default::default()
+        };
+        let err = filter_restorable(&with_missing, &plan).unwrap_err();
+        assert!(format!("{err:#}").contains("install.sh"), "{err:#}");
+    }
+
+    #[test]
+    fn without_missing_dirs_clears_only_gone_directories() {
+        let tabs = one_tab(&[("a", Some("/here")), ("b", Some("/gone")), ("c", None)]);
+        let out = without_missing_dirs(&tabs, &|p| p == Path::new("/here"));
+        let cwds: Vec<_> = out[0].panes.iter().map(|p| p.cwd.as_deref()).collect();
+        assert_eq!(cwds, vec![Some("/here"), None, None]);
+        assert_eq!(ids(&out), ids(&tabs));
     }
 
     fn temp_db() -> (Database, tempfile::TempDir) {
