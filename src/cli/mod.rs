@@ -89,7 +89,8 @@ pub enum Commands {
         /// Print the recorded agent tabs instead of opening the session
         #[arg(long, conflicts_with_all = ["forget", "watch", "resume"])]
         show: bool,
-        /// Delete the recorded agent tabs (the next open starts empty)
+        /// Drop nibble's record of the session's agents (refused while the
+        /// session runs; zellij may still resurrect its own saved copy)
         #[arg(long, conflicts_with_all = ["watch", "resume"])]
         forget: bool,
         /// Internal: run the snapshot watcher for the session

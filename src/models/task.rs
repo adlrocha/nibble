@@ -185,23 +185,26 @@ pub const ZELLIJ_PANE_KEY: &str = "zellij_pane_id";
 /// only unique within one session, so the pair locates the agent.
 pub const ZELLIJ_SESSION_KEY: &str = "zellij_session_name";
 
-/// Record the zellij pane and session an agent runs in, without replacing
-/// values a caller already set explicitly. `nibble mux` needs both to map a
-/// session's panes back to their agents.
+/// Record the zellij pane and session an agent runs in (the single write
+/// path for both keys). `None` leaves a key as it is; callers decide
+/// precedence before calling, e.g. `flag.or(env)`. `nibble mux` needs both
+/// to map a session's panes back to their agents.
 pub fn stamp_zellij(
     extra: &mut HashMap<String, serde_json::Value>,
     pane: Option<u32>,
     session: Option<&str>,
 ) {
     if let Some(pane) = pane {
-        extra
-            .entry(ZELLIJ_PANE_KEY.to_string())
-            .or_insert_with(|| serde_json::Value::Number(pane.into()));
+        extra.insert(
+            ZELLIJ_PANE_KEY.to_string(),
+            serde_json::Value::Number(pane.into()),
+        );
     }
     if let Some(session) = session.filter(|s| !s.is_empty()) {
-        extra
-            .entry(ZELLIJ_SESSION_KEY.to_string())
-            .or_insert_with(|| serde_json::Value::String(session.to_string()));
+        extra.insert(
+            ZELLIJ_SESSION_KEY.to_string(),
+            serde_json::Value::String(session.to_string()),
+        );
     }
 }
 
@@ -398,18 +401,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stamp_zellij_fills_only_missing_keys() {
+    fn stamp_zellij_writes_given_values_and_keeps_the_rest() {
         let mut extra = HashMap::new();
         stamp_zellij(&mut extra, Some(4), Some("main"));
         assert_eq!(extra[ZELLIJ_PANE_KEY], serde_json::json!(4));
         assert_eq!(extra[ZELLIJ_SESSION_KEY], serde_json::json!("main"));
 
-        // Explicit values win; empty sessions and None are ignored.
+        // New values replace old ones (an agent re-reporting its pane)...
         stamp_zellij(&mut extra, Some(9), Some("work"));
-        assert_eq!(extra[ZELLIJ_PANE_KEY], serde_json::json!(4));
-        assert_eq!(extra[ZELLIJ_SESSION_KEY], serde_json::json!("main"));
+        assert_eq!(extra[ZELLIJ_PANE_KEY], serde_json::json!(9));
+        assert_eq!(extra[ZELLIJ_SESSION_KEY], serde_json::json!("work"));
+        // ...while None and empty sessions leave the stored ones alone.
+        stamp_zellij(&mut extra, None, Some(""));
+        assert_eq!(extra[ZELLIJ_PANE_KEY], serde_json::json!(9));
+        assert_eq!(extra[ZELLIJ_SESSION_KEY], serde_json::json!("work"));
         let mut empty = HashMap::new();
-        stamp_zellij(&mut empty, None, Some(""));
+        stamp_zellij(&mut empty, None, None);
         assert!(empty.is_empty());
     }
 

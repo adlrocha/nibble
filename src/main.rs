@@ -122,11 +122,14 @@ fn main() -> Result<()> {
                     ppid,
                 );
                 let mut extra = HashMap::new();
-                // Explicit flags first; the wrapper's own zellij env fills
+                // Explicit flags win; the wrapper's own zellij env fills
                 // what it did not pass (the pi wrapper sends no session).
-                models::stamp_zellij(&mut extra, zellij_pane_id, zellij_session.as_deref());
                 let (env_pane, env_session) = models::zellij_env();
-                models::stamp_zellij(&mut extra, env_pane, env_session.as_deref());
+                models::stamp_zellij(
+                    &mut extra,
+                    zellij_pane_id.or(env_pane),
+                    zellij_session.as_deref().or(env_session.as_deref()),
+                );
                 task.context = Some(TaskContext {
                     url: None,
                     project_path: Some(cwd),
@@ -185,18 +188,10 @@ fn main() -> Result<()> {
                 // Pane of the running agent — written by the pi/omp
                 // extension (ZELLIJ_PANE_ID) so sidebar digit-jumps and
                 // `nibble goto` can focus bare-launched sessions too.
-                ctx.extra.insert(
-                    models::ZELLIJ_PANE_KEY.to_string(),
-                    serde_json::Value::Number(pane_id.into()),
-                );
-                // Pane ids are per session: record which one, so `nibble
-                // mux` can map this pane back to the agent.
-                if let (_, Some(session)) = models::zellij_env() {
-                    ctx.extra.insert(
-                        models::ZELLIJ_SESSION_KEY.to_string(),
-                        serde_json::Value::String(session),
-                    );
-                }
+                // Pane ids are per session: record which one too, so
+                // `nibble mux` can map this pane back to the agent.
+                let (_, env_session) = models::zellij_env();
+                models::stamp_zellij(&mut ctx.extra, Some(pane_id), env_session.as_deref());
                 // The agent's own pid: graceful sessions report exited on
                 // shutdown, but a killed one never gets the chance — the
                 // pid lets collect_status_tasks reconcile it away even if

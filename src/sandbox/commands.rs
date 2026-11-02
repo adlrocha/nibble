@@ -1449,7 +1449,7 @@ pub(crate) fn cmd_sandbox_attach(
     if let Some(pane) = pane_id {
         if let Some(ctx) = task.context.as_mut() {
             ctx.extra.insert(
-                "zellij_pane_id".to_string(),
+                crate::models::ZELLIJ_PANE_KEY.to_string(),
                 serde_json::Value::Number(pane.into()),
             );
             let _ = db.update_task(&task);

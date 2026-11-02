@@ -431,30 +431,20 @@ after you kill the session by mistake, zellij crashes, or the machine reboots:
 nibble mux            # open the session named "main" (attach if it is running)
 nibble mux work       # any other name
 nibble mux work --show    # which agents nibble would bring back, per tab
-nibble mux work --forget  # drop that record (the next open starts empty)
+nibble mux work --forget  # drop nibble's record (refused while it runs)
 ```
 
 While the session runs, a background watcher records which agent is in which
-tab every few seconds. An agent you close yourself drops out of the record;
-agents that die with the session stay in it. When the session is gone,
-`nibble mux NAME` rebuilds those tabs and each pane resumes its own
-conversation: Claude Code with `--resume <session>`, pi with
-`--session <file>`, sandbox agents with `nibble sandbox attach` (starting the
-container if it is stopped). When the agent exits, the pane drops to your
-shell in the same directory.
+tab. An agent you close drops out of the record; agents that die with the
+session stay in it. When the session is gone, `nibble mux NAME` rebuilds those
+tabs and each pane resumes its own conversation (Claude Code and pi, on the
+host or in a sandbox), then drops to your shell when the agent exits. Run
+`nibble mux NAME` inside a session of that name to start recording it.
 
-To start recording a session you already have open, run `nibble mux NAME`
-inside it, where NAME is that session's name. Opening a different session
-while inside zellij is refused: detach first.
-
-What comes back: agent panes (Claude Code and pi, on the host or in a
-sandbox), grouped into their tabs, in their working directories. Panes
-without an agent (editors, servers, plain shells) are not rebuilt, and
-zellij's own saved copy of the dead session is discarded so the name can be
-reused. With no agents recorded, `nibble mux` leaves resurrection to zellij.
-Agents must have been started through the nibble wrappers or hooks (the
-default after `install.sh`) so nibble knows their pane and session. The
-watcher logs to `~/.nibble/logs/mux-NAME.log`.
+Only agent panes are rebuilt, and zellij's own saved copy of the session is
+discarded when nibble rebuilds it. Rebuilt tabs keep the nibble sidebar if
+it is your default layout, but not other custom layouts. Details, including
+what `--forget` does: [docs/mux.md](docs/mux.md).
 
 ---
 

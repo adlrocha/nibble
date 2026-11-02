@@ -12,7 +12,7 @@
 //! nibble mux            # open (or rebuild) the "main" session
 //! nibble mux work       # same, for a session named "work"
 //! nibble mux work --show    # print the saved snapshot
-//! nibble mux work --forget  # drop the snapshot (next open starts empty)
+//! nibble mux work --forget  # drop the snapshot (nibble rebuilds nothing)
 //! ```
 
 use anyhow::{bail, Context, Result};
@@ -27,6 +27,7 @@ use crate::db::Database;
 use crate::models::{AgentType, SandboxType, Task, TaskStatus};
 use crate::sandbox::podman::PodmanSandbox;
 use crate::sandbox::ContainerStatus;
+use crate::status::{PaneListError, ZellijPane};
 
 /// Session opened by a bare `nibble mux`.
 pub(crate) const DEFAULT_SESSION: &str = "main";
@@ -36,6 +37,11 @@ const POLL_INTERVAL: Duration = Duration::from_secs(3);
 const STARTUP_POLLS: u32 = 20;
 /// Consecutive "session not found" polls before the watcher exits.
 const GONE_POLLS: u32 = 2;
+/// Consecutive failed samples (zellij missing, unparseable output) before
+/// the watcher gives up and releases its lock (~1 min).
+const ERROR_POLLS: u32 = 20;
+/// The flag a restored pane passes back to nibble; see [`resume_invocation`].
+const RESUME_FLAG: &str = "--resume";
 /// kv_store key prefix for session snapshots.
 const KV_PREFIX: &str = "mux:";
 /// Shells whose presence as a pane's foreground process means no agent runs
@@ -72,33 +78,6 @@ pub(crate) struct MuxPane {
     pub cwd: Option<String>,
 }
 
-/// The fields of `zellij action list-panes --json` the snapshot reads.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub(crate) struct LivePane {
-    pub id: u32,
-    #[serde(default)]
-    pub is_plugin: bool,
-    #[serde(default)]
-    pub exited: bool,
-    #[serde(default)]
-    pub pane_x: u16,
-    #[serde(default)]
-    pub pane_y: u16,
-    #[serde(default)]
-    pub tab_position: u32,
-    #[serde(default)]
-    pub tab_name: String,
-    /// Command the pane was created with (the layout's resume command for
-    /// restored panes).
-    #[serde(default)]
-    pub terminal_command: Option<String>,
-    /// The pane's current foreground process.
-    #[serde(default)]
-    pub pane_command: Option<String>,
-    #[serde(default)]
-    pub pane_cwd: Option<String>,
-}
-
 // ── Entry point ────────────────────────────────────────────────────────────
 
 /// `nibble mux` dispatcher. Exactly one mode runs: resume a pane, run the
@@ -122,9 +101,7 @@ pub(crate) fn cmd_mux(
         return cmd_show(db, name);
     }
     if forget {
-        db.kv_delete(&kv_key(name))?;
-        println!("Forgot the snapshot for mux session '{name}'.");
-        return Ok(());
+        return cmd_forget(db, name);
     }
     cmd_open(db, name)
 }
@@ -187,6 +164,23 @@ fn cmd_show(db: &Database, name: &str) -> Result<()> {
             );
         }
     }
+    Ok(())
+}
+
+/// Drop the record, refusing while a watcher still records the session: it
+/// would write the agents straight back within seconds.
+fn cmd_forget(db: &Database, name: &str) -> Result<()> {
+    let Some(_lock) = try_lock(name)? else {
+        bail!(
+            "mux session '{name}' is running and being recorded. Close the agents you \
+             don't want back (or the session) first"
+        );
+    };
+    db.kv_delete(&kv_key(name))?;
+    println!(
+        "Forgot the record for mux session '{name}'. nibble won't rebuild its agents; \
+         zellij may still resurrect its own saved copy."
+    );
     Ok(())
 }
 
@@ -255,7 +249,13 @@ fn cmd_open(db: &Database, name: &str) -> Result<()> {
 
     let state = zellij_session_state(name)?;
     let manifest = load_manifest(db, name)?;
-    match plan_open(state, manifest.as_ref()) {
+    // Only agents that can actually be resumed count: zellij's dead copy is
+    // deleted for them, so check before anything is destroyed.
+    let restorable = match (&manifest, state) {
+        (Some(m), ZellijState::Dead | ZellijState::Missing) => Some(restorable(db, m)),
+        (m, _) => m.clone(),
+    };
+    match plan_open(state, restorable.as_ref()) {
         OpenPlan::Attach => {
             if manifest.is_none() {
                 save_manifest(db, name, &Manifest::default())?;
@@ -264,7 +264,7 @@ fn cmd_open(db: &Database, name: &str) -> Result<()> {
             Err(exec_zellij(&["attach", name]))
         }
         OpenPlan::Restore { discard_dead } => {
-            let mut manifest = manifest.unwrap_or_default();
+            let mut manifest = restorable.unwrap_or_default();
             if discard_dead {
                 let out = Command::new("zellij")
                     .args(["delete-session", name])
@@ -284,7 +284,8 @@ fn cmd_open(db: &Database, name: &str) -> Result<()> {
             );
             let nibble_bin = std::env::current_exe().context("cannot locate nibble binary")?;
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-            let layout = render_layout(&manifest.tabs, &nibble_bin, &shell);
+            let sidebar = crate::status::sidebar_is_default_layout();
+            let layout = render_layout(&manifest.tabs, &nibble_bin, &shell, sidebar);
             let layout_path = mux_dir()?.join(format!("{name}.kdl"));
             std::fs::write(&layout_path, layout)
                 .with_context(|| format!("failed to write {}", layout_path.display()))?;
@@ -310,6 +311,35 @@ fn cmd_open(db: &Database, name: &str) -> Result<()> {
                 Err(exec_zellij(&["attach", "--create", name]))
             }
         }
+    }
+}
+
+/// The recorded agents whose resume can be planned, warning about the rest
+/// (task deleted, agent not resumable, wrapper missing). Empty tabs go.
+fn restorable(db: &Database, manifest: &Manifest) -> Manifest {
+    let tabs = manifest
+        .tabs
+        .iter()
+        .map(|tab| MuxTab {
+            name: tab.name.clone(),
+            panes: tab
+                .panes
+                .iter()
+                .filter(|pane| match resume_plan_for(db, &pane.task_id) {
+                    Ok(_) => true,
+                    Err(e) => {
+                        eprintln!("nibble: not restoring '{}': {e:#}", pane.title);
+                        false
+                    }
+                })
+                .cloned()
+                .collect(),
+        })
+        .filter(|tab| !tab.panes.is_empty())
+        .collect();
+    Manifest {
+        tabs,
+        ..manifest.clone()
     }
 }
 
@@ -356,31 +386,44 @@ pub(crate) fn parse_session_state(listing: &str, name: &str) -> ZellijState {
 
 // ── Layout ─────────────────────────────────────────────────────────────────
 
+/// Tab template for rebuilt sessions without the nibble sidebar: zellij's
+/// stock tab bar and status bar.
+const BARS_TAB_TEMPLATE: &str = "    default_tab_template {
+        pane size=1 borderless=true {
+            plugin location=\"zellij:tab-bar\"
+        }
+        children
+        pane size=2 borderless=true {
+            plugin location=\"zellij:status-bar\"
+        }
+    }
+";
+
 /// A zellij layout that recreates every recorded tab, each agent pane
 /// running `nibble mux --resume <task>` in its old directory, then dropping
 /// to the user's shell once the agent exits (as if it had been started from
-/// that shell).
-pub(crate) fn render_layout(tabs: &[MuxTab], nibble_bin: &Path, shell: &str) -> String {
-    let mut out = String::from(
-        "// generated by `nibble mux` — rebuilt agent tabs\n\
-         layout {\n    \
-             default_tab_template {\n        \
-                 pane size=1 borderless=true {\n            \
-                     plugin location=\"zellij:tab-bar\"\n        \
-                 }\n        \
-                 children\n        \
-                 pane size=2 borderless=true {\n            \
-                     plugin location=\"zellij:status-bar\"\n        \
-                 }\n    \
-             }\n",
-    );
+/// that shell). With `sidebar`, tabs get the template `nibble sidebar
+/// --install` puts in the default layout (an explicit layout replaces it);
+/// other custom default layouts are not carried over.
+pub(crate) fn render_layout(
+    tabs: &[MuxTab],
+    nibble_bin: &Path,
+    shell: &str,
+    sidebar: bool,
+) -> String {
+    let mut out = String::from("// generated by `nibble mux` — rebuilt agent tabs\nlayout {\n");
+    out.push_str(if sidebar {
+        crate::status::SIDEBAR_TAB_TEMPLATE
+    } else {
+        BARS_TAB_TEMPLATE
+    });
     let bin = sh_quote(&nibble_bin.to_string_lossy());
     for tab in tabs {
         out.push_str(&format!("    tab name={} {{\n", kdl_str(&tab.name)));
         for pane in &tab.panes {
             let script = format!(
-                "{bin} mux --resume {}; exec {}",
-                sh_quote(&pane.task_id),
+                "{}; exec {}",
+                resume_invocation(&bin, &pane.task_id),
                 sh_quote(shell)
             );
             let cwd = pane
@@ -399,6 +442,12 @@ pub(crate) fn render_layout(tabs: &[MuxTab], nibble_bin: &Path, shell: &str) -> 
     }
     out.push_str("}\n");
     out
+}
+
+/// The shell text a restored pane runs: `'<bin>' mux --resume '<id>'`.
+/// [`resume_target`] reads the id back out of it, so the two must agree.
+fn resume_invocation(quoted_bin: &str, task_id: &str) -> String {
+    format!("{quoted_bin} mux {RESUME_FLAG} {}", sh_quote(task_id))
 }
 
 /// A KDL string literal.
@@ -431,15 +480,16 @@ fn sh_quote(s: &str) -> String {
 /// A pane counts as an agent pane when a task registered in it (same zellij
 /// session and pane id, registered after `epoch`) is still alive, or when it
 /// is a restored pane whose resume command has not registered its agent
-/// yet. Panes whose (known) foreground process is a plain shell hold no agent.
+/// yet. Panes whose (known) foreground process is a plain shell hold no agent,
+/// and only agents `nibble mux` can resume are recorded.
 pub(crate) fn snapshot(
-    panes: &[LivePane],
+    panes: &[ZellijPane],
     tasks: &[Task],
     session: &str,
     epoch: Option<DateTime<Utc>>,
     pid_alive: &dyn Fn(i32) -> bool,
 ) -> Vec<MuxTab> {
-    let mut rows: Vec<(&LivePane, MuxPane)> = Vec::new();
+    let mut rows: Vec<(&ZellijPane, MuxPane)> = Vec::new();
     for pane in panes.iter().filter(|p| !p.is_plugin && !p.exited) {
         // For a pane started with a command (restored panes), zellij keeps
         // reporting that launch command, so only a pane_command that
@@ -450,7 +500,7 @@ pub(crate) fn snapshot(
         }
         let in_pane = |t: &&Task| {
             t.sandbox_type != SandboxType::Podman
-                && task_session(t) == Some(session)
+                && crate::status::session_of(t) == Some(session)
                 && crate::status::pane_id_of(t) == Some(pane.id)
                 // Whole seconds: the DB truncates created_at.
                 && epoch.is_none_or(|e| t.created_at.timestamp() >= e.timestamp())
@@ -472,7 +522,9 @@ pub(crate) fn snapshot(
                 }
             }
         };
-        rows.push((pane, mux_pane(task, pane)));
+        if resumable_agent(&task.agent_type) {
+            rows.push((pane, mux_pane(task, pane)));
+        }
     }
     rows.sort_by_key(|(p, _)| (p.tab_position, p.pane_x, p.pane_y));
 
@@ -493,7 +545,7 @@ pub(crate) fn snapshot(
     tabs
 }
 
-fn mux_pane(task: &Task, pane: &LivePane) -> MuxPane {
+fn mux_pane(task: &Task, pane: &ZellijPane) -> MuxPane {
     MuxPane {
         task_id: task.task_id.clone(),
         title: task.title.clone(),
@@ -505,12 +557,9 @@ fn mux_pane(task: &Task, pane: &LivePane) -> MuxPane {
     }
 }
 
-fn task_session(task: &Task) -> Option<&str> {
-    task.context
-        .as_ref()?
-        .extra
-        .get(crate::models::ZELLIJ_SESSION_KEY)?
-        .as_str()
+/// Agents `plan_resume` knows how to bring back.
+pub(crate) fn resumable_agent(agent: &AgentType) -> bool {
+    matches!(agent, AgentType::ClaudeCode | AgentType::Pi)
 }
 
 /// Whether a pane's foreground command is a plain shell.
@@ -522,10 +571,11 @@ pub(crate) fn is_shell(command: &str) -> bool {
     SHELLS.contains(&base.trim_start_matches('-'))
 }
 
-/// The task id in a restored pane's command (`... mux --resume '<id>'; ...`).
+/// The task id in a restored pane's command, as written by
+/// [`resume_invocation`] (`... mux --resume '<id>'; ...`).
 pub(crate) fn resume_target(command: &str) -> Option<String> {
     let mut words = command.split_whitespace();
-    words.find(|w| *w == "--resume")?;
+    words.find(|w| *w == RESUME_FLAG)?;
     let id = words
         .next()?
         .trim_end_matches(';')
@@ -579,34 +629,6 @@ fn spawn_watcher(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Result of sampling a session's panes.
-enum Sample {
-    Panes(Vec<LivePane>),
-    Gone,
-    Error(String),
-}
-
-fn sample_panes(name: &str) -> Sample {
-    let out = match Command::new("zellij")
-        .args(["--session", name, "action", "list-panes", "--all", "--json"])
-        .output()
-    {
-        Ok(o) => o,
-        Err(e) => return Sample::Error(format!("zellij: {e}")),
-    };
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        if err.contains("not found") || err.contains("No active") {
-            return Sample::Gone;
-        }
-        return Sample::Error(err.trim().to_string());
-    }
-    match serde_json::from_slice(&out.stdout) {
-        Ok(panes) => Sample::Panes(panes),
-        Err(e) => Sample::Error(format!("unparseable pane list: {e}")),
-    }
-}
-
 /// Debounces snapshots: a new set of agent tabs is committed only once two
 /// consecutive samples agree, so a session caught mid-teardown (panes
 /// closing one by one while it is killed) never overwrites a good snapshot.
@@ -637,8 +659,13 @@ struct WatcherLock {
 }
 
 fn try_lock(name: &str) -> Result<Option<WatcherLock>> {
+    try_lock_in(&mux_dir()?, name)
+}
+
+/// `None` when another process (a running watcher) holds the lock.
+fn try_lock_in(dir: &Path, name: &str) -> Result<Option<WatcherLock>> {
     use std::os::fd::AsRawFd;
-    let path = mux_dir()?.join(format!("{name}.lock"));
+    let path = dir.join(format!("{name}.lock"));
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -675,16 +702,18 @@ fn run_watcher(db: &Database, name: &str) -> Result<()> {
     let mut debounce = Debounce::default();
     let mut seen = false;
     let mut misses = 0u32;
+    let mut errors = 0u32;
     loop {
-        match sample_panes(name) {
-            Sample::Panes(panes) => {
+        match crate::status::list_zellij_panes(Some(name)) {
+            Ok(panes) => {
                 seen = true;
                 misses = 0;
+                errors = 0;
                 if let Err(e) = record(db, name, &panes, &mut debounce) {
                     log_line(name, &format!("snapshot failed: {e:#}"));
                 }
             }
-            Sample::Gone => {
+            Err(PaneListError::Gone(_)) => {
                 misses += 1;
                 debounce.reset();
                 let limit = if seen { GONE_POLLS } else { STARTUP_POLLS };
@@ -693,16 +722,22 @@ fn run_watcher(db: &Database, name: &str) -> Result<()> {
                     return Ok(());
                 }
             }
-            Sample::Error(e) => {
+            Err(PaneListError::Failed(e)) => {
+                errors += 1;
                 debounce.reset();
                 log_line(name, &format!("sample failed: {e}"));
+                // Release the lock so the next `nibble mux` can take over.
+                if errors >= ERROR_POLLS {
+                    log_line(name, "sampling keeps failing; watcher exiting");
+                    return Ok(());
+                }
             }
         }
         std::thread::sleep(POLL_INTERVAL);
     }
 }
 
-fn record(db: &Database, name: &str, panes: &[LivePane], debounce: &mut Debounce) -> Result<()> {
+fn record(db: &Database, name: &str, panes: &[ZellijPane], debounce: &mut Debounce) -> Result<()> {
     let mut manifest = load_manifest(db, name)?.unwrap_or_default();
     let tasks = db.list_tasks()?;
     let tabs = snapshot(
@@ -824,18 +859,14 @@ pub(crate) fn plan_resume(
     })
 }
 
-/// Where install.sh puts the agent wrappers (`$NIBBLE_WRAPPERS_DIR`
-/// overrides).
+/// Where install.sh puts the agent wrappers (`~/.nibble/wrappers`).
 fn wrappers_dir() -> Result<PathBuf> {
-    match std::env::var_os("NIBBLE_WRAPPERS_DIR") {
-        Some(dir) if !dir.is_empty() => Ok(PathBuf::from(dir)),
-        _ => Ok(crate::db::ensure_data_dir()?.join("wrappers")),
-    }
+    Ok(crate::db::ensure_data_dir()?.join("wrappers"))
 }
 
-/// `nibble mux --resume <task>`: run in a restored pane, replaced by the
-/// agent it resumes.
-fn cmd_resume(db: &Database, task_id: &str) -> Result<()> {
+/// Look up a recorded task (and its sandbox, for sandbox windows) and plan
+/// its resume against the real filesystem.
+fn resume_plan_for(db: &Database, task_id: &str) -> Result<(Task, ResumePlan)> {
     if !is_task_id(task_id) {
         bail!("invalid task id '{task_id}'");
     }
@@ -862,6 +893,13 @@ fn cmd_resume(db: &Database, task_id: &str) -> Result<()> {
         &nibble_bin,
         &|p| p.exists(),
     )?;
+    Ok((task, plan))
+}
+
+/// `nibble mux --resume <task>`: run in a restored pane, replaced by the
+/// agent it resumes.
+fn cmd_resume(db: &Database, task_id: &str) -> Result<()> {
+    let (task, plan) = resume_plan_for(db, task_id)?;
 
     if let Some(container) = &plan.container {
         start_container_if_stopped(container);
@@ -920,8 +958,8 @@ mod tests {
         t
     }
 
-    fn pane(id: u32, tab: u32, x: u16, command: Option<&str>) -> LivePane {
-        LivePane {
+    fn pane(id: u32, tab: u32, x: u16, command: Option<&str>) -> ZellijPane {
+        ZellijPane {
             id,
             tab_position: tab,
             tab_name: format!("Tab {tab}"),
@@ -1172,17 +1210,115 @@ mod tests {
                 },
             ],
         }];
-        let kdl = render_layout(&tabs, Path::new("/b/nib ble"), "/bin/zsh");
+        let kdl = render_layout(&tabs, Path::new("/b/nib ble"), "/bin/zsh", false);
         assert!(kdl.contains("tab name=\"Tab \\\"1\\\"\" {"));
         assert!(kdl.contains("pane name=\"[nibble:main]\" command=\"/bin/zsh\" cwd=\"/w/it's\" {"));
         assert!(kdl.contains("args \"-c\" \"'/b/nib ble' mux --resume 't1'; exec '/bin/zsh'\""));
         assert!(kdl.contains("pane name=\"x\" command=\"/bin/zsh\" {"));
         assert!(kdl.contains("zellij:tab-bar"));
+        assert!(!kdl.contains("status\" \"--watch"));
         // The snapshot can read its own resume command back.
         assert_eq!(
             resume_target("/bin/zsh -c '/b/nib ble' mux --resume 't1'; exec '/bin/zsh'").as_deref(),
             Some("t1")
         );
+        let invocation = resume_invocation(&sh_quote("/b/nib ble"), "claude-1a2b");
+        assert_eq!(resume_target(&invocation).as_deref(), Some("claude-1a2b"));
+    }
+
+    #[test]
+    fn render_layout_keeps_the_nibble_sidebar_when_installed() {
+        let tabs = vec![MuxTab {
+            name: "t".into(),
+            panes: vec![MuxPane {
+                task_id: "t1".into(),
+                title: "x".into(),
+                cwd: None,
+            }],
+        }];
+        let kdl = render_layout(&tabs, Path::new("/n"), "/bin/sh", true);
+        assert!(kdl.contains(crate::status::SIDEBAR_TAB_TEMPLATE));
+        assert!(!kdl.contains("zellij:tab-bar"));
+        assert!(kdl.contains("mux --resume 't1'"));
+    }
+
+    #[test]
+    fn snapshot_records_only_resumable_agents() {
+        let tasks = vec![
+            task("omp", AgentType::Omp, "main", 1, 0),
+            task("hermes", AgentType::Hermes, "main", 2, 0),
+            task("pi", AgentType::Pi, "main", 3, 0),
+        ];
+        let panes = vec![
+            pane(1, 0, 0, Some("omp")),
+            pane(2, 0, 5, Some("podman")),
+            pane(3, 0, 9, Some("pi")),
+        ];
+        assert_eq!(
+            ids(&snapshot(&panes, &tasks, "main", None, ALIVE)),
+            vec![vec!["pi"]]
+        );
+    }
+
+    #[test]
+    fn watcher_lock_is_exclusive_per_session() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let held = try_lock_in(dir.path(), "main").unwrap();
+        assert!(held.is_some());
+        // flock is per open file description: a second open is refused.
+        assert!(try_lock_in(dir.path(), "main").unwrap().is_none());
+        assert!(try_lock_in(dir.path(), "work").unwrap().is_some());
+        drop(held);
+        assert!(try_lock_in(dir.path(), "main").unwrap().is_some());
+    }
+
+    fn temp_db() -> (Database, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = Database::open(dir.path().join("t.db")).unwrap();
+        (db, dir)
+    }
+
+    #[test]
+    fn record_commits_stable_samples_and_keeps_the_epoch() {
+        let (db, _dir) = temp_db();
+        // Pane 1 holds a task from a previous incarnation of the session;
+        // pane 2 an agent registered after the session was (re)created.
+        let stale = task("stale", AgentType::ClaudeCode, "main", 1, 0);
+        let mut fresh = task("fresh", AgentType::ClaudeCode, "main", 2, 0);
+        db.insert_task(&stale).unwrap();
+        db.insert_task(&fresh).unwrap();
+        fresh = db.get_task_by_id("fresh").unwrap().unwrap();
+        let epoch = fresh.created_at - chrono::Duration::seconds(1);
+        // The stale row predates the epoch.
+        let mut old = db.get_task_by_id("stale").unwrap().unwrap();
+        old.created_at = epoch - chrono::Duration::hours(1);
+        db.delete_task_by_id("stale").unwrap();
+        db.insert_task(&old).unwrap();
+        let start = Manifest {
+            epoch: Some(epoch),
+            ..Default::default()
+        };
+        save_manifest(&db, "main", &start).unwrap();
+
+        let panes = vec![pane(1, 0, 0, Some("claude")), pane(2, 0, 5, Some("claude"))];
+        let mut debounce = Debounce::default();
+        record(&db, "main", &panes, &mut debounce).unwrap();
+        assert_eq!(
+            load_manifest(&db, "main").unwrap().unwrap(),
+            start,
+            "one sample commits nothing"
+        );
+
+        record(&db, "main", &panes, &mut debounce).unwrap();
+        let saved = load_manifest(&db, "main").unwrap().unwrap();
+        assert_eq!(ids(&saved.tabs), vec![vec!["fresh"]], "stale pane ignored");
+        assert_eq!(saved.epoch, Some(epoch), "epoch survives a commit");
+        let committed_at = saved.updated_at.expect("commit stamps updated_at");
+
+        // Unchanged samples leave the record (and its timestamp) alone.
+        record(&db, "main", &panes, &mut debounce).unwrap();
+        let again = load_manifest(&db, "main").unwrap().unwrap();
+        assert_eq!(again.updated_at, Some(committed_at));
     }
 
     #[test]

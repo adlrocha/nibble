@@ -433,9 +433,19 @@ pub(crate) fn pane_id_of(task: &Task) -> Option<u32> {
     task.context
         .as_ref()?
         .extra
-        .get("zellij_pane_id")?
+        .get(crate::models::ZELLIJ_PANE_KEY)?
         .as_u64()
         .and_then(|v| u32::try_from(v).ok())
+}
+
+/// The zellij session the task's pane belongs to (pane ids are only unique
+/// within a session).
+pub(crate) fn session_of(task: &Task) -> Option<&str> {
+    task.context
+        .as_ref()?
+        .extra
+        .get(crate::models::ZELLIJ_SESSION_KEY)?
+        .as_str()
 }
 
 /// Rename the zellij pane the caller is running in to the given title, so
@@ -725,10 +735,11 @@ fn stdin_keys(timeout_ms: i32) -> Result<Vec<u8>, ()> {
     }
 }
 
-/// The zellij layout managed by `nibble sidebar --install`.
-const SIDEBAR_LAYOUT: &str = r#"// managed by nibble — sidebar on every tab. Remove with: nibble sidebar --uninstall
-layout {
-    default_tab_template {
+/// The tab template of the sidebar layout, shared with the layouts
+/// `nibble mux` generates so rebuilt tabs keep the sidebar.
+macro_rules! sidebar_tab_template {
+    () => {
+        r#"    default_tab_template {
         pane split_direction="vertical" {
             pane size="22%" name="agents" {
                 command "nibble"
@@ -737,8 +748,20 @@ layout {
             children
         }
     }
+"#
+    };
 }
-"#;
+
+/// See [`sidebar_tab_template`].
+pub(crate) const SIDEBAR_TAB_TEMPLATE: &str = sidebar_tab_template!();
+
+/// The zellij layout managed by `nibble sidebar --install`.
+const SIDEBAR_LAYOUT: &str = concat!(
+    "// managed by nibble — sidebar on every tab. Remove with: nibble sidebar --uninstall\n",
+    "layout {\n",
+    sidebar_tab_template!(),
+    "}\n"
+);
 
 const MANAGED_MARKER: &str = "// managed by nibble";
 
@@ -780,6 +803,12 @@ fn pick_zellij_config_dir(
         return home_dir;
     }
     platform_dir.filter(|d| exists(d)).unwrap_or(home_dir)
+}
+
+/// Whether zellij's default layout is the nibble-managed sidebar layout.
+pub(crate) fn sidebar_is_default_layout() -> bool {
+    std::fs::read_to_string(zellij_config_dir().join("layouts").join("default.kdl"))
+        .is_ok_and(|body| body.contains(MANAGED_MARKER))
 }
 
 /// Install the always-on sidebar: every tab of every new zellij session gets
@@ -1214,6 +1243,35 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_layout_is_unchanged_by_the_shared_template() {
+        let expected = r#"// managed by nibble — sidebar on every tab. Remove with: nibble sidebar --uninstall
+layout {
+    default_tab_template {
+        pane split_direction="vertical" {
+            pane size="22%" name="agents" {
+                command "nibble"
+                args "status" "--watch"
+            }
+            children
+        }
+    }
+}
+"#;
+        assert_eq!(SIDEBAR_LAYOUT, expected);
+    }
+
+    #[test]
+    fn session_read_from_context_extra() {
+        let mut t = task();
+        assert_eq!(session_of(&t), None);
+        let mut ctx = crate::models::TaskContext::default();
+        crate::models::stamp_zellij(&mut ctx.extra, Some(3), Some("work"));
+        t.context = Some(ctx);
+        assert_eq!(session_of(&t), Some("work"));
+        assert_eq!(pane_id_of(&t), Some(3));
+    }
+
+    #[test]
     fn pane_id_read_from_context_extra() {
         let mut t = task();
         assert_eq!(pane_id_of(&t), None, "no context → no pane");
@@ -1241,9 +1299,8 @@ mod tests {
             }
             .into(),
             pane_columns: 80,
-            pane_x: 0,
             tab_id,
-            pane_command: None,
+            ..Default::default()
         };
         let panes = [pane(6, 2, true), pane(6, 3, false)];
         assert_eq!(terminal_pane_tab(&panes, 6), Some(3), "terminal pane's tab");
@@ -1303,41 +1360,93 @@ fn shrink_args(pane_id: &str, border: &str) -> Vec<String> {
     resize_args(pane_id, "decrease", border)
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct ZellijPane {
-    id: u32,
+/// One pane from `zellij action list-panes --all --json`: the single typed
+/// view of that output, shared by the sidebar, `nibble goto`, quota-watch
+/// and the `nibble mux` watcher.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub(crate) struct ZellijPane {
+    pub(crate) id: u32,
     #[serde(default)]
-    is_plugin: bool,
+    pub(crate) is_plugin: bool,
+    /// The pane's process has exited (zellij keeps the pane open).
     #[serde(default)]
-    title: String,
+    pub(crate) exited: bool,
     #[serde(default)]
-    pane_columns: u16,
+    pub(crate) title: String,
     #[serde(default)]
-    pane_x: u16,
+    pub(crate) pane_columns: u16,
     #[serde(default)]
-    tab_id: u32,
+    pub(crate) pane_x: u16,
     #[serde(default)]
-    pane_command: Option<String>,
+    pub(crate) pane_y: u16,
+    #[serde(default)]
+    pub(crate) tab_id: u32,
+    #[serde(default)]
+    pub(crate) tab_position: u32,
+    #[serde(default)]
+    pub(crate) tab_name: String,
+    /// Command the pane was created with (e.g. a layout's command pane);
+    /// `None` for a plain shell pane.
+    #[serde(default)]
+    pub(crate) terminal_command: Option<String>,
+    /// The pane's foreground process for shell panes. For command panes
+    /// zellij keeps reporting `terminal_command` here.
+    #[serde(default)]
+    pub(crate) pane_command: Option<String>,
+    #[serde(default)]
+    pub(crate) pane_cwd: Option<String>,
+}
+
+/// Why listing a session's panes failed.
+#[derive(Debug, PartialEq)]
+pub(crate) enum PaneListError {
+    /// The session does not exist (or is dead).
+    Gone(String),
+    /// zellij could not be run, failed otherwise, or printed unparseable JSON.
+    Failed(String),
+}
+
+/// List the panes of `session`, or of the session this process runs in
+/// when `None`.
+pub(crate) fn list_zellij_panes(
+    session: Option<&str>,
+) -> std::result::Result<Vec<ZellijPane>, PaneListError> {
+    let mut cmd = std::process::Command::new("zellij");
+    if let Some(name) = session {
+        cmd.args(["--session", name]);
+    }
+    let output = cmd
+        .args(["action", "list-panes", "--all", "--json"])
+        .output()
+        .map_err(|e| PaneListError::Failed(format!("zellij not available ({e})")))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(
+            if detail.contains("not found") || detail.contains("No active") {
+                PaneListError::Gone(detail)
+            } else {
+                PaneListError::Failed(detail)
+            },
+        );
+    }
+    serde_json::from_slice(&output.stdout)
+        .map_err(|e| PaneListError::Failed(format!("could not parse zellij pane list: {e}")))
 }
 
 fn zellij_panes() -> Result<Vec<ZellijPane>> {
-    let output = std::process::Command::new("zellij")
-        .args(["action", "list-panes", "--all", "--json"])
-        .output()
-        .context("zellij not available. Run `nibble status --watch` in a narrow pane.")?;
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr);
-        let detail = err.trim();
-        anyhow::bail!(
+    list_zellij_panes(None).map_err(|e| {
+        let detail = match e {
+            PaneListError::Gone(d) | PaneListError::Failed(d) => d,
+        };
+        anyhow::anyhow!(
             "Not inside zellij{}. Run `nibble status --watch` in a pane you size yourself.",
             if detail.is_empty() {
                 String::new()
             } else {
                 format!(" ({detail})")
             }
-        );
-    }
-    serde_json::from_slice(&output.stdout).context("could not parse zellij pane list")
+        )
+    })
 }
 
 fn current_tab_id(panes: &[ZellijPane]) -> Option<u32> {
