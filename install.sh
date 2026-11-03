@@ -733,6 +733,14 @@ if grep -q "AGENT_TASK_ID" "$CLAUDE_SETTINGS" 2>/dev/null; then
     fi
 fi
 
+# Prune the discontinued Baselight MCP entry left behind by older installs.
+if [ -f "$CLAUDE_SETTINGS" ] && command -v jq >/dev/null 2>&1 \
+    && jq -e '.mcpServers.baselight' "$CLAUDE_SETTINGS" >/dev/null 2>&1; then
+    jq 'del(.mcpServers.baselight)' "$CLAUDE_SETTINGS" > "$CLAUDE_SETTINGS.tmp" \
+        && mv "$CLAUDE_SETTINGS.tmp" "$CLAUDE_SETTINGS" \
+        && ok "Removed discontinued Baselight MCP entry from $CLAUDE_SETTINGS"
+fi
+
 bash "$REPO_DIR/scripts/setup-claude-hooks.sh"
 
 # ── 6b. Zellij keybindings ───────────────────────────────────────────────────
