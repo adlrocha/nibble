@@ -4,13 +4,15 @@
 # Usage:
 #   ./uninstall.sh               # remove everything
 #   ./uninstall.sh --keep-config  # keep ~/.nibble/ and ~/.claude/ settings
+#
+# Installed with the one-command install, it is in the source checkout:
+#   bash ~/.local/share/nibble/src/uninstall.sh
 
 set -e
 
 BOLD='\033[1m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-RED='\033[0;31m'
 NC='\033[0m'
 
 BIN_DIR="$HOME/.local/bin"
@@ -155,7 +157,7 @@ for skills_dir in "$HOME/.claude/skills" "$HOME/.nibble/skills" "$HOME/.pi/agent
     [ -d "$skills_dir" ] || continue
     for skill in $NIBBLE_SKILLS $STALE_SKILLS; do
         if [ -d "$skills_dir/$skill" ]; then
-            rm -rf "$skills_dir/$skill"
+            rm -rf "${skills_dir:?}/$skill"
             ok "Removed $skills_dir/$skill"
         fi
     done
@@ -209,6 +211,40 @@ else
     warn "Keeping $HOME/.nibble/ (--keep-config)"
 fi
 
+# ── 9b. Remove the one-command install's source checkout ─────────────────────
+# Only a checkout install.sh cloned itself (it carries the marker) is
+# deleted; a clone you work in is never touched, even if NIBBLE_SRC_DIR
+# points at it. Deleting the checkout this script runs from is fine: bash
+# already has the script open.
+# The checkout to remove: the one this script is in when install.sh created
+# it (so a custom NIBBLE_SRC_DIR is found without setting it again), else
+# NIBBLE_SRC_DIR or its default.
+SELF="${BASH_SOURCE[0]}"
+while [ -L "$SELF" ]; do
+    LINK="$(readlink "$SELF")"
+    case "$LINK" in
+        /*) SELF="$LINK" ;;
+        *) SELF="$(dirname "$SELF")/$LINK" ;;
+    esac
+done
+SELF_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+# Whether this nibble came from the one-command install, for the reinstall
+# hint at the end; a clone's own install.sh otherwise.
+INSTALLED_BY_PIPE=false
+if [ -f "$SELF_DIR/.git/nibble-installer-managed" ]; then
+    NIBBLE_SRC_DIR="$SELF_DIR"
+    INSTALLED_BY_PIPE=true
+else
+    NIBBLE_SRC_DIR="${NIBBLE_SRC_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/nibble/src}"
+fi
+if [ -f "$NIBBLE_SRC_DIR/.git/nibble-installer-managed" ]; then
+    rm -rf "${NIBBLE_SRC_DIR:?}"
+    rmdir "$(dirname "$NIBBLE_SRC_DIR")" 2>/dev/null || true
+    ok "Removed the source checkout $NIBBLE_SRC_DIR/"
+elif [ -e "$NIBBLE_SRC_DIR" ]; then
+    warn "Keeping $NIBBLE_SRC_DIR/ (not created by install.sh)"
+fi
+
 # ── 10. Remind about shell aliases ───────────────────────────────────────────
 SHELL_RC=""
 [ -f "$HOME/.zshrc" ]  && SHELL_RC="$HOME/.zshrc"
@@ -227,4 +263,9 @@ fi
 echo ""
 echo -e "${BOLD}${GREEN}Done!${NC} nibble has been uninstalled."
 echo ""
-echo "  Reinstall anytime with: ./install.sh"
+echo "  Reinstall anytime with:"
+if [ "$INSTALLED_BY_PIPE" = true ]; then
+    echo "    curl -fsSL https://raw.githubusercontent.com/adlrocha/nibble/main/install.sh | bash"
+else
+    echo "    $(printf '%q' "$SELF_DIR/install.sh")"
+fi

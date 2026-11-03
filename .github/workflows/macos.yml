@@ -20,8 +20,17 @@ jobs:
       - name: Build and test
         run: cargo test
 
-      - name: Run install.sh
-        run: ./install.sh </dev/null
+      - name: Installer tests (one-command install)
+        run: tests/install_test.sh
+
+      # The one-command install (`curl … | bash`), fetching this commit: it
+      # clones into ~/.local/share/nibble/src and runs that checkout's
+      # install.sh, so the whole installer runs too.
+      - name: Run install.sh through a pipe
+        run: |
+          git branch --force ci-head HEAD
+          NIBBLE_REPO_URL="file://$GITHUB_WORKSPACE" NIBBLE_REF=ci-head bash -s <install.sh
+          test -d ~/.local/share/nibble/src/.git
 
       - name: Smoke-test the installed binary
         env:

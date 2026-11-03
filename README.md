@@ -21,7 +21,7 @@ What it aims for:
 | 1 | **Podman Sandboxes** | core | Per-repo rootless containers; repo mounted RW; `sleep infinity` PID 1; `podman exec` for attach |
 | 2 | **Session Continuity** | core | Deterministic session UUID per repo; resume across detach/reboot; `--fresh` to start over |
 | 3 | **Task DB** | core | SQLite backend tracking all tasks (sandboxed + non-sandboxed), states (running/completed/exited), session IDs |
-| 4 | **Install script** | core | `install.sh` — builds binary, installs Podman if absent, builds sandbox image, wires Claude hooks |
+| 4 | **Install script** | core | `install.sh` — one-command install and update (fetches the source when piped from `curl`), builds binary, installs Podman if absent, builds sandbox image, wires Claude hooks |
 | 5 | **Claude Code hooks** | core | Stop hook → `nibble report session-id` + `nibble notify`; claude and omp wrappers register host-run agents as tasks at startup so the sidebar tracks them too |
 | 6 | **Setup scripts** | dx | `.nibble/setup.sh` in any repo — auto-runs at spawn to install toolchain before first attach |
 | 7 | **Git worktrees** | dx | `--branch` flag on spawn/attach/kill — creates/cleans up a worktree automatically per branch |
@@ -102,12 +102,47 @@ Podman is installed automatically by `install.sh` if not present.
 ### Install
 
 ```bash
-git clone <repo-url>
-cd nibble
-
-# Full install (builds binary, installs podman if needed, builds sandbox image)
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/adlrocha/nibble/main/install.sh | bash
 ```
+
+This clones the source to `~/.local/share/nibble/src` and runs its
+`install.sh`, which builds the binary, installs Podman if needed and builds the
+sandbox image (see below). Prompts, like the memory setup wizard, still read
+from your terminal.
+
+**To update,** run the same command again. It fetches the latest `main` into
+that checkout and re-runs the install. The install is made to be repeated (it
+is also how `./install.sh` upgrades): binaries, wrappers, skills, extensions
+and services are replaced in place.
+
+Options go through the pipe with `bash -s --`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/adlrocha/nibble/main/install.sh | bash -s -- --rebuild
+```
+
+| Option / env var                 | Default                       | Purpose                                   |
+| -------------------------------- | ----------------------------- | ----------------------------------------- |
+| `--ref REF` / `NIBBLE_REF`       | `main`                        | Branch or tag to install                  |
+| `--rebuild`                      | —                             | Rebuild the sandbox image from scratch    |
+| `--browser`                      | —                             | Set up the Chromium CDP integration       |
+| `--recover ZIP`                  | —                             | Restore from a backup after installing    |
+| `NIBBLE_SRC_DIR`                 | `~/.local/share/nibble/src`, or `$XDG_DATA_HOME/nibble/src` when that is set | Where the source is kept |
+| `NIBBLE_REPO_URL`                | this repository on GitHub     | Repository to fetch from                  |
+
+`--ref` and `NIBBLE_REF` only apply to this one-command install; from a clone,
+check out the ref you want instead. The installer only ever updates a
+checkout it cloned itself, so pointing `NIBBLE_SRC_DIR` at a clone you work
+in is refused rather than reset.
+
+**To uninstall,** run `uninstall.sh` from the source checkout:
+`bash ~/.local/share/nibble/src/uninstall.sh` by default (the directory from
+the table above if you changed it), or `./uninstall.sh` in a clone. It also
+deletes the checkout the one-command install created.
+
+**From a clone,** for development: `./install.sh` (same flags, except
+`--ref`) builds and installs that checkout as it is. Don't mix the two on one
+machine without care: whichever ran last is what's installed.
 
 After install, add aliases to your shell if prompted:
 
@@ -118,6 +153,9 @@ alias claude='~/.agent-tasks/wrappers/claude-wrapper'
 
 What `install.sh` does:
 
+0. When piped (`curl … | bash`): clones or updates the source in
+   `~/.local/share/nibble/src` and runs that checkout's `install.sh`, which
+   does the rest
 1. Installs Podman if not present (apt / dnf / pacman / brew)
 2. Builds release binaries with `cargo build --release`
 3. Installs `nibble` to `~/.local/bin/`
@@ -144,7 +182,7 @@ nibble sandbox spawn /path/to/repo --task "Fix the authentication bug"
 ```
 
 On first run the sandbox image is built (~2-3 min). Subsequent spawns are fast.
-To rebuild the image (e.g. after upgrading nibble): `./install.sh --rebuild`
+To rebuild the image (e.g. after upgrading nibble), re-run the installer with `--rebuild` (see [Install](#install)).
 
 The container gets:
 
@@ -301,7 +339,7 @@ Hermes Agent is a long-running coding agent with a gateway daemon. Unlike per-re
 
 ```bash
 # Build and install nibble (includes hermes image build on first use)
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/adlrocha/nibble/main/install.sh | bash
 
 # Make sure ~/.hermes/ is configured with your LLM provider
 hermes setup
@@ -471,7 +509,7 @@ nibble installs a Claude Code status line that shows live context and quota info
 
 **Install behaviour:**
 
-- The script is always copied to `~/.claude/statusline-command.sh` on each `./install.sh` run (safe to upgrade)
+- The script is always copied to `~/.claude/statusline-command.sh` on each install or update (safe to upgrade)
 - The `statusLine` key is added to `~/.claude/settings.json` only if one is **not already present** — existing custom status lines are left untouched
 - To opt out: remove or replace the `statusLine` key in `~/.claude/settings.json` after install; future installs will not overwrite it
 
@@ -574,15 +612,16 @@ Network is host-mode, so services started inside the container (e.g. `npm run de
 | `nibble hermes unmount <path>` | Unmount a repo from the Hermes sandbox |
 | `nibble hermes list` | Show Hermes sandbox status and mounted repos |
 | `nibble hermes kill` | Stop Hermes sandbox (repos preserved) |
-| `./install.sh --rebuild` | Rebuild sandbox image |
-| `install.sh` | Install / upgrade |
+| `curl -fsSL https://raw.githubusercontent.com/adlrocha/nibble/main/install.sh \| bash` | Install / update (see [Install](#install)) |
+| `… \| bash -s -- --rebuild` | Update and rebuild the sandbox image |
 
 ---
 
 ## Development
 
 ```bash
-cargo test          # run all tests
+cargo test               # unit and integration tests
+tests/install_test.sh    # install.sh / uninstall.sh end-to-end (no real install)
 cargo build         # dev build
 cargo build --release
 ```
