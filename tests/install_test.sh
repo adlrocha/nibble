@@ -28,13 +28,17 @@ pass() {
 skip() { echo "skip - $*"; }
 
 PREAMBLE="$(sed '/^# ── Parse flags/,$d' "$INSTALLER")"
-grep -q 'fetch_and_install "\$@"' <<<"$PREAMBLE" || fail "install.sh preamble not found"
+# The cut must end after the hints and before any install step, or the stub
+# below would run real install steps.
+{ grep -q '^RERUN=' <<<"$PREAMBLE" && ! grep -q '^step "Checking prerequisites"' <<<"$PREAMBLE"; } \
+    || fail "install.sh preamble split changed: expected RERUN= before '# ── Parse flags'"
 
 UPSTREAM="$WORK/upstream"
 git init --quiet --initial-branch=main "$UPSTREAM"
 git -C "$UPSTREAM" config user.email test@example.com
 git -C "$UPSTREAM" config user.name test
 printf '[package]\nname = "nibble"\n' >"$UPSTREAM/Cargo.toml"
+cp "$ROOT/uninstall.sh" "$UPSTREAM/uninstall.sh"
 # Commits an install.sh that reports as version $1.
 write_stub() {
     {
@@ -141,6 +145,8 @@ if piped --ref no-such-ref; then fail "a missing ref succeeded"; fi
 grep -q "could not fetch no-such-ref" "$WORK/out" || fail "missing ref message: $(cat "$WORK/out")"
 if piped --ref; then fail "--ref without a value succeeded"; fi
 grep -q -- "--ref needs a branch or tag" "$WORK/out" || fail "--ref message: $(cat "$WORK/out")"
+if piped --ref --rebuild; then fail "--ref took a flag as its value"; fi
+grep -q -- "--ref needs a branch or tag" "$WORK/out" || fail "--ref flag message: $(cat "$WORK/out")"
 [ ! -e "$RECORD" ] || fail "an installer ran after a failed fetch"
 pass "a bad ref fails before anything is installed"
 
@@ -177,16 +183,35 @@ if bash "$INSTALLER" --ref v1 </dev/null >"$WORK/out" 2>&1; then fail "--ref fro
 grep -q -- "--ref only applies to the one-command install" "$WORK/out" || fail "checkout --ref: $(cat "$WORK/out")"
 if NIBBLE_REF=v1 bash "$INSTALLER" </dev/null >"$WORK/out" 2>&1; then fail "NIBBLE_REF from a checkout succeeded"; fi
 grep -q "NIBBLE_REF only applies to the one-command install" "$WORK/out" || fail "checkout NIBBLE_REF: $(cat "$WORK/out")"
-pass "--ref and NIBBLE_REF from a checkout are refused"
+if NIBBLE_REF=v1 bash "$NIBBLE_SRC_DIR/install.sh" </dev/null >"$WORK/out" 2>&1; then
+    fail "a hand-set NIBBLE_REF in the managed checkout succeeded"
+fi
+grep -q "NIBBLE_REF only applies to the one-command install" "$WORK/out" || fail "managed NIBBLE_REF: $(cat "$WORK/out")"
+pass "--ref and NIBBLE_REF from a checkout are refused, the managed one too"
+
+# Run through a symlink, it installs the checkout the link points into
+# (shown here by refusing NIBBLE_REF instead of fetching); a copy outside
+# any crate is refused.
+mkdir -p "$WORK/bin" "$WORK/lonely"
+ln -s "$INSTALLER" "$WORK/bin/install.sh"
+rm -f "$RECORD"
+if (cd "$WORK" && NIBBLE_REF=v1 bash bin/install.sh </dev/null >"$WORK/out" 2>&1); then fail "symlinked run fetched"; fi
+grep -q "NIBBLE_REF only applies" "$WORK/out" || fail "symlinked run: $(cat "$WORK/out")"
+cp "$INSTALLER" "$WORK/lonely/install.sh"
+if bash "$WORK/lonely/install.sh" </dev/null >"$WORK/out" 2>&1; then fail "a copy outside a checkout ran"; fi
+grep -q "is not a nibble checkout" "$WORK/out" || fail "lonely copy: $(cat "$WORK/out")"
+[ ! -e "$RECORD" ] || fail "a symlinked or stray installer fetched"
+pass "a symlinked installer resolves its checkout; a stray copy is refused"
 
 # uninstall.sh deletes the managed checkout and nothing else. It runs with a
 # throwaway HOME and stubs for the commands that reach system state.
 STUBS="$WORK/stubs"
 mkdir -p "$STUBS" "$WORK/home"
 for cmd in systemctl podman nibble; do printf '#!/bin/sh\nexit 0\n' >"$STUBS/$cmd" && chmod +x "$STUBS/$cmd"; done
+# Runs uninstall.sh ($1, default this repository's) like a user would.
 uninstall() {
     env -u XDG_DATA_HOME -u XDG_CONFIG_HOME HOME="$WORK/home" PATH="$STUBS:$PATH" \
-        bash "$ROOT/uninstall.sh" </dev/null >"$WORK/out" 2>&1
+        bash "${1:-$ROOT/uninstall.sh}" </dev/null >"$WORK/out" 2>&1
 }
 [ -f "$NIBBLE_SRC_DIR/.git/nibble-installer-managed" ] || fail "no managed checkout to uninstall"
 uninstall || fail "uninstall: $(cat "$WORK/out")"
@@ -200,5 +225,14 @@ uninstall || fail "uninstall with a clone: $(cat "$WORK/out")"
 [ -f "$NIBBLE_SRC_DIR/Cargo.toml" ] || fail "uninstall deleted a clone it didn't create"
 grep -q "not created by install.sh" "$WORK/out" || fail "keep message: $(cat "$WORK/out")"
 pass "uninstall.sh removes the managed checkout and keeps any other"
+
+# A checkout installed to a custom NIBBLE_SRC_DIR is removed by its own
+# uninstall.sh without setting the variable again.
+export NIBBLE_SRC_DIR="$WORK/custom/src"
+piped || fail "custom install: $(cat "$WORK/out")"
+unset NIBBLE_SRC_DIR
+uninstall "$WORK/custom/src/uninstall.sh" || fail "custom uninstall: $(cat "$WORK/out")"
+[ ! -e "$WORK/custom/src" ] || fail "uninstall left a checkout in a custom NIBBLE_SRC_DIR"
+pass "uninstall.sh finds a custom checkout from where it runs"
 
 echo "all $PASSED install tests passed"

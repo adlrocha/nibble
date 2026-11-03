@@ -35,6 +35,7 @@ die()  { echo -e "  ${RED}✗${NC} $1" >&2; exit 1; }
 DEFAULT_REPO_URL="https://github.com/adlrocha/nibble.git"
 DEFAULT_SRC_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/nibble/src"
 RAW_INSTALLER="https://raw.githubusercontent.com/adlrocha/nibble/main/install.sh"
+ONE_LINE="curl -fsSL $RAW_INSTALLER | bash"
 # Whether NIBBLE_REF came from the caller (it only means something to the
 # one-command install), before it gets its default.
 REF_FROM_ENV="${NIBBLE_REF:+yes}"
@@ -50,13 +51,20 @@ is_nibble_checkout() {
     [ -f "$1/Cargo.toml" ] && grep -q '^name = "nibble"$' "$1/Cargo.toml"
 }
 
-# The checkout this script is a file of, or nothing when it came through a
-# pipe (then BASH_SOURCE is empty, whatever the current directory is).
-script_checkout() {
-    local self="${BASH_SOURCE[0]:-}" dir
+# The directory this script really lives in (symlinks followed), or nothing
+# when it came through a pipe: then BASH_SOURCE is empty or not a regular
+# file, whatever the current directory is.
+script_dir() {
+    local self="${BASH_SOURCE[0]:-}" link
     { [ -n "$self" ] && [ -f "$self" ]; } || return 0
-    dir="$(cd "$(dirname "$self")" && pwd)"
-    if is_nibble_checkout "$dir"; then echo "$dir"; fi
+    while [ -L "$self" ]; do
+        link="$(readlink "$self")"
+        case "$link" in
+            /*) self="$link" ;;
+            *) self="$(dirname "$self")/$link" ;;
+        esac
+    done
+    (cd "$(dirname "$self")" && pwd)
 }
 
 # The one-command install with the same repository, checkout and ref as this
@@ -80,7 +88,7 @@ fetch_and_install() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --ref)
-                [ -n "${2:-}" ] || die "--ref needs a branch or tag"
+                { [ -n "${2:-}" ] && [ "${2#-}" = "$2" ]; } || die "--ref needs a branch or tag"
                 NIBBLE_REF="$2"
                 shift 2
                 ;;
@@ -109,8 +117,10 @@ fetch_and_install() {
     commit="$(git -C "$NIBBLE_SRC_DIR" rev-parse --short HEAD)"
     ok "$NIBBLE_REF at $commit in $NIBBLE_SRC_DIR"
     # The installer below prints how to run it again; it needs the same
-    # source and ref for that.
-    export NIBBLE_REPO_URL NIBBLE_REF NIBBLE_SRC_DIR
+    # source and ref for that. _NIBBLE_FETCHED_REF tells it the ref was
+    # really checked out, rather than set by hand.
+    _NIBBLE_FETCHED_REF="$NIBBLE_REF"
+    export NIBBLE_REPO_URL NIBBLE_REF NIBBLE_SRC_DIR _NIBBLE_FETCHED_REF
     # stdin is this script's pipe; give the installer the terminal instead so
     # its prompts work, or nothing when there is no terminal.
     if (exec </dev/tty) 2>/dev/null; then
@@ -119,17 +129,23 @@ fetch_and_install() {
     exec bash "$NIBBLE_SRC_DIR/install.sh" ${args[@]+"${args[@]}"} </dev/null
 }
 
-REPO_DIR="$(script_checkout)"
+REPO_DIR="$(script_dir)"
 # One line, so a pipe that broke mid-download can't run half the installer.
 if [ -z "$REPO_DIR" ]; then fetch_and_install "$@"; fi
+# Run as a file, it installs the tree it is in, whatever the package is
+# called (a fork may rename it), but never something that isn't a crate.
+[ -f "$REPO_DIR/Cargo.toml" ] \
+    || die "$REPO_DIR is not a nibble checkout; run install.sh from one, or install with: $ONE_LINE"
+# A ref only means something when the one-command install fetched it.
+if [ -n "$REF_FROM_ENV" ] && [ "${_NIBBLE_FETCHED_REF:-}" != "$NIBBLE_REF" ]; then
+    die "NIBBLE_REF only applies to the one-command install; in a checkout, check out the ref and re-run"
+fi
 
 # How to run this installer again, for the hints below: the one-command form
 # for the checkout it manages, ./install.sh for any other clone.
 if [ -f "$REPO_DIR/$MANAGED_MARKER" ]; then
     rerun_with() { one_command "$@"; }
 else
-    [ -z "$REF_FROM_ENV" ] \
-        || die "NIBBLE_REF only applies to the one-command install; in a checkout, check out the ref and re-run"
     rerun_with() { echo "./install.sh${1:+ $*}"; }
 fi
 RERUN="$(rerun_with)"

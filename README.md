@@ -126,7 +126,7 @@ curl -fsSL https://raw.githubusercontent.com/adlrocha/nibble/main/install.sh | b
 | `--rebuild`                      | —                             | Rebuild the sandbox image from scratch    |
 | `--browser`                      | —                             | Set up the Chromium CDP integration       |
 | `--recover ZIP`                  | —                             | Restore from a backup after installing    |
-| `NIBBLE_SRC_DIR`                 | `~/.local/share/nibble/src`   | Where the source is kept                  |
+| `NIBBLE_SRC_DIR`                 | `~/.local/share/nibble/src`, or `$XDG_DATA_HOME/nibble/src` when that is set | Where the source is kept |
 | `NIBBLE_REPO_URL`                | this repository on GitHub     | Repository to fetch from                  |
 
 `--ref` and `NIBBLE_REF` only apply to this one-command install; from a clone,
@@ -134,9 +134,10 @@ check out the ref you want instead. The installer only ever updates a
 checkout it cloned itself, so pointing `NIBBLE_SRC_DIR` at a clone you work
 in is refused rather than reset.
 
-**To uninstall,** run `bash ~/.local/share/nibble/src/uninstall.sh` (or
-`./uninstall.sh` in a clone). It also deletes the checkout the one-command
-install created.
+**To uninstall,** run `uninstall.sh` from the source checkout:
+`bash ~/.local/share/nibble/src/uninstall.sh` by default (the directory from
+the table above if you changed it), or `./uninstall.sh` in a clone. It also
+deletes the checkout the one-command install created.
 
 **From a clone,** for development: `./install.sh` (same flags, except
 `--ref`) builds and installs that checkout as it is. Don't mix the two on one

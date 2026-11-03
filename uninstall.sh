@@ -216,7 +216,23 @@ fi
 # deleted; a clone you work in is never touched, even if NIBBLE_SRC_DIR
 # points at it. Deleting the checkout this script runs from is fine: bash
 # already has the script open.
-NIBBLE_SRC_DIR="${NIBBLE_SRC_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/nibble/src}"
+# The checkout to remove: the one this script is in when install.sh created
+# it (so a custom NIBBLE_SRC_DIR is found without setting it again), else
+# NIBBLE_SRC_DIR or its default.
+SELF="${BASH_SOURCE[0]}"
+while [ -L "$SELF" ]; do
+    LINK="$(readlink "$SELF")"
+    case "$LINK" in
+        /*) SELF="$LINK" ;;
+        *) SELF="$(dirname "$SELF")/$LINK" ;;
+    esac
+done
+SELF_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+if [ -f "$SELF_DIR/.git/nibble-installer-managed" ]; then
+    NIBBLE_SRC_DIR="$SELF_DIR"
+else
+    NIBBLE_SRC_DIR="${NIBBLE_SRC_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/nibble/src}"
+fi
 if [ -f "$NIBBLE_SRC_DIR/.git/nibble-installer-managed" ]; then
     rm -rf "${NIBBLE_SRC_DIR:?}"
     rmdir "$(dirname "$NIBBLE_SRC_DIR")" 2>/dev/null || true
