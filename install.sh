@@ -1,9 +1,18 @@
 #!/bin/bash
 # install.sh — build and install nibble end-to-end
 #
-# Usage:
+# Install or update with one command, from anywhere:
+#   curl -fsSL https://raw.githubusercontent.com/adlrocha/nibble/main/install.sh | bash
+#
+# Piped like that, the script fetches the source into
+# ~/.local/share/nibble/src (cloning it the first time, updating it after),
+# then runs that checkout's install.sh. Run from a checkout, it installs that
+# checkout:
 #   ./install.sh                    # full install / upgrade
 #   ./install.sh --recover backup.zip  # install fresh then restore from backup
+#
+# Options go through the pipe with `bash -s --`, e.g.
+#   curl -fsSL …/install.sh | bash -s -- --ref v1.2.0 --rebuild
 
 set -e
 
@@ -13,7 +22,6 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 BIN_DIR="$HOME/.local/bin"
 WRAPPERS_DIR="$HOME/.nibble/wrappers"
 CLAUDE_SETTINGS="$HOME/.claude/settings.json"
@@ -23,6 +31,79 @@ ok()   { echo -e "  ${GREEN}✓${NC} $1"; }
 warn() { echo -e "  ${YELLOW}!${NC} $1"; }
 die()  { echo -e "  ${RED}✗${NC} $1" >&2; exit 1; }
 
+# ── 0. Fetch the source (one-command install) ────────────────────────────────
+NIBBLE_REPO_URL="${NIBBLE_REPO_URL:-https://github.com/adlrocha/nibble.git}"
+NIBBLE_REF="${NIBBLE_REF:-main}"
+NIBBLE_SRC_DIR="${NIBBLE_SRC_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/nibble/src}"
+ONE_COMMAND="curl -fsSL https://raw.githubusercontent.com/adlrocha/nibble/main/install.sh | bash"
+
+is_nibble_checkout() {
+    [ -f "$1/Cargo.toml" ] && grep -q '^name = "nibble"$' "$1/Cargo.toml"
+}
+
+# The checkout this script is a file of, or nothing when it came through a
+# pipe (then BASH_SOURCE is empty, whatever the current directory is).
+script_checkout() {
+    local self="${BASH_SOURCE[0]:-}" dir
+    { [ -n "$self" ] && [ -f "$self" ]; } || return 0
+    dir="$(cd "$(dirname "$self")" && pwd)"
+    if is_nibble_checkout "$dir"; then echo "$dir"; fi
+}
+
+# Clones or updates the managed checkout at NIBBLE_REF, then hands over to
+# its install.sh with the remaining arguments. Never returns.
+fetch_and_install() {
+    local args=() commit
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --ref)
+                [ -n "${2:-}" ] || die "--ref needs a branch or tag"
+                NIBBLE_REF="$2"
+                shift 2
+                ;;
+            *) args+=("$1"); shift ;;
+        esac
+    done
+    command -v git >/dev/null 2>&1 \
+        || die "git is required. Install it with your package manager (on macOS: xcode-select --install)."
+    step "Fetching nibble ($NIBBLE_REF)"
+    if [ -d "$NIBBLE_SRC_DIR/.git" ]; then
+        git -C "$NIBBLE_SRC_DIR" remote set-url origin "$NIBBLE_REPO_URL"
+        git -C "$NIBBLE_SRC_DIR" fetch --quiet --depth 1 origin "$NIBBLE_REF" \
+            || die "could not fetch $NIBBLE_REF from $NIBBLE_REPO_URL"
+        git -C "$NIBBLE_SRC_DIR" checkout --quiet --force FETCH_HEAD \
+            || die "could not check out $NIBBLE_REF in $NIBBLE_SRC_DIR"
+    elif [ -e "$NIBBLE_SRC_DIR" ]; then
+        die "$NIBBLE_SRC_DIR exists but is not a git checkout; move it away or set NIBBLE_SRC_DIR"
+    else
+        mkdir -p "$(dirname "$NIBBLE_SRC_DIR")"
+        git clone --quiet --depth 1 --branch "$NIBBLE_REF" "$NIBBLE_REPO_URL" "$NIBBLE_SRC_DIR" \
+            || die "could not clone $NIBBLE_REF from $NIBBLE_REPO_URL"
+    fi
+    is_nibble_checkout "$NIBBLE_SRC_DIR" || die "$NIBBLE_REPO_URL ($NIBBLE_REF) is not a nibble repository"
+    commit="$(git -C "$NIBBLE_SRC_DIR" rev-parse --short HEAD)"
+    ok "$NIBBLE_REF at $commit in $NIBBLE_SRC_DIR"
+    # stdin is this script's pipe; give the installer the terminal instead so
+    # its prompts work, or nothing when there is no terminal.
+    if (exec </dev/tty) 2>/dev/null; then
+        exec bash "$NIBBLE_SRC_DIR/install.sh" ${args[@]+"${args[@]}"} </dev/tty
+    fi
+    exec bash "$NIBBLE_SRC_DIR/install.sh" ${args[@]+"${args[@]}"} </dev/null
+}
+
+REPO_DIR="$(script_checkout)"
+# One line, so a pipe that broke mid-download can't run half the installer.
+if [ -z "$REPO_DIR" ]; then fetch_and_install "$@"; fi
+
+# How to run this installer again, for the hints below.
+if [ "$REPO_DIR" = "$(cd "$NIBBLE_SRC_DIR" 2>/dev/null && pwd)" ]; then
+    RERUN="$ONE_COMMAND"
+    rerun_with() { echo "curl -fsSL https://raw.githubusercontent.com/adlrocha/nibble/main/install.sh | bash -s -- $1"; }
+else
+    RERUN="./install.sh"
+    rerun_with() { echo "./install.sh $1"; }
+fi
+
 # ── Parse flags ───────────────────────────────────────────────────────────────
 RUN_BROWSER=false
 REBUILD_IMAGE=false
@@ -31,6 +112,7 @@ RECOVER_ZIP=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --browser)    RUN_BROWSER=true; shift ;;
+        --ref)        die "--ref only applies to the one-command install; in a checkout, check out the ref and re-run" ;;
         --rebuild)    REBUILD_IMAGE=true; shift ;;
         --recover)
             if [ -z "${2:-}" ] || [ "${2#-}" != "$2" ]; then
@@ -48,6 +130,7 @@ echo ""
 echo "  Flags: --browser        set up Chromium CDP integration for agents"
 echo "         --rebuild        force rebuild the sandbox container image"
 echo "         --recover        restore from a backup zip after install"
+echo "         --ref REF        branch or tag to install (one-command install only)"
 echo ""
 [ "$REBUILD_IMAGE" = true ] && echo -e "  ${YELLOW}--rebuild${NC}: sandbox image will be rebuilt from scratch"
 if [ -n "$RECOVER_ZIP" ]; then
@@ -204,16 +287,15 @@ elif command -v musl-gcc >/dev/null 2>&1; then
 else
     warn "musl-gcc not found — skipping static build (install: sudo pacman -S musl)"
     warn "In-container hooks won't have a working nibble binary until this is built."
-    warn "After installing musl, re-run: ./install.sh"
+    warn "After installing musl, re-run: $RERUN"
 fi
 
 # ── 3. Install binaries ───────────────────────────────────────────────────────
 step "Installing binaries to $BIN_DIR"
 
 # Also stop the web UI so we can overwrite the binary if it's running.
-WEB_WAS_ACTIVE=false
+# (It is restarted unconditionally further down, in 5d.)
 if systemctl --user is-active --quiet nibble-web.service 2>/dev/null; then
-    WEB_WAS_ACTIVE=true
     if command -v timeout >/dev/null 2>&1; then
         timeout 5 systemctl --user stop nibble-web.service 2>/dev/null || true
     else
@@ -304,11 +386,11 @@ done
 # Targeted (not a blanket purge) so third-party skills in ~/.claude/skills are kept.
 for stale in factory-pipeline factory-spec factory-verify factory-qa-gate factory-lessons fable5-emulation; do
     for dest in "$CLAUDE_SKILLS_DIR" "$NIBBLE_SKILLS_DIR" "$PI_SKILLS_DIR"; do
-        [ -d "$dest/$stale" ] && rm -rf "$dest/$stale" && ok "removed stale skill: $stale"
+        [ -d "$dest/$stale" ] && rm -rf "${dest:?}/$stale" && ok "removed stale skill: $stale"
     done
 done
 if [ ! -d "$HOME/.pi" ]; then
-    warn "~/.pi/ not found — skills staged in ~/.nibble/skills/ only"
+    warn "$HOME/.pi/ not found — skills staged in $HOME/.nibble/skills/ only"
 fi
 
 # ── 4b. Install Pi extensions ─────────────────────────────────────────────────
@@ -343,7 +425,7 @@ for ext_file in "$REPO_DIR/pi-extensions/"*.ts; do
     fi
 done
 if [ ! -d "$HOME/.pi" ]; then
-    warn "~/.pi/ not found — extensions staged in ~/.nibble/extensions/ only"
+    warn "$HOME/.pi/ not found — extensions staged in $HOME/.nibble/extensions/ only"
     warn "  (will be installed automatically when you spawn a Pi sandbox)"
 fi
 
@@ -433,7 +515,7 @@ else
     if [ "$(uname -s)" = "Darwin" ]; then
         warn "On macOS podman runs in a VM; start it first: podman machine init && podman machine start"
     fi
-    warn "Retry with: ./install.sh --rebuild"
+    warn "Retry with: $(rerun_with --rebuild)"
 fi
 
 # ── 5b. Hermes sandbox image ──────────────────────────────────────────────────
@@ -880,7 +962,7 @@ else
     else
         echo ""
         warn "Chromium CDP integration not set up. Enable with:"
-        warn "  ./install.sh --browser"
+        warn "  $(rerun_with --browser)"
     fi
 fi
 
@@ -900,6 +982,7 @@ echo ""
 echo -e "${BOLD}${GREEN}Done!${NC} Restart Claude Code for hooks to take effect."
 echo ""
 echo "  Verify:      nibble --help"
+echo "  Update:      $RERUN"
 echo ""
 echo -e "${BOLD}Sandbox usage:${NC}"
 echo "  Start agent:  nibble sandbox spawn /path/to/repo"
@@ -907,7 +990,7 @@ echo "  List agents:  nibble sandbox list"
 echo "  Attach:       nibble sandbox attach <task-id>"
 echo "  Kill agent:   nibble sandbox kill <task-id>"
 echo "  Watch:        nibble watch"
-echo "  Rebuild img:  ./install.sh --rebuild"
+echo "  Rebuild img:  $(rerun_with --rebuild)"
 echo ""
 echo -e "${BOLD}Hermes usage:${NC}"
 echo "  Start:        nibble hermes init"
@@ -928,5 +1011,5 @@ echo ""
 echo -e "${BOLD}Backup usage:${NC}"
 echo "  Backup:       nibble backup"
 echo "  Import:       nibble import <backup.zip>"
-echo "  Recover:      ./install.sh --recover <backup.zip>"
+echo "  Recover:      $(rerun_with '--recover <backup.zip>')"
 echo ""

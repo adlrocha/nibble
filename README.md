@@ -101,12 +101,37 @@ Podman is installed automatically by `install.sh` if not present.
 ### Install
 
 ```bash
-git clone <repo-url>
-cd nibble
-
-# Full install (builds binary, installs podman if needed, builds sandbox image)
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/adlrocha/nibble/main/install.sh | bash
 ```
+
+This clones the source to `~/.local/share/nibble/src` and runs its
+`install.sh`, which builds the binary, installs Podman if needed and builds the
+sandbox image (see below). Prompts, like the memory setup wizard, still read
+from your terminal.
+
+**To update,** run the same command again. It fetches the latest `main` into
+that checkout and re-runs the install. The install is made to be repeated (it
+is also how `./install.sh` upgrades): binaries, wrappers, skills, extensions
+and services are replaced in place.
+
+Options go through the pipe with `bash -s --`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/adlrocha/nibble/main/install.sh | bash -s -- --rebuild
+```
+
+| Option / env var                 | Default                       | Purpose                                   |
+| -------------------------------- | ----------------------------- | ----------------------------------------- |
+| `--ref REF` / `NIBBLE_REF`       | `main`                        | Branch or tag to install                  |
+| `--rebuild`                      | —                             | Rebuild the sandbox image from scratch    |
+| `--browser`                      | —                             | Set up the Chromium CDP integration       |
+| `--recover ZIP`                  | —                             | Restore from a backup after installing    |
+| `NIBBLE_SRC_DIR`                 | `~/.local/share/nibble/src`   | Where the source is kept                  |
+| `NIBBLE_REPO_URL`                | this repository on GitHub     | Repository to fetch from                  |
+
+**From a clone,** for development: `./install.sh` (same flags, except
+`--ref`) builds and installs that checkout as it is. Don't mix the two on one
+machine without care: whichever ran last is what's installed.
 
 After install, add aliases to your shell if prompted:
 
@@ -143,7 +168,7 @@ nibble sandbox spawn /path/to/repo --task "Fix the authentication bug"
 ```
 
 On first run the sandbox image is built (~2-3 min). Subsequent spawns are fast.
-To rebuild the image (e.g. after upgrading nibble): `./install.sh --rebuild`
+To rebuild the image (e.g. after upgrading nibble), re-run the installer with `--rebuild` (see [Install](#install)).
 
 The container gets:
 
@@ -300,7 +325,7 @@ Hermes Agent is a long-running coding agent with a gateway daemon. Unlike per-re
 
 ```bash
 # Build and install nibble (includes hermes image build on first use)
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/adlrocha/nibble/main/install.sh | bash
 
 # Make sure ~/.hermes/ is configured with your LLM provider
 hermes setup
@@ -445,7 +470,7 @@ nibble installs a Claude Code status line that shows live context and quota info
 
 **Install behaviour:**
 
-- The script is always copied to `~/.claude/statusline-command.sh` on each `./install.sh` run (safe to upgrade)
+- The script is always copied to `~/.claude/statusline-command.sh` on each install or update (safe to upgrade)
 - The `statusLine` key is added to `~/.claude/settings.json` only if one is **not already present** — existing custom status lines are left untouched
 - To opt out: remove or replace the `statusLine` key in `~/.claude/settings.json` after install; future installs will not overwrite it
 
@@ -547,8 +572,8 @@ Network is host-mode, so services started inside the container (e.g. `npm run de
 | `nibble hermes unmount <path>` | Unmount a repo from the Hermes sandbox |
 | `nibble hermes list` | Show Hermes sandbox status and mounted repos |
 | `nibble hermes kill` | Stop Hermes sandbox (repos preserved) |
-| `./install.sh --rebuild` | Rebuild sandbox image |
-| `install.sh` | Install / upgrade |
+| `curl -fsSL https://raw.githubusercontent.com/adlrocha/nibble/main/install.sh \| bash` | Install / update (see [Install](#install)) |
+| `… \| bash -s -- --rebuild` | Update and rebuild the sandbox image |
 
 ---
 
