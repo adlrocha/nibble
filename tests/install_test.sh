@@ -256,6 +256,10 @@ unset NIBBLE_SRC_DIR NIBBLE_REPO_URL
 (cd "$WORK" && bash custom/src/install.sh </dev/null >"$WORK/out" 2>&1) || fail "direct run: $(cat "$WORK/out")"
 [ "$(field update)" = "$ONE NIBBLE_REPO_URL=file://$UPSTREAM NIBBLE_SRC_DIR=$WORK/custom/src bash" ] \
     || fail "direct-run hint: $(field update)"
+NIBBLE_REPO_URL="file://$UPSTREAM" NIBBLE_SRC_DIR="$WORK/custom/src" piped --ref v1 || fail "pinned: $(cat "$WORK/out")"
+(cd "$WORK" && bash custom/src/install.sh </dev/null >"$WORK/out" 2>&1) || fail "pinned direct run: $(cat "$WORK/out")"
+[ "$(field rebuild)" = "$ONE NIBBLE_REPO_URL=file://$UPSTREAM NIBBLE_SRC_DIR=$WORK/custom/src bash -s -- --ref v1 --rebuild" ] \
+    || fail "pinned direct-run hint: $(field rebuild)"
 pass "a managed checkout run directly hints at its own source and location"
 
 echo "all $PASSED install tests passed"

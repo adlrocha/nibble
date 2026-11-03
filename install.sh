@@ -110,9 +110,11 @@ fetch_and_install() {
         mkdir -p "$(dirname "$NIBBLE_SRC_DIR")"
         git clone --quiet --depth 1 --branch "$NIBBLE_REF" "$NIBBLE_REPO_URL" "$NIBBLE_SRC_DIR" \
             || die "could not clone $NIBBLE_REF from $NIBBLE_REPO_URL"
-        echo "Cloned by nibble's install.sh; uninstall.sh deletes this checkout." \
-            >"$NIBBLE_SRC_DIR/$MANAGED_MARKER"
     fi
+    # (Re)written on every fetch: it marks the checkout as the installer's
+    # and records the ref, for the hints of a later direct run.
+    printf '%s\nref=%s\n' "# Cloned by nibble's install.sh; uninstall.sh deletes this checkout." \
+        "$NIBBLE_REF" >"$NIBBLE_SRC_DIR/$MANAGED_MARKER"
     is_nibble_checkout "$NIBBLE_SRC_DIR" || die "$NIBBLE_REPO_URL ($NIBBLE_REF) is not a nibble repository"
     commit="$(git -C "$NIBBLE_SRC_DIR" rev-parse --short HEAD)"
     ok "$NIBBLE_REF at $commit in $NIBBLE_SRC_DIR"
@@ -149,6 +151,8 @@ if [ -f "$REPO_DIR/$MANAGED_MARKER" ]; then
     NIBBLE_SRC_DIR="$REPO_DIR"
     if [ -z "${_NIBBLE_FETCHED_REF:-}" ]; then
         NIBBLE_REPO_URL="$(git -C "$REPO_DIR" remote get-url origin 2>/dev/null || echo "$NIBBLE_REPO_URL")"
+        RECORDED_REF="$(sed -n 's/^ref=//p' "$REPO_DIR/$MANAGED_MARKER")"
+        NIBBLE_REF="${RECORDED_REF:-$NIBBLE_REF}"
     fi
     rerun_with() { one_command "$@"; }
 elif [ "$(pwd)" = "$REPO_DIR" ]; then
