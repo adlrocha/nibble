@@ -194,14 +194,17 @@ conflicts carry an older datestamp + the *other* device's id suffix in the filen
 
 ## Phase 7 — Agent stack (nibble etc.)
 
-- Install nibble with the one-command installer — needs cargo/jq/podman/musl;
+- Install nibble with the one-command installer. It needs only `git` up
+  front: it installs the C toolchain, Rust, jq and Podman itself; `musl-gcc`
+  is optional (without it there's no static nibble inside containers). It
   builds Rust + a container (slow; background it). Re-running it updates:
   `curl -fsSL https://raw.githubusercontent.com/adlrocha/nibble/main/install.sh | bash`.
   Only if the device does nibble development, use `./install.sh` in the
   authoritative clone (`~/workspace/personal/nibble`) instead, never both.
 - Install vert the same way (re-run to update):
   `curl -fsSL https://raw.githubusercontent.com/adlrocha/vert/main/install.sh | bash`.
-  For `x` (explain a change), set the agent in `.zshrc`, e.g.
+  vert's explain (the `x` key inside a diff in vert) runs a coding agent
+  already on the machine; pick which one in `.zshrc`, e.g.
   `export VERT_EXPLAIN_AGENT=pi` and optionally
   `export VERT_EXPLAIN_MODEL=<provider/model>` from `pi --list-models`.
 - Bring `~/.nibble` **config** over but **exclude** `cache/`, `logs/`, and the live
