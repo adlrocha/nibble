@@ -142,13 +142,22 @@ if [ -n "$REF_FROM_ENV" ] && [ "${_NIBBLE_FETCHED_REF:-}" != "$NIBBLE_REF" ]; th
 fi
 
 # How to run this installer again, for the hints below: the one-command form
-# for the checkout it manages, ./install.sh for any other clone.
+# for the checkout it manages, this clone's install.sh for any other.
 if [ -f "$REPO_DIR/$MANAGED_MARKER" ]; then
     rerun_with() { one_command "$@"; }
-else
+elif [ "$(pwd)" = "$REPO_DIR" ]; then
     rerun_with() { echo "./install.sh${1:+ $*}"; }
+else
+    rerun_with() { echo "$(printf '%q' "$REPO_DIR/install.sh")${1:+ $*}"; }
 fi
 RERUN="$(rerun_with)"
+
+# Build and install from the checkout itself: cargo and rustup read
+# rust-toolchain.toml and .cargo/config.toml from the current directory up,
+# so starting from another project would build with its settings. Paths
+# given on the command line are taken from where the installer was started.
+CALLER_DIR="$(pwd)"
+cd "$REPO_DIR"
 
 # ── Parse flags ───────────────────────────────────────────────────────────────
 RUN_BROWSER=false
@@ -164,7 +173,10 @@ while [ $# -gt 0 ]; do
             if [ -z "${2:-}" ] || [ "${2#-}" != "$2" ]; then
                 die "--recover requires a path to a backup zip file"
             fi
-            RECOVER_ZIP="$2"
+            case "$2" in
+                /*) RECOVER_ZIP="$2" ;;
+                *) RECOVER_ZIP="$CALLER_DIR/$2" ;;
+            esac
             shift 2
             ;;
         *) die "Unknown argument: $1" ;;

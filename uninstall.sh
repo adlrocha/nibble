@@ -228,8 +228,12 @@ while [ -L "$SELF" ]; do
     esac
 done
 SELF_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+# Whether this nibble came from the one-command install, for the reinstall
+# hint at the end; a clone's own install.sh otherwise.
+INSTALLED_BY_PIPE=false
 if [ -f "$SELF_DIR/.git/nibble-installer-managed" ]; then
     NIBBLE_SRC_DIR="$SELF_DIR"
+    INSTALLED_BY_PIPE=true
 else
     NIBBLE_SRC_DIR="${NIBBLE_SRC_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/nibble/src}"
 fi
@@ -260,4 +264,8 @@ echo ""
 echo -e "${BOLD}${GREEN}Done!${NC} nibble has been uninstalled."
 echo ""
 echo "  Reinstall anytime with:"
-echo "    curl -fsSL https://raw.githubusercontent.com/adlrocha/nibble/main/install.sh | bash"
+if [ "$INSTALLED_BY_PIPE" = true ]; then
+    echo "    curl -fsSL https://raw.githubusercontent.com/adlrocha/nibble/main/install.sh | bash"
+else
+    echo "    $(printf '%q' "$SELF_DIR/install.sh")"
+fi

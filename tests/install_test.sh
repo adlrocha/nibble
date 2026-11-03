@@ -49,6 +49,7 @@ write_stub() {
     echo "args=\$*"
     echo "dir=\$REPO_DIR"
     echo "cwd=\$(pwd)"
+    echo "caller=\$CALLER_DIR"
     echo "update=\$RERUN"
     echo "rebuild=\$(rerun_with --rebuild)"
     if [ -t 0 ]; then echo "stdin=tty"; else echo "stdin=other"; fi
@@ -89,7 +90,8 @@ piped --rebuild --recover backup.zip || fail "first install: $(cat "$WORK/out")"
 [ "$(field version)" = v2 ] || fail "expected main (v2), got $(field version)"
 [ "$(field args)" = "--rebuild --recover backup.zip" ] || fail "args: $(field args)"
 [ "$(field dir)" = "$NIBBLE_SRC_DIR" ] || fail "ran from $(field dir)"
-[ "$(field cwd)" = "$WORK/cwd" ] || fail "cwd changed to $(field cwd), relative paths would break"
+[ "$(field cwd)" = "$NIBBLE_SRC_DIR" ] || fail "the install ran from $(field cwd), not its checkout"
+[ "$(field caller)" = "$WORK/cwd" ] || fail "caller dir: $(field caller)"
 [ "$(field stdin)" = "$NO_TTY_STDIN" ] || fail "stdin: $(field stdin), expected $NO_TTY_STDIN"
 pass "first run clones main and runs its installer with the arguments"
 
@@ -203,6 +205,17 @@ grep -q "is not a nibble checkout" "$WORK/out" || fail "lonely copy: $(cat "$WOR
 [ ! -e "$RECORD" ] || fail "a symlinked or stray installer fetched"
 pass "a symlinked installer resolves its checkout; a stray copy is refused"
 
+# From a clone, hints name its install.sh, relative only when run from it.
+CLONE="$WORK/clone"
+rm -rf "$CLONE" && git clone --quiet "$UPSTREAM" "$CLONE"
+rm -f "$RECORD"
+(cd "$WORK" && bash clone/install.sh </dev/null >"$WORK/out" 2>&1) || fail "clone run: $(cat "$WORK/out")"
+[ "$(field update)" = "$CLONE/install.sh" ] || fail "clone hint from elsewhere: $(field update)"
+[ "$(field cwd)" = "$CLONE" ] || fail "clone install ran from $(field cwd)"
+(cd "$CLONE" && bash ./install.sh </dev/null >"$WORK/out" 2>&1) || fail "clone run: $(cat "$WORK/out")"
+[ "$(field rebuild)" = "./install.sh --rebuild" ] || fail "clone hint from inside: $(field rebuild)"
+pass "a clone's hints name its own install.sh"
+
 # uninstall.sh deletes the managed checkout and nothing else. It runs with a
 # throwaway HOME and stubs for the commands that reach system state.
 STUBS="$WORK/stubs"
@@ -217,7 +230,7 @@ uninstall() {
 uninstall || fail "uninstall: $(cat "$WORK/out")"
 [ ! -e "$NIBBLE_SRC_DIR" ] || fail "uninstall left the managed checkout"
 [ ! -e "$(dirname "$NIBBLE_SRC_DIR")" ] || fail "uninstall left the empty parent directory"
-grep -q "raw.githubusercontent.com/adlrocha/nibble/main/install.sh | bash" "$WORK/out" || fail "reinstall hint: $(cat "$WORK/out")"
+grep -q "$ROOT/install.sh" "$WORK/out" || fail "a clone's reinstall hint: $(cat "$WORK/out")"
 export NIBBLE_SRC_DIR="$WORK/mine"
 rm -rf "$NIBBLE_SRC_DIR"
 git clone --quiet "$UPSTREAM" "$NIBBLE_SRC_DIR"
@@ -233,6 +246,7 @@ piped || fail "custom install: $(cat "$WORK/out")"
 unset NIBBLE_SRC_DIR
 uninstall "$WORK/custom/src/uninstall.sh" || fail "custom uninstall: $(cat "$WORK/out")"
 [ ! -e "$WORK/custom/src" ] || fail "uninstall left a checkout in a custom NIBBLE_SRC_DIR"
+grep -q "raw.githubusercontent.com/adlrocha/nibble/main/install.sh | bash" "$WORK/out" || fail "piped reinstall hint: $(cat "$WORK/out")"
 pass "uninstall.sh finds a custom checkout from where it runs"
 
 echo "all $PASSED install tests passed"

@@ -593,7 +593,8 @@ Network is host-mode, so services started inside the container (e.g. `npm run de
 ## Development
 
 ```bash
-cargo test          # run all tests
+cargo test               # unit and integration tests
+tests/install_test.sh    # install.sh / uninstall.sh end-to-end (no real install)
 cargo build         # dev build
 cargo build --release
 ```
