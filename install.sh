@@ -144,6 +144,12 @@ fi
 # How to run this installer again, for the hints below: the one-command form
 # for the checkout it manages, this clone's install.sh for any other.
 if [ -f "$REPO_DIR/$MANAGED_MARKER" ]; then
+    # Run directly rather than by the bootstrap, the checkout itself says
+    # where it is and where it came from.
+    NIBBLE_SRC_DIR="$REPO_DIR"
+    if [ -z "${_NIBBLE_FETCHED_REF:-}" ]; then
+        NIBBLE_REPO_URL="$(git -C "$REPO_DIR" remote get-url origin 2>/dev/null || echo "$NIBBLE_REPO_URL")"
+    fi
     rerun_with() { one_command "$@"; }
 elif [ "$(pwd)" = "$REPO_DIR" ]; then
     rerun_with() { echo "./install.sh${1:+ $*}"; }

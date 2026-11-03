@@ -249,4 +249,13 @@ uninstall "$WORK/custom/src/uninstall.sh" || fail "custom uninstall: $(cat "$WOR
 grep -q "raw.githubusercontent.com/adlrocha/nibble/main/install.sh | bash" "$WORK/out" || fail "piped reinstall hint: $(cat "$WORK/out")"
 pass "uninstall.sh finds a custom checkout from where it runs"
 
+# Run directly, a managed checkout in a custom place hints at itself.
+export NIBBLE_SRC_DIR="$WORK/custom/src"
+piped || fail "custom install: $(cat "$WORK/out")"
+unset NIBBLE_SRC_DIR NIBBLE_REPO_URL
+(cd "$WORK" && bash custom/src/install.sh </dev/null >"$WORK/out" 2>&1) || fail "direct run: $(cat "$WORK/out")"
+[ "$(field update)" = "$ONE NIBBLE_REPO_URL=file://$UPSTREAM NIBBLE_SRC_DIR=$WORK/custom/src bash" ] \
+    || fail "direct-run hint: $(field update)"
+pass "a managed checkout run directly hints at its own source and location"
+
 echo "all $PASSED install tests passed"
