@@ -24,14 +24,12 @@ warn() { echo -e "  ${YELLOW}!${NC} $1"; }
 die()  { echo -e "  ${RED}✗${NC} $1" >&2; exit 1; }
 
 # ── Parse flags ───────────────────────────────────────────────────────────────
-RUN_BASELIGHT=false
 RUN_BROWSER=false
 REBUILD_IMAGE=false
 RECOVER_ZIP=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --baselight)  RUN_BASELIGHT=true; shift ;;
         --browser)    RUN_BROWSER=true; shift ;;
         --rebuild)    REBUILD_IMAGE=true; shift ;;
         --recover)
@@ -47,8 +45,7 @@ done
 
 echo -e "${BOLD}=== Nibble — Install / Upgrade ===${NC}"
 echo ""
-echo "  Flags: --baselight      install Baselight MCP server in Claude Code"
-echo "         --browser        set up Chromium CDP integration for agents"
+echo "  Flags: --browser        set up Chromium CDP integration for agents"
 echo "         --rebuild        force rebuild the sandbox container image"
 echo "         --recover        restore from a backup zip after install"
 echo ""
@@ -736,6 +733,14 @@ if grep -q "AGENT_TASK_ID" "$CLAUDE_SETTINGS" 2>/dev/null; then
     fi
 fi
 
+# Prune the discontinued Baselight MCP entry left behind by older installs.
+if [ -f "$CLAUDE_SETTINGS" ] && command -v jq >/dev/null 2>&1 \
+    && jq -e '.mcpServers.baselight' "$CLAUDE_SETTINGS" >/dev/null 2>&1; then
+    jq 'del(.mcpServers.baselight)' "$CLAUDE_SETTINGS" > "$CLAUDE_SETTINGS.tmp" \
+        && mv "$CLAUDE_SETTINGS.tmp" "$CLAUDE_SETTINGS" \
+        && ok "Removed discontinued Baselight MCP entry from $CLAUDE_SETTINGS"
+fi
+
 bash "$REPO_DIR/scripts/setup-claude-hooks.sh"
 
 # ── 6b. Zellij keybindings ───────────────────────────────────────────────────
@@ -822,58 +827,7 @@ if [ "$NEEDS_SETUP" = true ]; then
     fi
 fi
 
-# ── 8. Baselight MCP server (optional) ───────────────────────────────────────
-if [ "$RUN_BASELIGHT" = true ]; then
-    step "Installing Baselight MCP server into Claude Code settings"
-
-    if ! command -v jq >/dev/null 2>&1; then
-        die "jq is required for --baselight but was not found"
-    fi
-
-    # Resolve API key: env var > prompt
-    if [ -z "${BASELIGHT_API_KEY:-}" ]; then
-        echo ""
-        echo "  Enter your Baselight API key (from app.baselight.ai → Settings → API Keys):"
-        read -r -p "  API key: " BASELIGHT_API_KEY
-        BASELIGHT_API_KEY="${BASELIGHT_API_KEY// /}"
-    fi
-
-    if [ -z "$BASELIGHT_API_KEY" ]; then
-        die "No Baselight API key provided. Set BASELIGHT_API_KEY or pass it interactively."
-    fi
-
-    MCP_JSON=$(jq -n --arg key "$BASELIGHT_API_KEY" '{
-        mcpServers: {
-            baselight: {
-                type: "http",
-                url: "https://api.baselight.app/mcp",
-                headers: { "x-api-key": $key }
-            }
-        }
-    }')
-
-    if [ -f "$CLAUDE_SETTINGS" ] && [ "$(cat "$CLAUDE_SETTINGS")" != "{}" ] && [ -s "$CLAUDE_SETTINGS" ]; then
-        jq -s '.[0] * .[1]' "$CLAUDE_SETTINGS" <(echo "$MCP_JSON") > "$CLAUDE_SETTINGS.tmp" \
-            && mv "$CLAUDE_SETTINGS.tmp" "$CLAUDE_SETTINGS"
-    else
-        echo "$MCP_JSON" > "$CLAUDE_SETTINGS"
-    fi
-
-    ok "Baselight MCP server configured in $CLAUDE_SETTINGS"
-    ok "Restart Claude Code for the MCP server to appear"
-else
-    # Show hint if not already configured
-    if [ -f "$CLAUDE_SETTINGS" ] && jq -e '.mcpServers.baselight' "$CLAUDE_SETTINGS" >/dev/null 2>&1; then
-        ok "Baselight MCP already configured in settings.json"
-    else
-        echo ""
-        warn "Baselight MCP not configured. Install with:"
-        warn "  ./install.sh --baselight"
-        warn "  (or set BASELIGHT_API_KEY=... ./install.sh --baselight)"
-    fi
-fi
-
-# ── 9. Browser CDP integration (optional) ───────────────────────────────────
+# ── 8. Browser CDP integration (optional) ───────────────────────────────────
 if [ "$RUN_BROWSER" = true ]; then
     step "Setting up Chromium CDP browser integration"
 
@@ -930,7 +884,7 @@ else
     fi
 fi
 
-# ── 10. Recover from backup (optional) ───────────────────────────────────────
+# ── 9. Recover from backup (optional) ───────────────────────────────────────
 if [ -n "$RECOVER_ZIP" ]; then
     step "Recovering from backup"
     if [ ! -f "$RECOVER_ZIP" ]; then
@@ -941,7 +895,7 @@ if [ -n "$RECOVER_ZIP" ]; then
     ok "Restored from $RECOVER_ZIP"
 fi
 
-# ── 11. Done ───────────────────────────────────────────────────────────────────
+# ── 10. Done ───────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}${GREEN}Done!${NC} Restart Claude Code for hooks to take effect."
 echo ""
