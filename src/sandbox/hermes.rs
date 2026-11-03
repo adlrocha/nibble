@@ -288,6 +288,7 @@ pub(crate) fn cmd_hermes_attach(db: &Database, fresh: bool) -> Result<()> {
         &task,
         crate::commands::SelectedAgent::Hermes,
         pane_id,
+        crate::models::zellij_env().1.as_deref(),
         std::process::id() as i32,
         children.len() + 1,
         false,

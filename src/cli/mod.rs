@@ -77,6 +77,30 @@ pub enum Commands {
     /// Open vert on the repo in the current directory (the Alt v pane)
     Vert,
 
+    /// Open a named zellij session whose agents come back after a crash
+    ///
+    /// Attaches when the session is running. When it is gone (killed,
+    /// crashed, rebooted), rebuilds its agent tabs and resumes each agent's
+    /// conversation. Run inside a session of that name to start recording it.
+    Mux {
+        /// Zellij session name
+        #[arg(default_value = crate::mux::DEFAULT_SESSION)]
+        name: String,
+        /// Print the recorded agent tabs instead of opening the session
+        #[arg(long, conflicts_with_all = ["forget", "watch", "resume"])]
+        show: bool,
+        /// Drop nibble's record of the session's agents (refused while the
+        /// session runs; zellij may still resurrect its own saved copy)
+        #[arg(long, conflicts_with_all = ["watch", "resume"])]
+        forget: bool,
+        /// Internal: run the snapshot watcher for the session
+        #[arg(long, hide = true, conflicts_with = "resume")]
+        watch: bool,
+        /// Internal: resume one recorded agent (run by restored panes)
+        #[arg(long, hide = true, value_name = "TASK_ID")]
+        resume: Option<String>,
+    },
+
     /// Inject a message into a running sandbox agent (bypasses Telegram)
     Inject {
         /// Task ID of the agent to inject into

@@ -8,7 +8,6 @@
 //! pre-install bytes.
 
 use anyhow::{bail, Context, Result};
-use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -36,7 +35,7 @@ const MANAGED_BINDS: &str = r#"    shared_except "locked" {
 
 /// Entry point for `nibble keybinds`.
 pub(crate) fn cmd_keybinds(install: bool, uninstall: bool) -> Result<()> {
-    let path = resolve_config_path(
+    let path = crate::status::resolve_config_path(
         std::env::var_os("ZELLIJ_CONFIG_FILE"),
         crate::status::zellij_config_dir(),
     );
@@ -53,13 +52,6 @@ pub(crate) fn cmd_keybinds(install: bool, uninstall: bool) -> Result<()> {
         println!("  nibble keybinds --uninstall  remove them");
         Ok(())
     }
-}
-
-/// The config file zellij loads: `ZELLIJ_CONFIG_FILE` when set, otherwise
-/// `config.kdl` in the config dir.
-fn resolve_config_path(file: Option<OsString>, dir: PathBuf) -> PathBuf {
-    file.filter(|f| !f.is_empty())
-        .map_or_else(|| dir.join("config.kdl"), PathBuf::from)
 }
 
 fn read_config(path: &Path) -> Result<Option<String>> {
@@ -321,23 +313,6 @@ mod tests {
     fn remove_keeps_content_after_an_appended_block() {
         let body = format!("a\n\n{}b\n", top_level_section());
         assert_eq!(remove_section(&body).unwrap(), "a\n\nb\n");
-    }
-
-    #[test]
-    fn config_file_env_wins_over_the_config_dir() {
-        let dir = PathBuf::from("/cfg");
-        assert_eq!(
-            resolve_config_path(Some("/other.kdl".into()), dir.clone()),
-            PathBuf::from("/other.kdl")
-        );
-        assert_eq!(
-            resolve_config_path(Some(OsString::new()), dir.clone()),
-            dir.join("config.kdl")
-        );
-        assert_eq!(
-            resolve_config_path(None, dir.clone()),
-            dir.join("config.kdl")
-        );
     }
 
     #[test]

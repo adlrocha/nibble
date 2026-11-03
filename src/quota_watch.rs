@@ -839,41 +839,20 @@ fn continue_host(task: &Task, msg: &str) -> Result<&'static str> {
 /// Type `msg` + Enter into the task's zellij pane, if it is still alive.
 /// Returns `Ok(Some(label))` when the keystrokes were delivered.
 fn zellij_send(task: &Task, msg: &str) -> Result<Option<&'static str>> {
-    let ctx = task.context.as_ref();
-    let pane_id = ctx
-        .and_then(|c| c.extra.get("zellij_pane_id"))
-        .and_then(|v| v.as_u64());
-    let session = ctx
-        .and_then(|c| c.extra.get("zellij_session_name"))
-        .and_then(|v| v.as_str());
-    let (Some(pane_id), Some(session)) = (pane_id, session) else {
+    let (Some(pane_id), Some(session)) = (
+        crate::status::pane_id_of(task),
+        crate::status::session_of(task),
+    ) else {
         return Ok(None);
     };
 
     // Is the pane still there?
-    let out = Command::new("zellij")
-        .args([
-            "--session",
-            session,
-            "action",
-            "list-panes",
-            "--all",
-            "--json",
-        ])
-        .output()
-        .context("running zellij list-panes")?;
-    if !out.status.success() {
-        return Ok(None); // session gone
-    }
-    let panes: Vec<serde_json::Value> =
-        serde_json::from_slice(&out.stdout).context("parsing zellij pane list")?;
-    let alive = panes.iter().any(|p| {
-        p.get("id").and_then(|v| v.as_u64()) == Some(pane_id)
-            && !p
-                .get("is_plugin")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-    });
+    // Any listing failure means no reachable pane: fall back to the
+    // headless resume rather than aborting the attempt.
+    let Ok(panes) = crate::status::list_zellij_panes(Some(session)) else {
+        return Ok(None);
+    };
+    let alive = panes.iter().any(|p| p.id == pane_id && !p.is_plugin);
     if !alive {
         return Ok(None);
     }

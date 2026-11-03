@@ -42,6 +42,11 @@ any other session.
 
 ## After a reboot or crash
 
+If you work inside a `nibble mux` session, `nibble mux NAME` rebuilds its
+agent tabs and resumes its Claude Code and pi agents (host and sandbox) in
+one step; see [mux.md](mux.md). The steps below are the manual path for
+sandboxes, and the only one for omp and Hermes agents.
+
 1. Restart the containers:
 
    ```bash

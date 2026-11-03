@@ -46,6 +46,7 @@ What it aims for:
 | 26 | **zellij keybinds + vert** | dx | `nibble keybinds --install` adds `Alt a` (focus/open the sidebar) and `Alt v` (`nibble vert` on the current repo) to your zellij config |
 | 27 | **Local LLM models** | experimental | `nibble lm` lists and manages local model files |
 | 28 | **Kimi backend** | experimental | `claude --kimi` (via the installed claude wrapper) points Claude Code at `KIMI_BASE_URL` / `KIMI_API_KEY` for that session |
+| 29 | **Recoverable zellij sessions** | core | `nibble mux [name]` opens a named zellij session whose Claude Code and pi agents (host and sandbox) come back after a killed session, crash or reboot: a watcher records which agent is in which tab, and a gone session is rebuilt with each pane resuming its own conversation. See [docs/mux.md](docs/mux.md) |
 
 ---
 
@@ -422,6 +423,31 @@ each agent is working on.
 
 Requires zellij ≥ 0.42 for pane jumping (`zellij action focus-pane-id`).
 
+### Recoverable zellij sessions (`nibble mux`)
+
+Start your agents inside a nibble-managed zellij session and they come back
+after you kill the session by mistake, zellij crashes, or the machine reboots:
+
+```bash
+nibble mux            # open the session named "main" (attach if it is running)
+nibble mux work       # any other name
+nibble mux work --show    # the recorded agents, per tab (flags any that can't come back)
+nibble mux work --forget  # drop nibble's record (refused while it runs)
+```
+
+While the session runs, a background watcher records which agent is in which
+tab. An agent you close drops out of the record; agents that die with the
+session stay in it. When the session is gone, `nibble mux NAME` rebuilds those
+tabs and each pane resumes its own conversation (Claude Code and pi, on the
+host or in a sandbox), then drops to your shell when the agent exits. Run
+`nibble mux NAME` inside a session of that name to start recording it.
+
+Only agent panes are rebuilt, and zellij's own saved copy of the session is
+discarded when nibble rebuilds it. Rebuilt tabs keep the nibble sidebar if
+it is your default layout (`default.kdl` or zellij's `default_layout`), but
+not other custom layouts. Details, including
+what `--forget` does: [docs/mux.md](docs/mux.md).
+
 ---
 
 ## Status Line
@@ -519,6 +545,7 @@ Network is host-mode, so services started inside the container (e.g. `npm run de
 | `nibble sidebar` | Open the agent-status side panel in the current zellij tab |
 | `nibble sidebar --install` | Always-on sidebar: every zellij tab gets a status pane |
 | `nibble goto <task>` | Jump zellij focus to the pane hosting an agent |
+| `nibble mux [name]` | Open a named zellij session whose agents come back after a crash or reboot (`--show`, `--forget`) |
 | `nibble keybinds --install` | Add zellij keybindings (Alt a: sidebar, Alt v: vert) to `config.kdl` (or `$ZELLIJ_CONFIG_FILE`); run by `install.sh` |
 | `nibble keybinds --uninstall` | Remove nibble's section from the zellij config (bindings outside it are untouched) |
 | `nibble vert` | Open vert on the current repo, or show how to install it (the Alt v pane) |
@@ -571,6 +598,7 @@ src/
 ├── sandbox/                 # Podman sandboxes, Hermes, git worktrees
 ├── sandbox_instructions/    # AGENTS.md blocks injected into sandboxed repos
 ├── status.rs                # `nibble status` / sidebar / `report status`
+├── mux.rs                   # `nibble mux`: recoverable zellij sessions
 ├── session/                 # Session discovery, picker, transcript reading
 ├── quota_watch.rs           # Quota auto-continue daemon
 ├── usage/                   # Token usage scanning, pricing, reports

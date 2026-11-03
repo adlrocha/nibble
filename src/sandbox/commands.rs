@@ -1375,6 +1375,7 @@ pub(crate) fn build_window_task(
     parent: &Task,
     agent: SelectedAgent,
     pane_id: Option<u32>,
+    session: Option<&str>,
     pid: i32,
     window_num: usize,
     btw: bool,
@@ -1391,12 +1392,7 @@ pub(crate) fn build_window_task(
         serde_json::Value::String(parent.task_id.clone()),
     );
     extra.insert("window".to_string(), serde_json::Value::Bool(true));
-    if let Some(pane) = pane_id {
-        extra.insert(
-            "zellij_pane_id".to_string(),
-            serde_json::Value::Number(pane.into()),
-        );
-    }
+    crate::models::stamp_zellij(&mut extra, pane_id, session);
     if btw {
         extra.insert("btw".to_string(), serde_json::Value::Bool(true));
     }
@@ -1453,7 +1449,7 @@ pub(crate) fn cmd_sandbox_attach(
     if let Some(pane) = pane_id {
         if let Some(ctx) = task.context.as_mut() {
             ctx.extra.insert(
-                "zellij_pane_id".to_string(),
+                crate::models::ZELLIJ_PANE_KEY.to_string(),
                 serde_json::Value::Number(pane.into()),
             );
             let _ = db.update_task(&task);
@@ -1518,10 +1514,12 @@ pub(crate) fn cmd_sandbox_attach(
     // sandbox task's status. AGENT_TASK_ID below points at the window, not
     // the sandbox (INV-1).
     let children = child_window_tasks(db, &task.task_id)?;
+    let (_, zellij_session) = crate::models::zellij_env();
     let window_task = build_window_task(
         &task,
         agent,
         pane_id,
+        zellij_session.as_deref(),
         std::process::id() as i32,
         children.len() + 1,
         btw,
@@ -1903,7 +1901,7 @@ mod tests {
     #[test]
     fn build_window_task_maps_fields() {
         let p = parent();
-        let w = build_window_task(&p, SelectedAgent::Omp, Some(7), 42, 2, false);
+        let w = build_window_task(&p, SelectedAgent::Omp, Some(7), Some("main"), 42, 2, false);
         assert_eq!(w.agent_type, AgentType::Unknown("omp".to_string()));
         assert_eq!(w.pid, Some(42));
         assert_eq!(
@@ -1925,13 +1923,18 @@ mod tests {
             ctx.extra.get("zellij_pane_id"),
             Some(&serde_json::Value::Number(7.into()))
         );
+        assert_eq!(
+            ctx.extra.get("zellij_session_name"),
+            Some(&serde_json::json!("main")),
+            "the session locates the pane for `nibble mux`"
+        );
         assert_eq!(w.title, "[demo:sandbox] · omp #2");
         assert!(!w.task_id.is_empty() && w.task_id != "parent-1");
     }
 
     #[test]
     fn build_window_task_btw_marker() {
-        let w = build_window_task(&parent(), SelectedAgent::Claude, None, 1, 1, true);
+        let w = build_window_task(&parent(), SelectedAgent::Claude, None, None, 1, 1, true);
         assert_eq!(
             w.context.as_ref().unwrap().extra.get("btw"),
             Some(&serde_json::Value::Bool(true))
