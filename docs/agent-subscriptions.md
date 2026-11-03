@@ -114,7 +114,8 @@ omarchy-shell adlrocha.agents open|close|toggle|refresh|next
 
 Everything the panel needs is in this repo:
 
-1. **Collector + timer** — run `./install.sh` (sections 5f/5g) or by hand:
+1. **Collector + timer** — install or update nibble (the one-command install
+   from the README, or `./install.sh` in a clone; sections 5f/5g) or by hand:
    copy `scripts/agent-usage/nibble-agent-usage` to `~/.local/bin/` and
    enable `scripts/agent-usage/nibble-agent-usage.{service,timer}`.
 2. **Panel plugin** — `omarchy plugin clone omarchy.agents` (switches the bar

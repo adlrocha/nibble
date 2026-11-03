@@ -54,7 +54,8 @@ so reopening right after a crash is still recorded.
 the task is still in the database and the agent type is supported. Others
 are reported and skipped *before* zellij's dead copy is deleted, so a session
 with nothing restorable is left to zellij. A missing nibble wrapper stops the
-restore instead, with nothing touched: run `./install.sh` and open again.
+restore instead, with nothing touched: re-run the installer (the
+one-command install, or `./install.sh` in a clone) and open again.
 The saved record keeps every recorded agent until the rebuilt session's
 watcher records what actually came back.
 

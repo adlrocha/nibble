@@ -194,8 +194,16 @@ conflicts carry an older datestamp + the *other* device's id suffix in the filen
 
 ## Phase 7 — Agent stack (nibble etc.)
 
-- Run the repo installer (`~/workspace/nibble/install.sh`) — needs
-  cargo/jq/podman/musl; builds Rust + a container (slow; background it).
+- Install nibble with the one-command installer — needs cargo/jq/podman/musl;
+  builds Rust + a container (slow; background it). Re-running it updates:
+  `curl -fsSL https://raw.githubusercontent.com/adlrocha/nibble/main/install.sh | bash`.
+  Only if the device does nibble development, use `./install.sh` in the
+  authoritative clone (`~/workspace/personal/nibble`) instead, never both.
+- Install vert the same way (re-run to update):
+  `curl -fsSL https://raw.githubusercontent.com/adlrocha/vert/main/install.sh | bash`.
+  For `x` (explain a change), set the agent in `.zshrc`, e.g.
+  `export VERT_EXPLAIN_AGENT=pi` and optionally
+  `export VERT_EXPLAIN_MODEL=<provider/model>` from `pi --list-models`.
 - Bring `~/.nibble` **config** over but **exclude** `cache/`, `logs/`, and the live
   `tasks.db*` (copying a live sqlite db risks corruption; it's runtime state).
 - Keep wrapper paths consistent with `.zshrc` aliases (`~/.nibble/wrappers`).
