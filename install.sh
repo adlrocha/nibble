@@ -32,10 +32,19 @@ warn() { echo -e "  ${YELLOW}!${NC} $1"; }
 die()  { echo -e "  ${RED}✗${NC} $1" >&2; exit 1; }
 
 # ── 0. Fetch the source (one-command install) ────────────────────────────────
-NIBBLE_REPO_URL="${NIBBLE_REPO_URL:-https://github.com/adlrocha/nibble.git}"
+DEFAULT_REPO_URL="https://github.com/adlrocha/nibble.git"
+DEFAULT_SRC_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/nibble/src"
+RAW_INSTALLER="https://raw.githubusercontent.com/adlrocha/nibble/main/install.sh"
+# Whether NIBBLE_REF came from the caller (it only means something to the
+# one-command install), before it gets its default.
+REF_FROM_ENV="${NIBBLE_REF:+yes}"
+NIBBLE_REPO_URL="${NIBBLE_REPO_URL:-$DEFAULT_REPO_URL}"
 NIBBLE_REF="${NIBBLE_REF:-main}"
-NIBBLE_SRC_DIR="${NIBBLE_SRC_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/nibble/src}"
-ONE_COMMAND="curl -fsSL https://raw.githubusercontent.com/adlrocha/nibble/main/install.sh | bash"
+NIBBLE_SRC_DIR="${NIBBLE_SRC_DIR:-$DEFAULT_SRC_DIR}"
+# Written into the .git of a checkout this installer cloned. Only such a
+# checkout is ever reset by an update or deleted by uninstall.sh, so pointing
+# NIBBLE_SRC_DIR at a clone you work in can't lose that work.
+MANAGED_MARKER=".git/nibble-installer-managed"
 
 is_nibble_checkout() {
     [ -f "$1/Cargo.toml" ] && grep -q '^name = "nibble"$' "$1/Cargo.toml"
@@ -48,6 +57,20 @@ script_checkout() {
     { [ -n "$self" ] && [ -f "$self" ]; } || return 0
     dir="$(cd "$(dirname "$self")" && pwd)"
     if is_nibble_checkout "$dir"; then echo "$dir"; fi
+}
+
+# The one-command install with the same repository, checkout and ref as this
+# run, followed by any extra flags ("$*"), for the hints this script prints.
+one_command() {
+    local env="" flags="$*"
+    [ "$NIBBLE_REPO_URL" = "$DEFAULT_REPO_URL" ] || env+="NIBBLE_REPO_URL=$(printf '%q' "$NIBBLE_REPO_URL") "
+    [ "$NIBBLE_SRC_DIR" = "$DEFAULT_SRC_DIR" ] || env+="NIBBLE_SRC_DIR=$(printf '%q' "$NIBBLE_SRC_DIR") "
+    [ "$NIBBLE_REF" = main ] || flags="--ref $(printf '%q' "$NIBBLE_REF")${flags:+ $flags}"
+    if [ -n "$flags" ]; then
+        echo "curl -fsSL $RAW_INSTALLER | ${env}bash -s -- $flags"
+    else
+        echo "curl -fsSL $RAW_INSTALLER | ${env}bash"
+    fi
 }
 
 # Clones or updates the managed checkout at NIBBLE_REF, then hands over to
@@ -67,22 +90,27 @@ fetch_and_install() {
     command -v git >/dev/null 2>&1 \
         || die "git is required. Install it with your package manager (on macOS: xcode-select --install)."
     step "Fetching nibble ($NIBBLE_REF)"
-    if [ -d "$NIBBLE_SRC_DIR/.git" ]; then
+    if [ -f "$NIBBLE_SRC_DIR/$MANAGED_MARKER" ]; then
         git -C "$NIBBLE_SRC_DIR" remote set-url origin "$NIBBLE_REPO_URL"
         git -C "$NIBBLE_SRC_DIR" fetch --quiet --depth 1 origin "$NIBBLE_REF" \
             || die "could not fetch $NIBBLE_REF from $NIBBLE_REPO_URL"
         git -C "$NIBBLE_SRC_DIR" checkout --quiet --force FETCH_HEAD \
             || die "could not check out $NIBBLE_REF in $NIBBLE_SRC_DIR"
     elif [ -e "$NIBBLE_SRC_DIR" ]; then
-        die "$NIBBLE_SRC_DIR exists but is not a git checkout; move it away or set NIBBLE_SRC_DIR"
+        die "$NIBBLE_SRC_DIR exists and was not created by this installer, so it is left alone; move it away, or set NIBBLE_SRC_DIR to a new directory (to install a clone you work in, run its ./install.sh)"
     else
         mkdir -p "$(dirname "$NIBBLE_SRC_DIR")"
         git clone --quiet --depth 1 --branch "$NIBBLE_REF" "$NIBBLE_REPO_URL" "$NIBBLE_SRC_DIR" \
             || die "could not clone $NIBBLE_REF from $NIBBLE_REPO_URL"
+        echo "Cloned by nibble's install.sh; uninstall.sh deletes this checkout." \
+            >"$NIBBLE_SRC_DIR/$MANAGED_MARKER"
     fi
     is_nibble_checkout "$NIBBLE_SRC_DIR" || die "$NIBBLE_REPO_URL ($NIBBLE_REF) is not a nibble repository"
     commit="$(git -C "$NIBBLE_SRC_DIR" rev-parse --short HEAD)"
     ok "$NIBBLE_REF at $commit in $NIBBLE_SRC_DIR"
+    # The installer below prints how to run it again; it needs the same
+    # source and ref for that.
+    export NIBBLE_REPO_URL NIBBLE_REF NIBBLE_SRC_DIR
     # stdin is this script's pipe; give the installer the terminal instead so
     # its prompts work, or nothing when there is no terminal.
     if (exec </dev/tty) 2>/dev/null; then
@@ -95,14 +123,16 @@ REPO_DIR="$(script_checkout)"
 # One line, so a pipe that broke mid-download can't run half the installer.
 if [ -z "$REPO_DIR" ]; then fetch_and_install "$@"; fi
 
-# How to run this installer again, for the hints below.
-if [ "$REPO_DIR" = "$(cd "$NIBBLE_SRC_DIR" 2>/dev/null && pwd)" ]; then
-    RERUN="$ONE_COMMAND"
-    rerun_with() { echo "curl -fsSL https://raw.githubusercontent.com/adlrocha/nibble/main/install.sh | bash -s -- $1"; }
+# How to run this installer again, for the hints below: the one-command form
+# for the checkout it manages, ./install.sh for any other clone.
+if [ -f "$REPO_DIR/$MANAGED_MARKER" ]; then
+    rerun_with() { one_command "$@"; }
 else
-    RERUN="./install.sh"
-    rerun_with() { echo "./install.sh $1"; }
+    [ -z "$REF_FROM_ENV" ] \
+        || die "NIBBLE_REF only applies to the one-command install; in a checkout, check out the ref and re-run"
+    rerun_with() { echo "./install.sh${1:+ $*}"; }
 fi
+RERUN="$(rerun_with)"
 
 # ── Parse flags ───────────────────────────────────────────────────────────────
 RUN_BROWSER=false

@@ -21,7 +21,7 @@ What it aims for:
 | 1 | **Podman Sandboxes** | core | Per-repo rootless containers; repo mounted RW; `sleep infinity` PID 1; `podman exec` for attach |
 | 2 | **Session Continuity** | core | Deterministic session UUID per repo; resume across detach/reboot; `--fresh` to start over |
 | 3 | **Task DB** | core | SQLite backend tracking all tasks (sandboxed + non-sandboxed), states (running/completed/exited), session IDs |
-| 4 | **Install script** | core | `install.sh` — builds binary, installs Podman if absent, builds sandbox image, wires Claude hooks |
+| 4 | **Install script** | core | `install.sh` — one-command install and update (fetches the source when piped from `curl`), builds binary, installs Podman if absent, builds sandbox image, wires Claude hooks |
 | 5 | **Claude Code hooks** | core | Stop hook → `nibble report session-id` + `nibble notify`; claude and omp wrappers register host-run agents as tasks at startup so the sidebar tracks them too |
 | 6 | **Setup scripts** | dx | `.nibble/setup.sh` in any repo — auto-runs at spawn to install toolchain before first attach |
 | 7 | **Git worktrees** | dx | `--branch` flag on spawn/attach/kill — creates/cleans up a worktree automatically per branch |
@@ -129,6 +129,15 @@ curl -fsSL https://raw.githubusercontent.com/adlrocha/nibble/main/install.sh | b
 | `NIBBLE_SRC_DIR`                 | `~/.local/share/nibble/src`   | Where the source is kept                  |
 | `NIBBLE_REPO_URL`                | this repository on GitHub     | Repository to fetch from                  |
 
+`--ref` and `NIBBLE_REF` only apply to this one-command install; from a clone,
+check out the ref you want instead. The installer only ever updates a
+checkout it cloned itself, so pointing `NIBBLE_SRC_DIR` at a clone you work
+in is refused rather than reset.
+
+**To uninstall,** run `bash ~/.local/share/nibble/src/uninstall.sh` (or
+`./uninstall.sh` in a clone). It also deletes the checkout the one-command
+install created.
+
 **From a clone,** for development: `./install.sh` (same flags, except
 `--ref`) builds and installs that checkout as it is. Don't mix the two on one
 machine without care: whichever ran last is what's installed.
@@ -142,6 +151,9 @@ alias claude='~/.agent-tasks/wrappers/claude-wrapper'
 
 What `install.sh` does:
 
+0. When piped (`curl … | bash`): clones or updates the source in
+   `~/.local/share/nibble/src` and runs that checkout's `install.sh`, which
+   does the rest
 1. Installs Podman if not present (apt / dnf / pacman / brew)
 2. Builds release binaries with `cargo build --release`
 3. Installs `nibble` to `~/.local/bin/`
