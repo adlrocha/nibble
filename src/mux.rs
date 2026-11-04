@@ -440,7 +440,9 @@ const BARS_TAB_TEMPLATE: &str = "    default_tab_template {
 /// A zellij layout that recreates every recorded tab, each agent pane
 /// running `nibble mux --resume <task>` in its old directory, then dropping
 /// to the user's shell once the agent exits (as if it had been started from
-/// that shell). With `sidebar`, tabs get the template `nibble sidebar
+/// that shell). `close_on_exit` makes leaving that shell close the pane:
+/// zellij would otherwise hold it, and Enter would re-run the resume. With
+/// `sidebar`, tabs get the template `nibble sidebar
 /// --install` puts in the default layout (an explicit layout replaces it);
 /// other custom default layouts are not carried over.
 fn render_layout(tabs: &[MuxTab], nibble_bin: &Path, shell: &str, sidebar: bool) -> String {
@@ -465,7 +467,7 @@ fn render_layout(tabs: &[MuxTab], nibble_bin: &Path, shell: &str, sidebar: bool)
                 .map(|c| format!(" cwd={}", kdl_str(c)))
                 .unwrap_or_default();
             out.push_str(&format!(
-                "        pane name={} command={}{cwd} {{\n            args \"-c\" {}\n        }}\n",
+                "        pane name={} command={}{cwd} {{\n            close_on_exit true\n            args \"-c\" {}\n        }}\n",
                 kdl_str(&pane.title),
                 kdl_str(shell),
                 kdl_str(&script),
@@ -1286,6 +1288,9 @@ mod tests {
         assert!(kdl.contains("pane name=\"x\" command=\"/bin/zsh\" {"));
         assert!(kdl.contains("zellij:tab-bar"));
         assert!(!kdl.contains("status\" \"--watch"));
+        // Without this zellij holds an exited pane and Enter re-runs the
+        // resume, so the agent could never be closed.
+        assert_eq!(kdl.matches("close_on_exit true").count(), 2);
         // The snapshot can read its own resume command back.
         assert_eq!(
             resume_target("/bin/zsh -c '/b/nib ble' mux --resume 't1'; exec '/bin/zsh'").as_deref(),
@@ -1307,7 +1312,7 @@ mod tests {
         }];
         let kdl = render_layout(&tabs, Path::new("/n"), "/bin/sh", true);
         assert!(kdl.contains(crate::status::SIDEBAR_TAB_TEMPLATE));
-        assert!(!kdl.contains("zellij:tab-bar"));
+        assert!(kdl.contains("zellij:tab-bar"));
         assert!(kdl.contains("mux --resume 't1'"));
     }
 
