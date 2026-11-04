@@ -647,6 +647,12 @@ pub(crate) fn cmd_status(db: &Database, watch: bool, json: bool, all: bool) -> R
                     }
                 }
                 if quit {
+                    // Quitting alone would leave zellij holding the pane in
+                    // sessions whose template predates `close_on_exit`.
+                    let panes = zellij_panes().unwrap_or_default();
+                    if let Some(id) = my_pane.filter(|id| launched_sidebar(&panes, *id).is_some()) {
+                        return close_pane(id);
+                    }
                     break;
                 }
             }
@@ -1463,6 +1469,18 @@ layout {
     }
 
     #[test]
+    fn only_a_launched_sidebar_closes_its_own_pane() {
+        let typed = ZellijPane {
+            pane_command: Some("nibble status --watch".into()),
+            ..shell_pane(5, 1)
+        };
+        let panes = [plugin_pane(5, 1), sidebar_pane(4, 1), typed];
+        assert!(launched_sidebar(&panes, 4).is_some());
+        assert!(launched_sidebar(&panes, 5).is_none(), "typed into a shell");
+        assert!(launched_sidebar(&panes, 9).is_none(), "unknown pane");
+    }
+
+    #[test]
     fn failed_listing_changes_nothing() {
         let mut sidebar = StrandedSidebar::default();
         assert!(!sidebar.check(&[], 4), "nothing seen yet");
@@ -1688,6 +1706,19 @@ fn sidebar_in_tab(panes: &[ZellijPane], tab_id: u32) -> Option<&ZellijPane> {
     })
 }
 
+/// Terminal pane `me`, if it was launched as a sidebar. A `nibble status
+/// --watch` typed into a shell has no launch command, and that pane stays the
+/// user's: nibble must never close it.
+fn launched_sidebar(panes: &[ZellijPane], me: u32) -> Option<&ZellijPane> {
+    panes.iter().find(|p| {
+        !p.is_plugin
+            && p.id == me
+            && p.terminal_command
+                .as_deref()
+                .is_some_and(|cmd| is_sidebar_pane("", Some(cmd)))
+    })
+}
+
 /// Notices when a sidebar has outlived its tab: it would otherwise keep the
 /// tab open after the last real pane closed. A sidebar that never had company
 /// stays, since new tabs of the sidebar layout start with nothing beside it.
@@ -1699,19 +1730,11 @@ struct StrandedSidebar {
 impl StrandedSidebar {
     /// Whether sidebar pane `me` just lost the last terminal pane beside it.
     /// Plugins don't count: zellij lists bars and background plugins in every
-    /// tab. Only panes launched as a sidebar qualify: a `nibble status --watch`
-    /// typed into a shell has no launch command, and that pane stays the user's.
+    /// tab.
     fn check(&mut self, panes: &[ZellijPane], me: u32) -> bool {
-        let Some(mine) = panes.iter().find(|p| !p.is_plugin && p.id == me) else {
+        let Some(mine) = launched_sidebar(panes, me) else {
             return false;
         };
-        let launched_as_sidebar = mine
-            .terminal_command
-            .as_deref()
-            .is_some_and(|cmd| is_sidebar_pane("", Some(cmd)));
-        if !launched_as_sidebar {
-            return false;
-        }
         let company = panes
             .iter()
             .any(|p| !p.is_plugin && p.tab_id == mine.tab_id && p.id != me);
