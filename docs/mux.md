@@ -69,6 +69,7 @@ with it. Each agent pane runs `nibble mux --resume <task-id>`, which becomes:
 | Sandbox window | `nibble sandbox attach <repo> [--pi] --session <id>`, starting the container first if it is stopped |
 
 When the agent exits, the pane drops to your `$SHELL` in the same directory.
+Leaving that shell closes the pane, and the tab once its last pane is gone.
 A recorded directory that no longer exists (a pruned worktree, a moved repo)
 is left out, so the pane opens in zellij's default directory instead.
 The resumed agents register as new tasks, and the record moves over to them
@@ -79,10 +80,13 @@ within a few seconds, so a second crash restores the latest conversations.
 - Panes without an agent (editors, servers, plain shells) are not rebuilt.
   When nibble rebuilds a session, zellij's saved copy (which would have
   restored them) is deleted so the name can be reused.
-- Rebuilt tabs use zellij's tab bar and status bar, or the nibble sidebar
-  when it is your default layout (`layouts/default.kdl` from
+- Rebuilt tabs use zellij's tab bar and status bar, or the tab bar and nibble
+  sidebar when the sidebar is your default layout (`layouts/default.kdl` from
   `nibble sidebar --install`, or the layout zellij's `default_layout` names).
   Other custom default layouts are not applied to rebuilt sessions.
+- A running session keeps the layout it started with, so the tab bar needs a
+  new or rebuilt session. After updating nibble, re-run
+  `nibble sidebar --install` so new sessions get it too.
 - `--forget` only drops nibble's record, and refuses while the session is
   running (its watcher would write the agents straight back). If zellij
   still holds a saved copy of the dead session, the next open resurrects

@@ -48,7 +48,8 @@ pub enum Commands {
     /// Open the agent-status side panel in the current zellij session
     Sidebar {
         /// Install the always-on sidebar layout (every tab of every new
-        /// zellij session gets a status pane). Never overwrites a custom layout.
+        /// zellij session gets the tab bar and a status pane). Re-run after
+        /// updating nibble to refresh it. Never overwrites a custom layout.
         #[arg(long)]
         install: bool,
         /// Remove the nibble-managed zellij layout files

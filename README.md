@@ -35,7 +35,7 @@ What it aims for:
 | 15 | **Inject** | ops | `nibble inject <id> <msg>` — send a message directly into any sandbox agent's session |
 | 16 | **Web session inspector** | dx | `nibble web` — dark-mode browser UI (port 7878) for browsing/searching pi sessions, usage dashboard, conversation viewer; runs as `nibble-web.service`, Tailscale-reachable with token auth. See [docs/web.md](docs/web.md) |
 | 17 | **omp (oh-my-pi) support** | core | `--pi` runs upstream pi, `--omp` runs omp. Tasks are stored as `omp` or `pi`, not collapsed. Sandboxes mount both `~/.pi` and `~/.omp`; sessions are format-compatible and cross-resumable. `scripts/migrate-pi-to-omp.sh` migrates host config |
-| 18 | **Agent status panel** | core | `nibble status` live table fed by `nibble report status` hooks; traffic-light marks (`!` needs input, `●` working, `●` ready) with a width-aware legend, plus a dim per-agent topic line — the session's first prompt (`nibble report topic`, sent by the Claude UserPromptSubmit hook and the pi/omp `input` event; reset on `/clear`), falling back to the agent's zellij pane title when it says more than the repo name; `nibble sidebar --install` gives every zellij tab an auto-refreshing status pane; `1`-`9` then `a`-`z` (skipping `q`, which quits) or `nibble goto` jumps focus to an agent's pane. Claude hooks (SessionStart → running, UserPromptSubmit/PostToolUse → working, PermissionRequest → blocked, Stop → idle, SessionEnd → exited) and the pi/omp extension (agent_start/settled/shutdown) report transitions. Every sandbox attach (including `--btw`) is its own tracked window task — concurrent windows on one sandbox never share or flap a row; the sandbox row mirrors the container. Status reports for unregistered IDs self-heal a placeholder row, so a lost `report start` can't make a session invisible. Launches without a wrapper (`claude -p`/`omp -p` in scripts, bare or `nibble sandbox bash` shells) are tracked too via a stable `claude-<session_id>` / `omp-<session_id>` task ID derived from the agent's own session — every session, host or sandbox, gets a row |
+| 18 | **Agent status panel** | core | `nibble status` live table fed by `nibble report status` hooks; traffic-light marks (`!` needs input, `●` working, `●` ready) with a width-aware legend, plus a dim per-agent topic line — the session's first prompt (`nibble report topic`, sent by the Claude UserPromptSubmit hook and the pi/omp `input` event; reset on `/clear`), falling back to the agent's zellij pane title when it says more than the repo name; `nibble sidebar --install` gives every zellij tab the tab bar and an auto-refreshing status pane that closes with the tab's last other pane; `1`-`9` then `a`-`z` (skipping `q`, which quits) or `nibble goto` jumps focus to an agent's pane. Claude hooks (SessionStart → running, UserPromptSubmit/PostToolUse → working, PermissionRequest → blocked, Stop → idle, SessionEnd → exited) and the pi/omp extension (agent_start/settled/shutdown) report transitions. Every sandbox attach (including `--btw`) is its own tracked window task — concurrent windows on one sandbox never share or flap a row; the sandbox row mirrors the container. Status reports for unregistered IDs self-heal a placeholder row, so a lost `report start` can't make a session invisible. Launches without a wrapper (`claude -p`/`omp -p` in scripts, bare or `nibble sandbox bash` shells) are tracked too via a stable `claude-<session_id>` / `omp-<session_id>` task ID derived from the agent's own session — every session, host or sandbox, gets a row |
 | 19 | **Session recovery** | core | Eager task→session mapping via extension-reported `session-path`; interactive picker when attach finds multiple sessions for a repo; `session list` shows task links; runbook in [docs/session-recovery.md](docs/session-recovery.md) |
 | 20 | **Quota auto-continue** | ops | `nibble quota-watch` daemon detects subscription quota errors in claude/pi/omp transcripts, parks the task with a reset-time reason, and continues it automatically once the quota renews (zellij keystroke for live host panes, headless resume turn otherwise, sandbox containers restarted if down); `nibble-quota-watch.service`. See [docs/quota-watch.md](docs/quota-watch.md) |
 | 21 | **AI subscription dashboard** | dx | `nibble-agent-usage` writes Z.AI / Kimi / Grok quota records (limits, resets, plan, token burn from `token_usage`) into Omarchy's agents bar panel every 10 min; user-owned panel clone adds an Auth button per subscription and shrinks the provider chips. See [docs/agent-subscriptions.md](docs/agent-subscriptions.md) |
@@ -424,6 +424,8 @@ nibble sidebar
 # gets a narrow status pane on the right. Never overwrites a custom layout —
 # if you already have one it writes layouts/nibble.kdl instead and tells
 # you how to adopt it. Remove with: nibble sidebar --uninstall
+# The installer leaves this layout alone: after updating nibble, re-run this
+# and start a new zellij session to get layout changes such as the tab bar.
 nibble sidebar --install
 
 # Jump to the zellij pane hosting an agent (task ID or unique prefix)
@@ -477,7 +479,8 @@ While the session runs, a background watcher records which agent is in which
 tab. An agent you close drops out of the record; agents that die with the
 session stay in it. When the session is gone, `nibble mux NAME` rebuilds those
 tabs and each pane resumes its own conversation (Claude Code and pi, on the
-host or in a sandbox), then drops to your shell when the agent exits. Run
+host or in a sandbox), then drops to your shell when the agent exits; leaving
+that shell closes the pane. Run
 `nibble mux NAME` inside a session of that name to start recording it.
 
 Only agent panes are rebuilt, and zellij's own saved copy of the session is
@@ -581,7 +584,7 @@ Network is host-mode, so services started inside the container (e.g. `npm run de
 | `nibble status --watch` | Auto-refreshing status (for a dedicated pane) |
 | `nibble status --json` | Machine-readable status output |
 | `nibble sidebar` | Open the agent-status side panel in the current zellij tab |
-| `nibble sidebar --install` | Always-on sidebar: every zellij tab gets a status pane |
+| `nibble sidebar --install` | Always-on sidebar: every zellij tab gets the tab bar and a status pane; re-run after updating nibble |
 | `nibble goto <task>` | Jump zellij focus to the pane hosting an agent |
 | `nibble mux [name]` | Open a named zellij session whose agents come back after a crash or reboot (`--show`, `--forget`) |
 | `nibble keybinds --install` | Add zellij keybindings (Alt a: sidebar, Alt v: vert) to `config.kdl` (or `$ZELLIJ_CONFIG_FILE`); run by `install.sh` |

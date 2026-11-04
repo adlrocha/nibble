@@ -563,6 +563,7 @@ pub(crate) fn cmd_status(db: &Database, watch: bool, json: bool, all: bool) -> R
         .ok()
         .and_then(|p| p.parse::<u32>().ok());
     let mut frame = 0u32;
+    let mut stranded = StrandedSidebar::default();
 
     loop {
         frame += 1;
@@ -583,7 +584,11 @@ pub(crate) fn cmd_status(db: &Database, watch: bool, json: bool, all: bool) -> R
         // Pane-title topics (fallback when no topic was reported) — sidebar
         // (watch) only, matching the pre-merge renderer; a no-op outside zellij.
         let topics = if watch {
-            Some(zellij_pane_topics())
+            let panes = zellij_panes().unwrap_or_default();
+            if let Some(id) = my_pane.filter(|id| stranded.check(&panes, *id)) {
+                return close_pane(id);
+            }
+            Some(pane_topics(&panes))
         } else {
             None
         };
@@ -642,6 +647,12 @@ pub(crate) fn cmd_status(db: &Database, watch: bool, json: bool, all: bool) -> R
                     }
                 }
                 if quit {
+                    // Quitting alone would leave zellij holding the pane in
+                    // sessions whose template predates `close_on_exit`.
+                    let panes = zellij_panes().unwrap_or_default();
+                    if let Some(id) = my_pane.filter(|id| launched_sidebar(&panes, *id).is_some()) {
+                        return close_pane(id);
+                    }
                     break;
                 }
             }
@@ -740,10 +751,14 @@ fn stdin_keys(timeout_ms: i32) -> Result<Vec<u8>, ()> {
 macro_rules! sidebar_tab_template {
     () => {
         r#"    default_tab_template {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
+        }
         pane split_direction="vertical" {
             pane size="22%" name="agents" {
                 command "nibble"
                 args "status" "--watch"
+                close_on_exit true
             }
             children
         }
@@ -1275,14 +1290,18 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_layout_is_unchanged_by_the_shared_template() {
+    fn sidebar_layout_matches_the_shared_template() {
         let expected = r#"// managed by nibble — sidebar on every tab. Remove with: nibble sidebar --uninstall
 layout {
     default_tab_template {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
+        }
         pane split_direction="vertical" {
             pane size="22%" name="agents" {
                 command "nibble"
                 args "status" "--watch"
+                close_on_exit true
             }
             children
         }
@@ -1373,6 +1392,105 @@ layout {
         assert_eq!(terminal_pane_tab(&panes, 99), None, "unknown pane");
     }
 
+    fn sidebar_pane(id: u32, tab_id: u32) -> ZellijPane {
+        ZellijPane {
+            id,
+            tab_id,
+            terminal_command: Some("nibble status --watch".into()),
+            ..Default::default()
+        }
+    }
+
+    fn shell_pane(id: u32, tab_id: u32) -> ZellijPane {
+        ZellijPane {
+            id,
+            tab_id,
+            ..Default::default()
+        }
+    }
+
+    fn plugin_pane(id: u32, tab_id: u32) -> ZellijPane {
+        ZellijPane {
+            id,
+            tab_id,
+            is_plugin: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn sidebar_closes_once_its_last_pane_is_gone() {
+        let mut sidebar = StrandedSidebar::default();
+        let before = [plugin_pane(0, 1), sidebar_pane(4, 1), shell_pane(5, 1)];
+        assert!(!sidebar.check(&before, 4));
+        let after = [plugin_pane(0, 1), sidebar_pane(4, 1), shell_pane(6, 2)];
+        assert!(sidebar.check(&after, 4), "plugins and other tabs ignored");
+    }
+
+    #[test]
+    fn sidebar_that_never_had_company_stays_open() {
+        // A new session or tab of the sidebar layout: closing here would end
+        // the session the moment it starts.
+        let mut sidebar = StrandedSidebar::default();
+        let panes = [plugin_pane(0, 1), sidebar_pane(4, 1)];
+        assert!(!sidebar.check(&panes, 4));
+        assert!(!sidebar.check(&panes, 4));
+    }
+
+    #[test]
+    fn sidebar_stays_while_any_terminal_pane_remains() {
+        let mut sidebar = StrandedSidebar::default();
+        let two = [sidebar_pane(4, 1), shell_pane(5, 1), shell_pane(6, 1)];
+        assert!(!sidebar.check(&two, 4));
+        let held = ZellijPane {
+            exited: true,
+            ..shell_pane(6, 1)
+        };
+        assert!(!sidebar.check(&[sidebar_pane(4, 1), held], 4));
+    }
+
+    #[test]
+    fn plugin_sharing_the_sidebars_id_is_not_the_sidebar() {
+        // Plugin 4 alone must not pass for terminal pane 4...
+        let mut sidebar = StrandedSidebar::default();
+        assert!(!sidebar.check(&[sidebar_pane(4, 1), shell_pane(5, 1)], 4));
+        assert!(!sidebar.check(&[plugin_pane(4, 1)], 4), "no terminal 4");
+        // ...nor keep the real sidebar company once its last pane is gone.
+        let mut sidebar = StrandedSidebar { had_company: true };
+        assert!(sidebar.check(&[plugin_pane(4, 1), sidebar_pane(4, 1)], 4));
+    }
+
+    #[test]
+    fn watch_typed_into_a_shell_never_closes_its_pane() {
+        let typed = ZellijPane {
+            pane_command: Some("nibble status --watch".into()),
+            ..shell_pane(4, 1)
+        };
+        let mut sidebar = StrandedSidebar::default();
+        assert!(!sidebar.check(&[typed.clone(), shell_pane(5, 1)], 4));
+        assert!(!sidebar.check(&[typed], 4));
+    }
+
+    #[test]
+    fn only_a_launched_sidebar_closes_its_own_pane() {
+        let typed = ZellijPane {
+            pane_command: Some("nibble status --watch".into()),
+            ..shell_pane(5, 1)
+        };
+        let panes = [plugin_pane(5, 1), sidebar_pane(4, 1), typed];
+        assert!(launched_sidebar(&panes, 4).is_some());
+        assert!(launched_sidebar(&panes, 5).is_none(), "typed into a shell");
+        assert!(launched_sidebar(&panes, 9).is_none(), "unknown pane");
+    }
+
+    #[test]
+    fn failed_listing_changes_nothing() {
+        let mut sidebar = StrandedSidebar::default();
+        assert!(!sidebar.check(&[], 4), "nothing seen yet");
+        assert!(!sidebar.check(&[sidebar_pane(4, 1), shell_pane(5, 1)], 4));
+        assert!(!sidebar.check(&[], 4), "listing failed mid-session");
+    }
+
     #[test]
     fn resolve_task_by_prefix() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1406,11 +1524,11 @@ fn sidebar_target_cols(tab_cols: u16) -> u16 {
 }
 
 fn is_sidebar_pane(title: &str, command: Option<&str>) -> bool {
-    title == SIDEBAR_PANE_NAME
-        || title == "agents"
-        || command.is_some_and(|cmd| {
-            cmd.contains("nibble") && cmd.contains("status") && cmd.contains("--watch")
-        })
+    title == SIDEBAR_PANE_NAME || title == "agents" || command.is_some_and(is_sidebar_command)
+}
+
+fn is_sidebar_command(cmd: &str) -> bool {
+    cmd.contains("nibble") && cmd.contains("status") && cmd.contains("--watch")
 }
 
 /// zellij 0.45: `resize <increase|decrease> [left|right|up|down]`.
@@ -1591,6 +1709,45 @@ fn sidebar_in_tab(panes: &[ZellijPane], tab_id: u32) -> Option<&ZellijPane> {
     })
 }
 
+/// Terminal pane `me`, if it was launched as a sidebar. A `nibble status
+/// --watch` typed into a shell has no launch command, and that pane stays the
+/// user's: nibble must never close it.
+fn launched_sidebar(panes: &[ZellijPane], me: u32) -> Option<&ZellijPane> {
+    panes.iter().find(|p| {
+        !p.is_plugin
+            && p.id == me
+            && p.terminal_command
+                .as_deref()
+                .is_some_and(is_sidebar_command)
+    })
+}
+
+/// Notices when a sidebar has outlived its tab: it would otherwise keep the
+/// tab open after the last real pane closed. A sidebar that never had company
+/// stays, since new tabs of the sidebar layout start with nothing beside it.
+#[derive(Default)]
+struct StrandedSidebar {
+    had_company: bool,
+}
+
+impl StrandedSidebar {
+    /// Whether sidebar pane `me` just lost the last terminal pane beside it.
+    /// Plugins don't count: zellij lists bars and background plugins in every
+    /// tab. A pane zellij holds after its process exited still counts: it
+    /// stays on screen, so the tab is not empty.
+    fn check(&mut self, panes: &[ZellijPane], me: u32) -> bool {
+        let Some(mine) = launched_sidebar(panes, me) else {
+            return false;
+        };
+        let company = panes
+            .iter()
+            .any(|p| !p.is_plugin && p.tab_id == mine.tab_id && p.id != me);
+        let stranded = self.had_company && !company;
+        self.had_company |= company;
+        stranded
+    }
+}
+
 fn pane_geometry(pane_id: &str) -> Option<(u16, u16)> {
     let id = pane_id
         .strip_prefix("terminal_")
@@ -1717,12 +1874,9 @@ fn clean_pane_title(title: &str) -> Option<String> {
 /// `AGENT_TASK_ID` in the pane command (attach panes), and by pane id (host
 /// agents, matched through the task's recorded pane). Best-effort: empty
 /// outside zellij.
-pub(crate) fn zellij_pane_topics() -> (HashMap<String, String>, HashMap<u32, String>) {
+fn pane_topics(panes: &[ZellijPane]) -> (HashMap<String, String>, HashMap<u32, String>) {
     let mut by_task = HashMap::new();
     let mut by_pane = HashMap::new();
-    let Ok(panes) = zellij_panes() else {
-        return (by_task, by_pane);
-    };
     for pane in panes.iter().filter(|p| !p.is_plugin) {
         let Some(title) = clean_pane_title(&pane.title) else {
             continue;
@@ -1932,17 +2086,24 @@ pub(crate) fn close_sidebar_pane() -> Result<()> {
         return Ok(());
     }
     for id in hits {
-        let status = std::process::Command::new("zellij")
-            .args(["action", "close-pane", "--pane-id", &pane_ref(id)])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .context("zellij not available")?;
-        if !status.success() {
-            anyhow::bail!("Failed to close sidebar pane {}", pane_ref(id));
-        }
+        close_pane(id)?;
     }
     println!("Sidebar closed.");
+    Ok(())
+}
+
+/// Close terminal pane `id`. Works on sessions whose template predates
+/// `close_on_exit`, where a sidebar that simply quit would be held open.
+fn close_pane(id: u32) -> Result<()> {
+    let status = std::process::Command::new("zellij")
+        .args(["action", "close-pane", "--pane-id", &pane_ref(id)])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .context("zellij not available")?;
+    if !status.success() {
+        anyhow::bail!("Failed to close sidebar pane {}", pane_ref(id));
+    }
     Ok(())
 }
 
