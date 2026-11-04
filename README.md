@@ -424,6 +424,8 @@ nibble sidebar
 # gets a narrow status pane on the right. Never overwrites a custom layout —
 # if you already have one it writes layouts/nibble.kdl instead and tells
 # you how to adopt it. Remove with: nibble sidebar --uninstall
+# The installer leaves this layout alone: after updating nibble, re-run this
+# and start a new zellij session to get layout changes such as the tab bar.
 nibble sidebar --install
 
 # Jump to the zellij pane hosting an agent (task ID or unique prefix)
@@ -582,7 +584,7 @@ Network is host-mode, so services started inside the container (e.g. `npm run de
 | `nibble status --watch` | Auto-refreshing status (for a dedicated pane) |
 | `nibble status --json` | Machine-readable status output |
 | `nibble sidebar` | Open the agent-status side panel in the current zellij tab |
-| `nibble sidebar --install` | Always-on sidebar: every zellij tab gets a status pane |
+| `nibble sidebar --install` | Always-on sidebar: every zellij tab gets the tab bar and a status pane; re-run after updating nibble |
 | `nibble goto <task>` | Jump zellij focus to the pane hosting an agent |
 | `nibble mux [name]` | Open a named zellij session whose agents come back after a crash or reboot (`--show`, `--forget`) |
 | `nibble keybinds --install` | Add zellij keybindings (Alt a: sidebar, Alt v: vert) to `config.kdl` (or `$ZELLIJ_CONFIG_FILE`); run by `install.sh` |

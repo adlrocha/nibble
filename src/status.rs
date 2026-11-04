@@ -1290,7 +1290,7 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_layout_is_unchanged_by_the_shared_template() {
+    fn sidebar_layout_matches_the_shared_template() {
         let expected = r#"// managed by nibble — sidebar on every tab. Remove with: nibble sidebar --uninstall
 layout {
     default_tab_template {
@@ -1451,9 +1451,12 @@ layout {
 
     #[test]
     fn plugin_sharing_the_sidebars_id_is_not_the_sidebar() {
+        // Plugin 4 alone must not pass for terminal pane 4...
         let mut sidebar = StrandedSidebar::default();
         assert!(!sidebar.check(&[sidebar_pane(4, 1), shell_pane(5, 1)], 4));
         assert!(!sidebar.check(&[plugin_pane(4, 1)], 4), "no terminal 4");
+        // ...nor keep the real sidebar company once its last pane is gone.
+        let mut sidebar = StrandedSidebar { had_company: true };
         assert!(sidebar.check(&[plugin_pane(4, 1), sidebar_pane(4, 1)], 4));
     }
 
@@ -1521,11 +1524,11 @@ fn sidebar_target_cols(tab_cols: u16) -> u16 {
 }
 
 fn is_sidebar_pane(title: &str, command: Option<&str>) -> bool {
-    title == SIDEBAR_PANE_NAME
-        || title == "agents"
-        || command.is_some_and(|cmd| {
-            cmd.contains("nibble") && cmd.contains("status") && cmd.contains("--watch")
-        })
+    title == SIDEBAR_PANE_NAME || title == "agents" || command.is_some_and(is_sidebar_command)
+}
+
+fn is_sidebar_command(cmd: &str) -> bool {
+    cmd.contains("nibble") && cmd.contains("status") && cmd.contains("--watch")
 }
 
 /// zellij 0.45: `resize <increase|decrease> [left|right|up|down]`.
@@ -1715,7 +1718,7 @@ fn launched_sidebar(panes: &[ZellijPane], me: u32) -> Option<&ZellijPane> {
             && p.id == me
             && p.terminal_command
                 .as_deref()
-                .is_some_and(|cmd| is_sidebar_pane("", Some(cmd)))
+                .is_some_and(is_sidebar_command)
     })
 }
 
@@ -1730,7 +1733,8 @@ struct StrandedSidebar {
 impl StrandedSidebar {
     /// Whether sidebar pane `me` just lost the last terminal pane beside it.
     /// Plugins don't count: zellij lists bars and background plugins in every
-    /// tab.
+    /// tab. A pane zellij holds after its process exited still counts: it
+    /// stays on screen, so the tab is not empty.
     fn check(&mut self, panes: &[ZellijPane], me: u32) -> bool {
         let Some(mine) = launched_sidebar(panes, me) else {
             return false;

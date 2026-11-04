@@ -84,6 +84,9 @@ within a few seconds, so a second crash restores the latest conversations.
   sidebar when the sidebar is your default layout (`layouts/default.kdl` from
   `nibble sidebar --install`, or the layout zellij's `default_layout` names).
   Other custom default layouts are not applied to rebuilt sessions.
+- A running session keeps the layout it started with, so the tab bar needs a
+  new or rebuilt session. After updating nibble, re-run
+  `nibble sidebar --install` so new sessions get it too.
 - `--forget` only drops nibble's record, and refuses while the session is
   running (its watcher would write the agents straight back). If zellij
   still holds a saved copy of the dead session, the next open resurrects
