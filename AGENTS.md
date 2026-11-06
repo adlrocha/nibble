@@ -128,3 +128,9 @@ Every change lands through a pull request that iterates with the nibble-review r
 2. Open the PR ready for review — drafts skip the review entirely.
 3. Iterate with the nibble-review action until it LGTMs the **current head** and the `review` check is green. On a ⚠️ or ⛔ verdict, read every finding and resolve each one by fixing it or replying with evidence why it does not apply; never silently ignore one. Re-reviews trigger only on a push or an explicit `@nibble-review` comment — a reply alone never re-runs the reviewer. After a reply-only resolution, post `@nibble-review` to request the re-review, and wait for it before concluding.
 4. Stop and hand off for merge. Report the verdict, CI state, and anything the user must decide. Do not merge, enable auto-merge, or push to `main`; merging is a human decision.
+
+<!-- nibble-sdlc:begin -->
+## Delivery flow
+
+This repository uses the `nibble-sdlc` skill: check the spec, build, open a PR, and loop with nibble-review until it LGTMs the current head. Each PR gets a `## Risk` comment from `land` saying whether it could merge without a person. Land is in shadow mode, so it only reports: never merge or enable auto-merge unless you are told to.
+<!-- nibble-sdlc:end -->
