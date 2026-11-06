@@ -33,6 +33,7 @@ skill for the commit/PR workflow.
 |-------|---------|
 | `nibble-memory` | Cross-session memory capture/search (pairs with the nibble-memory extension). |
 | `nibble-pr-review` | Track and review GitHub PRs where you're a reviewer. |
+| `nibble-sdlc` | Take a spec to a reviewed PR with nibble-review. |
 | `omarchy-migration` | Arch/Omarchy migration guidance. |
 
 ## Installation

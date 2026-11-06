@@ -133,6 +133,20 @@ fn four_space_workflows_keep_their_indentation() {
 }
 
 #[test]
+fn a_blank_line_inside_permissions_does_not_duplicate_the_key() {
+    let spaced = "permissions:
+  contents: read
+
+  statuses: write
+jobs:
+  review:
+    steps:
+      - uses: adlrocha/nibble-review@v1
+";
+    assert_eq!(ensure_statuses_write(spaced).unwrap(), spaced);
+}
+
+#[test]
 fn removing_land_matches_other_spellings() {
     let text = "      land: true\n      statuses: write # needed\n      statuses: read\n";
     assert_eq!(remove_land_lines(text), "      statuses: read\n");
@@ -404,11 +418,12 @@ fn a_killed_run_leaves_nothing_that_blocks_a_retry() {
     assert!(shell.called("worktree remove --force /tmp/x"));
     assert!(!shell.called("worktree remove --force /repo"));
     assert!(!shell.called("/home/me/review"));
-    assert!(shell.called("branch -q -D chore/x"));
+    assert!(shell.called("branch -q -d chore/x"));
+    assert!(!shell.called("branch -q -D"));
 
     let failing = FakeShell::new(&[])
         .failing("worktree list")
-        .failing("branch -q -D");
+        .failing("branch -q -d");
     clear_local_leftovers(&failing, "chore/x", Path::new("/tmp"));
 }
 
@@ -566,6 +581,10 @@ fn status_lists_land_results() {
         render_status(&shell).unwrap(),
         "#1 One: shadow: would merge\n#2 Two: no land result yet\n"
     );
+    let partial = FakeShell::new(&[("pr list", prs)]).failing("commits/bbb/status");
+    assert!(render_status(&partial)
+        .unwrap()
+        .contains("#2 Two: no land result yet"));
     let empty = render_status(&FakeShell::new(&[("pr list", "[]")])).unwrap();
     assert_eq!(empty, "No open pull requests.\n");
     assert!(render_status(&FakeShell::new(&[("pr list", "oops")])).is_err());

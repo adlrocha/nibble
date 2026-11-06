@@ -464,8 +464,13 @@ fn ensure_statuses_write(text: &str) -> Result<String> {
     let parent_indent = indent_of(borrowed[block]);
     let count = borrowed[block + 1..]
         .iter()
-        .take_while(|line| indent_of(line) > parent_indent && !line.trim().is_empty())
+        .take_while(|line| line.trim().is_empty() || indent_of(line) > parent_indent)
         .count();
+    // Trailing blank lines separate the block from what follows, so they stay outside it.
+    let count = borrowed[block + 1..block + 1 + count]
+        .iter()
+        .rposition(|line| !line.trim().is_empty())
+        .map_or(0, |last| last + 1);
     let range = block + 1..block + 1 + count;
     // Match the block's own indentation, which isn't always two spaces.
     let child_indent = borrowed[range.clone()]
@@ -622,8 +627,8 @@ fn clear_local_leftovers(shell: &dyn Shell, branch: &str, temp_root: &Path) {
             }
         }
     }
-    // Refused while a worktree elsewhere holds the branch, which then fails clearly below.
-    let _ = shell.run("git", &["branch", "-q", "-D", branch], None);
+    // `-d`, not `-D`: a branch with unmerged work stays, and the run then stops with a name clash.
+    let _ = shell.run("git", &["branch", "-q", "-d", branch], None);
 }
 
 fn publish_from(
@@ -824,16 +829,18 @@ fn render_status(shell: &dyn Shell) -> Result<String> {
         .unwrap_or_default()
         .iter()
         .map(|pr| {
-            let land = land_description(shell, pr["headRefOid"].as_str().unwrap_or_default())?;
-            Ok(format!(
-                "#{} {}: {}
-",
+            // One failed lookup shouldn't lose the rest of the report.
+            let land = land_description(shell, pr["headRefOid"].as_str().unwrap_or_default())
+                .ok()
+                .flatten();
+            format!(
+                "#{} {}: {}\n",
                 pr["number"],
                 pr["title"].as_str().unwrap_or(""),
                 land.unwrap_or_else(|| "no land result yet".to_string())
-            ))
+            )
         })
-        .collect::<Result<Vec<String>>>()?;
+        .collect::<Vec<String>>();
     Ok(if lines.is_empty() {
         "No open pull requests.\n".to_string()
     } else {

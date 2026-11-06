@@ -149,7 +149,7 @@ step "Removing nibble-installed skills"
 
 # Everything install.sh ships in skills/, plus legacy factory/fable5 installs.
 NIBBLE_SKILLS="engineering git-commit-pr nibble-memory nibble-pr-review \
-nibble-no-ai-slop omarchy-migration"
+nibble-no-ai-slop nibble-sdlc omarchy-migration"
 STALE_SKILLS="factory-pipeline factory-spec factory-verify factory-qa-gate \
 factory-lessons fable5-emulation"
 

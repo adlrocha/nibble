@@ -19,7 +19,7 @@ nibble sdlc install             # open the PR, asking first
 
 Scripts and agents need `--yes`, because without a terminal the prompt counts as no.
 
-Install works in a throwaway worktree, so your checkout is untouched. It opens one PR on `chore/nibble-sdlc` that:
+Install works in a throwaway worktree, so your checkout is untouched. A local `chore/nibble-sdlc` branch with unmerged work stops the run rather than being deleted. It opens one PR on `chore/nibble-sdlc` that:
 
 - creates or updates `.github/workflows/nibble-review.yml`, pinning the action to a commit and enabling `land`. Your other inputs are kept;
 - adds `.nibble/sdlc.toml`, unless the repository already has one;
@@ -52,4 +52,4 @@ Uninstall opens the reverse PR. It removes the `land` input, `statuses: write`, 
 
 ## Settings
 
-The rules land applies are documented in the nibble-review README.
+The rules land applies are documented in the [nibble-review README](https://github.com/adlrocha/nibble-review#land).
