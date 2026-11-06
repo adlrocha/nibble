@@ -1,4 +1,5 @@
 # Installed by `nibble sdlc install`. Add an OPENCODE_API_KEY repository secret.
+# Keep in step with examples/nibble-review.yml in adlrocha/nibble-review.
 name: Nibble Review
 
 on:

@@ -47,6 +47,7 @@ What it aims for:
 | 27 | **Local LLM models** | experimental | `nibble lm` lists and manages local model files |
 | 28 | **Kimi backend** | experimental | `claude --kimi` (via the installed claude wrapper) points Claude Code at `KIMI_BASE_URL` / `KIMI_API_KEY` for that session |
 | 29 | **Recoverable zellij sessions** | core | `nibble mux [name]` opens a named zellij session whose Claude Code and pi agents (host and sandbox) come back after a killed session, crash or reboot: a watcher records which agent is in which tab, and a gone session is rebuilt with each pane resuming its own conversation. See [docs/mux.md](docs/mux.md) |
+| 30 | **SDLC flow** | dx | `nibble sdlc` installs nibble-review and the delivery flow into a repo through a PR, reports drift, lists PRs with their `land` result, and merges a PR's exact head. See [docs/sdlc.md](docs/sdlc.md) |
 
 ---
 

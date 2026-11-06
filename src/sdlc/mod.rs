@@ -16,10 +16,12 @@ use crate::cli::SdlcAction;
 const ACTION_REPO: &str = "adlrocha/nibble-review";
 const WORKFLOW_PATH: &str = ".github/workflows/nibble-review.yml";
 const CONFIG_PATH: &str = ".nibble/sdlc.toml";
+const AGENTS_PATH: &str = "AGENTS.md";
 const INSTALL_BRANCH: &str = "chore/nibble-sdlc";
 const UNINSTALL_BRANCH: &str = "chore/nibble-sdlc-remove";
 const LAND_CONTEXT: &str = "nibble-review/land";
 const SECRET_NAME: &str = "OPENCODE_API_KEY";
+const SECRET_UNKNOWN: &str = "Could not check the secret: listing secrets needs admin access.";
 const BLOCK_BEGIN: &str = "<!-- nibble-sdlc:begin -->";
 const BLOCK_END: &str = "<!-- nibble-sdlc:end -->";
 const LAND_INPUT: &str = "land: \"true\"";
@@ -58,7 +60,6 @@ impl Shell for RealShell {
 
 /// The GitHub identity of the repository in the current directory.
 struct Repo {
-    root: String,
     default_branch: String,
 }
 
@@ -168,7 +169,7 @@ pub(crate) fn cmd_sdlc(action: SdlcAction) -> Result<i32> {
         }
         SdlcAction::Merge { pr, auto, yes } => {
             let repo = load_repo(&shell)?;
-            let method = local_merge_method(Path::new(&repo.root))?;
+            let method = merge_method(&shell, &repo)?;
             merge(
                 &shell,
                 &MergeRequest {
@@ -187,7 +188,7 @@ pub(crate) fn cmd_sdlc(action: SdlcAction) -> Result<i32> {
 }
 
 fn load_repo(shell: &dyn Shell) -> Result<Repo> {
-    let root = shell
+    shell
         .run("git", &["rev-parse", "--show-toplevel"], None)
         .context("not inside a git repository")?;
     let default_branch = shell
@@ -205,10 +206,7 @@ fn load_repo(shell: &dyn Shell) -> Result<Repo> {
         )
         .context("could not read the repository from GitHub")?;
     shell.run("git", &["fetch", "-q", "origin", &default_branch], None)?;
-    Ok(Repo {
-        root,
-        default_branch,
-    })
+    Ok(Repo { default_branch })
 }
 
 /// Pins to `action_ref` when given, otherwise to the latest release.
@@ -253,16 +251,6 @@ fn read_default(shell: &dyn Shell, repo: &Repo, path: &str) -> Result<Option<Str
     )))
 }
 
-/// Picks the instructions file agents already read, preferring `AGENTS.md`.
-fn agents_file(shell: &dyn Shell, repo: &Repo) -> Result<(String, Option<String>)> {
-    for path in ["AGENTS.md", "CLAUDE.md"] {
-        if let Some(text) = read_default(shell, repo, path)? {
-            return Ok((path.to_string(), Some(text)));
-        }
-    }
-    Ok(("AGENTS.md".to_string(), None))
-}
-
 fn install_changes(
     shell: &dyn Shell,
     repo: &Repo,
@@ -285,9 +273,9 @@ fn install_changes(
         });
     }
 
-    let (path, text) = agents_file(shell, repo)?;
+    let text = read_default(shell, repo, AGENTS_PATH)?;
     let updated = upsert_block(text.as_deref().unwrap_or(""), AGENTS_BLOCK);
-    push_if_changed(&mut changes, &path, text.as_deref(), updated);
+    push_if_changed(&mut changes, AGENTS_PATH, text.as_deref(), updated);
     Ok(changes)
 }
 
@@ -314,10 +302,9 @@ fn uninstall_changes(shell: &dyn Shell, repo: &Repo, remove_reviewer: bool) -> R
             content: None,
         });
     }
-    let (path, text) = agents_file(shell, repo)?;
-    if let Some(text) = text {
+    if let Some(text) = read_default(shell, repo, AGENTS_PATH)? {
         let updated = remove_block(&text);
-        push_if_changed(&mut changes, &path, Some(&text), updated);
+        push_if_changed(&mut changes, AGENTS_PATH, Some(&text), updated);
     }
     Ok(changes)
 }
@@ -338,9 +325,10 @@ fn render_config(main_is_staging: bool) -> String {
          mode = \"shadow\"  # or \"off\"; shadow only reports and never merges or blocks\n\
          # true when main deploys to dev and a release deploys to production\n\
          main_is_staging = {main_is_staging}\n\
-         max_lines = 400\n\
-         max_review_rounds = 5\n\
-         always_human = []  # extra paths that always need a person, such as \"src/auth/**\"\n\
+         # Optional, with nibble-review's defaults when left out:\n\
+         # max_lines = 400\n\
+         # max_review_rounds = 5\n\
+         # always_human = [\"src/auth/**\"]  # extra paths that always need a person\n\
          \n\
          [merge]\n\
          method = \"squash\"  # squash, merge, or rebase; used by `nibble sdlc merge`\n"
@@ -414,20 +402,41 @@ fn ensure_land_input(text: &str) -> Result<String> {
     Ok(join_lines(&lines))
 }
 
+/// Finds the `permissions:` line governing the step at `uses`: its job's own
+/// block, which replaces the top-level one, or else the top-level block.
+fn governing_permissions(lines: &[&str], uses: usize) -> Option<usize> {
+    let jobs = lines.iter().position(|line| line.trim_end() == "jobs:")?;
+    let is_key = |line: &&str| !line.trim().is_empty() && !line.trim_start().starts_with('#');
+    let job_indent = lines[jobs + 1..]
+        .iter()
+        .find(|line| is_key(line))
+        .map(|line| indent_of(line))?;
+    let start = lines[..uses]
+        .iter()
+        .rposition(|line| is_key(line) && indent_of(line) == job_indent)?;
+    let end = lines[start + 1..]
+        .iter()
+        .position(|line| is_key(line) && indent_of(line) <= job_indent)
+        .map_or(lines.len(), |offset| start + 1 + offset);
+    let in_job = lines[start..end]
+        .iter()
+        .position(|line| line.trim_end() == format!("{}permissions:", " ".repeat(job_indent + 2)))
+        .map(|offset| start + offset);
+    in_job.or_else(|| {
+        lines[..jobs]
+            .iter()
+            .position(|line| line.trim_end() == "permissions:")
+    })
+}
+
 /// Grants `statuses: write` in the permissions block that governs the reviewer step.
 fn ensure_statuses_write(text: &str) -> Result<String> {
     let borrowed: Vec<&str> = text.lines().collect();
     let uses = find_uses(&borrowed)
         .ok_or_else(|| anyhow!("{WORKFLOW_PATH} has no step using {ACTION_REPO}"))?;
-    // Job-level permissions replace top-level ones, so the nearest block above the step wins.
-    let block = borrowed[..uses]
-        .iter()
-        .rposition(|line| line.trim() == "permissions:")
-        .ok_or_else(|| {
-            anyhow!(
-                "{WORKFLOW_PATH} has no `permissions:` block; add one with `{STATUSES_PERMISSION}`"
-            )
-        })?;
+    let block = governing_permissions(&borrowed, uses).ok_or_else(|| {
+        anyhow!("{WORKFLOW_PATH} has no `permissions:` block; add one with `{STATUSES_PERMISSION}`")
+    })?;
     let child_indent = indent_of(borrowed[block]) + 2;
     let children = borrowed[block + 1..]
         .iter()
@@ -614,41 +623,51 @@ fn confirm(question: &str, input: &mut dyn BufRead, out: &mut dyn Write) -> Resu
 }
 
 fn warn_missing_secret(shell: &dyn Shell, out: &mut dyn Write) -> Result<()> {
-    if !has_secret(shell)? {
-        writeln!(
+    match has_secret(shell) {
+        Some(true) => {}
+        Some(false) => writeln!(
             out,
             "Missing secret: run `gh secret set {SECRET_NAME}` so reviews can run."
-        )?;
+        )?,
+        None => writeln!(out, "{SECRET_UNKNOWN}")?,
     }
     Ok(())
 }
 
-fn has_secret(shell: &dyn Shell) -> Result<bool> {
-    let names = shell.run(
-        "gh",
-        &["secret", "list", "--json", "name", "--jq", ".[].name"],
-        None,
-    )?;
-    Ok(names.lines().any(|name| name == SECRET_NAME))
+/// Reports whether the secret exists, or `None` when this account can't list secrets.
+fn has_secret(shell: &dyn Shell) -> Option<bool> {
+    let names = shell
+        .run(
+            "gh",
+            &["secret", "list", "--json", "name", "--jq", ".[].name"],
+            None,
+        )
+        .ok()?;
+    Some(names.lines().any(|name| name == SECRET_NAME))
 }
 
 /// Compares the default branch with what the flow expects.
 fn check_repo(shell: &dyn Shell, repo: &Repo) -> Result<Vec<(bool, String)>> {
     let workflow = read_default(shell, repo, WORKFLOW_PATH)?;
     let text = workflow.as_deref().unwrap_or("");
-    let has_line = |wanted: &str| text.lines().any(|line| line.trim() == wanted);
+    // Same logic as install, so check reports exactly what install would change.
+    let unchanged = |edit: fn(&str) -> Result<String>| edit(text).is_ok_and(|after| after == text);
     let config = read_default(shell, repo, CONFIG_PATH)?;
     let parsed = config.as_deref().map(parse_config).transpose();
-    let (path, instructions) = agents_file(shell, repo)?;
+    let instructions = read_default(shell, repo, AGENTS_PATH)?;
+    let secret = match has_secret(shell) {
+        Some(found) => (found, format!("secret {SECRET_NAME} is set")),
+        None => (true, SECRET_UNKNOWN.to_string()),
+    };
 
     let mut checks = vec![
         (workflow.is_some(), format!("{WORKFLOW_PATH} exists")),
         (
-            has_line(LAND_INPUT),
+            unchanged(ensure_land_input),
             "the reviewer step sets land".to_string(),
         ),
         (
-            has_line(STATUSES_PERMISSION),
+            unchanged(ensure_statuses_write),
             "the workflow grants statuses: write".to_string(),
         ),
         (config.is_some(), format!("{CONFIG_PATH} exists")),
@@ -656,9 +675,9 @@ fn check_repo(shell: &dyn Shell, repo: &Repo) -> Result<Vec<(bool, String)>> {
             instructions
                 .as_deref()
                 .is_some_and(|text| block_range(text).is_some()),
-            format!("{path} has the delivery flow block"),
+            format!("{AGENTS_PATH} has the delivery flow block"),
         ),
-        (has_secret(shell)?, format!("secret {SECRET_NAME} is set")),
+        secret,
     ];
     match parsed {
         Ok(Some(file)) => checks.push((
@@ -689,11 +708,11 @@ fn parse_config(text: &str) -> Result<SdlcFile> {
     Ok(file)
 }
 
-fn local_merge_method(root: &Path) -> Result<String> {
-    match std::fs::read_to_string(root.join(CONFIG_PATH)) {
-        Ok(text) => Ok(parse_config(&text)?.merge.method),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(default_merge_method()),
-        Err(error) => Err(error).with_context(|| format!("failed to read {CONFIG_PATH}")),
+/// Reads the merge method from the default branch, like every other setting.
+fn merge_method(shell: &dyn Shell, repo: &Repo) -> Result<String> {
+    match read_default(shell, repo, CONFIG_PATH)? {
+        Some(text) => Ok(parse_config(&text)?.merge.method),
+        None => Ok(default_merge_method()),
     }
 }
 

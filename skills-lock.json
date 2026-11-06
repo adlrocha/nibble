@@ -41,6 +41,14 @@
       "license": "proprietary",
       "computedHash": "f9cef1f9cd88f75781ca218ccc8e2e89dfcd0ebaf87e7fae4d502645232203bc"
     },
+    "nibble-sdlc": {
+      "source": "vendored:local",
+      "sourceType": "local",
+      "skillPath": "skills/nibble-sdlc/SKILL.md",
+      "version": "unpinned",
+      "license": "proprietary",
+      "computedHash": "f0dc656df8257707631cd081ca78f150af181120a4b35d862e9f4e5e872bd041"
+    },
     "omarchy-migration": {
       "source": "vendored:local",
       "sourceType": "local",

@@ -43,7 +43,6 @@ impl Shell for FakeShell {
 
 fn repo() -> Repo {
     Repo {
-        root: "/repo".to_string(),
         default_branch: "main".to_string(),
     }
 }
@@ -135,6 +134,25 @@ jobs:
 }
 
 #[test]
+fn statuses_goes_to_the_reviewer_job_not_an_earlier_one() {
+    let two_jobs = "permissions:
+  contents: read
+jobs:
+  lint:
+    permissions:
+      contents: read
+    steps:
+      - run: echo hi
+  review:
+    steps:
+      - uses: adlrocha/nibble-review@v1
+";
+    let updated = ensure_statuses_write(two_jobs).unwrap();
+    assert!(updated.starts_with("permissions:\n  contents: read\n  statuses: write\njobs"));
+    assert!(updated.contains("    permissions:\n      contents: read\n    steps"));
+}
+
+#[test]
 fn a_workflow_without_a_permissions_block_is_reported() {
     let none = "jobs:\n  review:\n    steps:\n      - uses: adlrocha/nibble-review@v1\n";
     assert!(ensure_statuses_write(none)
@@ -190,15 +208,15 @@ fn install_writes_all_three_files_into_an_empty_repo() {
 }
 
 #[test]
-fn install_keeps_customisations_and_prefers_an_existing_claude_md() {
+fn install_keeps_customisations_and_targets_only_agents_md() {
     let shell = tree(&[
         (WORKFLOW_PATH, WORKFLOW),
         (CONFIG_PATH, "[land]\nmax_lines = 50\n"),
-        ("CLAUDE.md", "# Rules\n"),
+        ("CLAUDE.md", "@../AGENTS.md\n"),
     ]);
     let changes = install_changes(&shell, &repo(), &pin(), false).unwrap();
     let paths: Vec<&str> = changes.iter().map(|change| change.path.as_str()).collect();
-    assert_eq!(paths, [WORKFLOW_PATH, "CLAUDE.md"]);
+    assert_eq!(paths, [WORKFLOW_PATH, "AGENTS.md"]);
     assert!(changes[0]
         .content
         .as_deref()
@@ -364,6 +382,20 @@ fn a_failed_publish_still_cleans_up_locally() {
 }
 
 #[test]
+fn an_unlistable_secret_warns_and_never_fails() {
+    let shell = FakeShell::new(&[]).failing("secret list");
+    let mut out = Vec::new();
+    warn_missing_secret(&shell, &mut out).unwrap();
+    assert!(String::from_utf8(out)
+        .unwrap()
+        .contains("Could not check the secret"));
+    let checks = check_repo(&shell, &repo()).unwrap();
+    assert!(checks
+        .iter()
+        .any(|(ok, line)| *ok && line.contains("Could not check")));
+}
+
+#[test]
 fn a_missing_secret_is_named() {
     let mut out = Vec::new();
     warn_missing_secret(&FakeShell::new(&[("secret list", "OTHER")]), &mut out).unwrap();
@@ -377,7 +409,7 @@ fn a_missing_secret_is_named() {
 
 #[test]
 fn check_reports_each_piece() {
-    let empty = check_repo(&tree(&[]), &repo()).unwrap();
+    let empty = check_repo(&FakeShell::new(&[("secret list", "OTHER")]), &repo()).unwrap();
     assert!(empty.iter().all(|(ok, _)| !ok));
 
     let installed: &'static str = Box::leak(
@@ -398,21 +430,35 @@ fn check_reports_each_piece() {
     assert!(checks.iter().all(|(ok, _)| *ok), "{checks:?}");
     assert!(checks.last().unwrap().1.contains("staging step: yes"));
 
+    // A permission in the wrong block is drift, even though the line exists.
+    let misplaced = "permissions:
+  statuses: write
+jobs:
+  review:
+    permissions:
+      contents: read
+    steps:
+      - uses: adlrocha/nibble-review@v1
+        with:
+          land: \"true\"
+";
+    let shell = tree(&[(WORKFLOW_PATH, misplaced)]);
+    let checks = check_repo(&shell, &repo()).unwrap();
+    assert!(checks
+        .iter()
+        .any(|(ok, line)| !ok && line.contains("statuses")));
+
     let invalid = tree(&[(CONFIG_PATH, "[merge]\nmethod = \"yolo\"\n")]);
     let checks = check_repo(&invalid, &repo()).unwrap();
     assert!(checks.last().unwrap().1.contains("unknown merge method"));
 }
 
 #[test]
-fn the_local_merge_method_defaults_and_rejects_bad_values() {
-    let directory = tempfile::tempdir().unwrap();
-    assert_eq!(local_merge_method(directory.path()).unwrap(), "squash");
-    std::fs::create_dir(directory.path().join(".nibble")).unwrap();
-    let path = directory.path().join(CONFIG_PATH);
-    std::fs::write(&path, "[merge]\nmethod = \"rebase\"\n").unwrap();
-    assert_eq!(local_merge_method(directory.path()).unwrap(), "rebase");
-    std::fs::write(&path, "not toml =").unwrap();
-    assert!(local_merge_method(directory.path()).is_err());
+fn the_merge_method_comes_from_the_default_branch() {
+    assert_eq!(merge_method(&tree(&[]), &repo()).unwrap(), "squash");
+    let shell = tree(&[(CONFIG_PATH, "[merge]\nmethod = \"rebase\"\n")]);
+    assert_eq!(merge_method(&shell, &repo()).unwrap(), "rebase");
+    assert!(merge_method(&tree(&[(CONFIG_PATH, "not toml =")]), &repo()).is_err());
 }
 
 #[test]
@@ -515,10 +561,7 @@ fn merge_fails_on_bad_gh_output() {
 fn load_repo_reads_the_default_branch_and_fetches_it() {
     let shell = FakeShell::new(&[("rev-parse", "/repo"), ("repo view", "trunk")]);
     let repo = load_repo(&shell).unwrap();
-    assert_eq!(
-        (repo.root.as_str(), repo.default_branch.as_str()),
-        ("/repo", "trunk")
-    );
+    assert_eq!(repo.default_branch, "trunk");
     assert!(shell.called("fetch -q origin trunk"));
     let outside = FakeShell::new(&[]).failing("rev-parse");
     assert!(load_repo(&outside).is_err());
