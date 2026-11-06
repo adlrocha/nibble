@@ -34,7 +34,7 @@ impl Shell for FakeShell {
         let call = format!("{program} {}", args.join(" "));
         self.calls.borrow_mut().push(call.clone());
         match self.answers.iter().find(|(key, _)| call.contains(key)) {
-            Some((_, Ok(value))) => Ok(value.trim().to_string()),
+            Some((_, Ok(value))) => Ok(value.trim_end().to_string()),
             Some((_, Err(message))) => Err(anyhow!("{message}")),
             None => Ok(String::new()),
         }
@@ -104,6 +104,19 @@ fn a_commented_land_line_does_not_count() {
     assert!(ensure_land_input(&commented)
         .unwrap()
         .contains("          land: \"true\"\n"));
+}
+
+#[test]
+fn other_spellings_are_rewritten_instead_of_duplicated() {
+    let spelled = WORKFLOW.replace("allow-skip: \"false\"", "land: true");
+    let updated = ensure_land_input(&spelled).unwrap();
+    assert_eq!(updated.matches("land:").count(), 1);
+    assert!(updated.contains("          land: \"true\"\n"));
+
+    let read = WORKFLOW.replace("pull-requests: write", "statuses: read");
+    let updated = ensure_statuses_write(&read).unwrap();
+    assert_eq!(updated.matches("statuses:").count(), 1);
+    assert!(updated.contains("  statuses: write\n"));
 }
 
 #[test]
@@ -339,10 +352,21 @@ fn apply_needs_a_yes_and_refuses_an_existing_remote_branch() {
     assert!(output.contains("Cancelled."));
     assert!(shell.calls.borrow().is_empty());
 
-    let shell = FakeShell::new(&[("ls-remote", "abc refs/heads/chore/x")]);
+    let shell = FakeShell::new(&[("pr list", "https://example/pull/1")]);
     let (result, _) = apply_with(&shell, &change(), false, true, "");
-    assert!(result.unwrap_err().to_string().contains("already exists"));
+    assert!(result.unwrap_err().to_string().contains("already open"));
     assert!(!shell.called("worktree add"));
+}
+
+#[test]
+fn the_branch_of_a_merged_pr_is_cleared_so_reinstalling_works() {
+    let shell = FakeShell::new(&[("ls-remote", "abc refs/heads/chore/x")]);
+    release_branch(&shell, "chore/x").unwrap();
+    assert!(shell.called("push -q origin --delete chore/x"));
+
+    let fresh = FakeShell::new(&[]);
+    release_branch(&fresh, "chore/x").unwrap();
+    assert!(!fresh.called("--delete"));
 }
 
 #[test]
@@ -409,7 +433,8 @@ fn a_missing_secret_is_named() {
 
 #[test]
 fn check_reports_each_piece() {
-    let empty = check_repo(&FakeShell::new(&[("secret list", "OTHER")]), &repo()).unwrap();
+    let bare = FakeShell::new(&[("secret list", "OTHER")]).failing("releases/latest");
+    let empty = check_repo(&bare, &repo()).unwrap();
     assert!(empty.iter().all(|(ok, _)| !ok));
 
     let installed: &'static str = Box::leak(
@@ -417,7 +442,7 @@ fn check_reports_each_piece() {
             .unwrap()
             .into_boxed_str(),
     );
-    let agents: &'static str = Box::leak(upsert_block("", "block").into_boxed_str());
+    let agents: &'static str = Box::leak(upsert_block("", AGENTS_BLOCK).into_boxed_str());
     let mut shell = tree(&[
         (WORKFLOW_PATH, installed),
         (CONFIG_PATH, "[land]\nmain_is_staging = true\n"),
@@ -426,9 +451,32 @@ fn check_reports_each_piece() {
     shell
         .answers
         .push(("secret list", Ok(SECRET_NAME.to_string())));
+    shell
+        .answers
+        .push(("releases/latest", Err("no release".to_string())));
     let checks = check_repo(&shell, &repo()).unwrap();
     assert!(checks.iter().all(|(ok, _)| *ok), "{checks:?}");
     assert!(checks.last().unwrap().1.contains("staging step: yes"));
+
+    // An old pin and an old block are the drift install would fix.
+    let mut stale = tree(&[
+        (WORKFLOW_PATH, installed),
+        (
+            "AGENTS.md",
+            "<!-- nibble-sdlc:begin -->\nold\n<!-- nibble-sdlc:end -->\n",
+        ),
+    ]);
+    stale
+        .answers
+        .push(("releases/latest", Ok("v9".to_string())));
+    stale.answers.push(("commits/v9", Ok("f".repeat(40))));
+    let checks = check_repo(&stale, &repo()).unwrap();
+    assert!(checks
+        .iter()
+        .any(|(ok, line)| !ok && line.contains("latest release (v9)")));
+    assert!(checks
+        .iter()
+        .any(|(ok, line)| !ok && line.contains("current delivery flow block")));
 
     // A permission in the wrong block is drift, even though the line exists.
     let misplaced = "permissions:
@@ -484,6 +532,8 @@ const CLEARED: &str = r#"{"headRefOid": "abc", "title": "T", "statusCheckRollup"
   {"context": "nibble-review/land", "description": "shadow: would merge"}]}"#;
 const ASKS: &str = r#"{"headRefOid": "abc", "title": "T", "statusCheckRollup": [
   {"context": "nibble-review/land", "description": "shadow: would ask you (size)"}]}"#;
+const QUOTES: &str = r#"{"headRefOid": "abc", "title": "T", "statusCheckRollup": [
+  {"context": "nibble-review/land", "description": "shadow: would ask you (test file removed: `tests/would merge.test.ts`)"}]}"#;
 const UNKNOWN: &str = r#"{"headRefOid": "abc", "title": "T", "statusCheckRollup": []}"#;
 
 fn merge_with(
@@ -526,7 +576,7 @@ fn merge_pins_the_head_and_uses_the_method() {
 
 #[test]
 fn only_a_person_at_a_terminal_can_override_land() {
-    for view in [ASKS, UNKNOWN] {
+    for view in [ASKS, UNKNOWN, QUOTES] {
         let (shell, result, _) = merge_with(view, true, false, false, "");
         assert!(result.unwrap_err().to_string().contains("only a person"));
         assert!(!shell.called("pr merge"));

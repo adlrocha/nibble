@@ -20,6 +20,9 @@ const AGENTS_PATH: &str = "AGENTS.md";
 const INSTALL_BRANCH: &str = "chore/nibble-sdlc";
 const UNINSTALL_BRANCH: &str = "chore/nibble-sdlc-remove";
 const LAND_CONTEXT: &str = "nibble-review/land";
+/// Land's description when it clears a commit, set by `statusDescription` in
+/// nibble-review. Matched exactly: other descriptions quote file names.
+const LAND_CLEARED: &str = "shadow: would merge";
 const SECRET_NAME: &str = "OPENCODE_API_KEY";
 const SECRET_UNKNOWN: &str = "Could not check the secret: listing secrets needs admin access.";
 const BLOCK_BEGIN: &str = "<!-- nibble-sdlc:begin -->";
@@ -31,7 +34,7 @@ const AGENTS_BLOCK: &str = include_str!("agents-block.md");
 
 /// Runs external programs, so tests can stand in for `git` and `gh`.
 trait Shell {
-    /// Runs `program` and returns its trimmed stdout, failing on a non-zero exit.
+    /// Runs `program` and returns its stdout without trailing whitespace, failing on a non-zero exit.
     fn run(&self, program: &str, args: &[&str], dir: Option<&Path>) -> Result<String>;
 }
 
@@ -54,7 +57,9 @@ impl Shell for RealShell {
                 String::from_utf8_lossy(&output.stderr).trim()
             );
         }
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .trim_end()
+            .to_string())
     }
 }
 
@@ -388,18 +393,33 @@ fn ensure_land_input(text: &str) -> Result<String> {
         .position(|candidate| candidate.trim() == "with:" && indent_of(candidate) == key_indent)
         .map(|offset| uses + 1 + offset)
         .ok_or_else(|| anyhow!("the nibble-review step in {WORKFLOW_PATH} has no `with:` block"))?;
-    let mut block = borrowed[with + 1..]
+    let block_len = borrowed[with + 1..]
         .iter()
-        .take_while(|candidate| candidate.trim().is_empty() || indent_of(candidate) > key_indent);
-    if block.any(|candidate| candidate.trim() == LAND_INPUT) {
-        return Ok(text.to_string());
-    }
+        .take_while(|candidate| candidate.trim().is_empty() || indent_of(candidate) > key_indent)
+        .count();
+    let block = with + 1..with + 1 + block_len;
+    let line = format!("{}{LAND_INPUT}", " ".repeat(key_indent + 2));
+    Ok(set_key(text, block, "land:", with + 1, &line))
+}
+
+/// Rewrites `key` if it is in `block`, or inserts `line` at `position`. A
+/// second entry would be a duplicate YAML key, which GitHub rejects.
+fn set_key(
+    text: &str,
+    block: std::ops::Range<usize>,
+    key: &str,
+    position: usize,
+    line: &str,
+) -> String {
     let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
-    lines.insert(
-        with + 1,
-        format!("{}{LAND_INPUT}", " ".repeat(key_indent + 2)),
-    );
-    Ok(join_lines(&lines))
+    match block
+        .into_iter()
+        .find(|index| lines[*index].trim_start().starts_with(key))
+    {
+        Some(index) => lines[index] = line.to_string(),
+        None => lines.insert(position, line.to_string()),
+    }
+    join_lines(&lines)
 }
 
 /// Finds the `permissions:` line governing the step at `uses`: its job's own
@@ -438,22 +458,13 @@ fn ensure_statuses_write(text: &str) -> Result<String> {
         anyhow!("{WORKFLOW_PATH} has no `permissions:` block; add one with `{STATUSES_PERMISSION}`")
     })?;
     let child_indent = indent_of(borrowed[block]) + 2;
-    let children = borrowed[block + 1..]
+    let count = borrowed[block + 1..]
         .iter()
-        .take_while(|line| indent_of(line) >= child_indent && !line.trim().is_empty());
-    if children
-        .clone()
-        .any(|line| line.trim() == STATUSES_PERMISSION)
-    {
-        return Ok(text.to_string());
-    }
-    let position = block + 1 + children.count();
-    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
-    lines.insert(
-        position,
-        format!("{}{STATUSES_PERMISSION}", " ".repeat(child_indent)),
-    );
-    Ok(join_lines(&lines))
+        .take_while(|line| indent_of(line) >= child_indent && !line.trim().is_empty())
+        .count();
+    let range = block + 1..block + 1 + count;
+    let line = format!("{}{STATUSES_PERMISSION}", " ".repeat(child_indent));
+    Ok(set_key(text, range.clone(), "statuses:", range.end, &line))
 }
 
 fn remove_land_lines(text: &str) -> String {
@@ -530,17 +541,7 @@ fn apply(
         writeln!(out, "Cancelled.")?;
         return Ok(());
     }
-    let remote = shell.run(
-        "git",
-        &["ls-remote", "--heads", "origin", publish.branch],
-        None,
-    )?;
-    if !remote.is_empty() {
-        bail!(
-            "branch {} already exists on origin; merge or delete it first",
-            publish.branch
-        );
-    }
+    release_branch(shell, publish.branch)?;
 
     let directory = tempfile::tempdir().context("failed to create a temporary worktree path")?;
     let path = directory.path().to_string_lossy().to_string();
@@ -558,6 +559,26 @@ fn apply(
     removed?;
     deleted?;
     writeln!(out, "{url}")?;
+    Ok(())
+}
+
+/// Clears the way for a new PR. The branch of a merged PR is deleted, because
+/// GitHub keeps it and a later install must still work; an open PR stops the run.
+fn release_branch(shell: &dyn Shell, branch: &str) -> Result<()> {
+    let open = shell.run(
+        "gh",
+        &[
+            "pr", "list", "--state", "open", "--head", branch, "--json", "url", "--jq", ".[0].url",
+        ],
+        None,
+    )?;
+    if !open.is_empty() {
+        bail!("{open} is already open from {branch}; merge or close it first");
+    }
+    let remote = shell.run("git", &["ls-remote", "--heads", "origin", branch], None)?;
+    if !remote.is_empty() {
+        shell.run("git", &["push", "-q", "origin", "--delete", branch], None)?;
+    }
     Ok(())
 }
 
@@ -656,7 +677,8 @@ fn check_repo(shell: &dyn Shell, repo: &Repo) -> Result<Vec<(bool, String)>> {
     let parsed = config.as_deref().map(parse_config).transpose();
     let instructions = read_default(shell, repo, AGENTS_PATH)?;
     let secret = match has_secret(shell) {
-        Some(found) => (found, format!("secret {SECRET_NAME} is set")),
+        Some(true) => (true, format!("secret {SECRET_NAME} is set")),
+        Some(false) => (false, format!("secret {SECRET_NAME} is missing")),
         None => (true, SECRET_UNKNOWN.to_string()),
     };
 
@@ -674,16 +696,26 @@ fn check_repo(shell: &dyn Shell, repo: &Repo) -> Result<Vec<(bool, String)>> {
         (
             instructions
                 .as_deref()
-                .is_some_and(|text| block_range(text).is_some()),
-            format!("{AGENTS_PATH} has the delivery flow block"),
+                .is_some_and(|text| upsert_block(text, AGENTS_BLOCK) == text),
+            format!("{AGENTS_PATH} has the current delivery flow block"),
         ),
         secret,
     ];
+    // A failed lookup says nothing about the repository, so it isn't drift.
+    if let Ok(latest) = resolve_pin(shell, None) {
+        checks.push((
+            text.contains(&latest.sha),
+            format!(
+                "the action is pinned to the latest release ({})",
+                latest.label
+            ),
+        ));
+    }
     match parsed {
         Ok(Some(file)) => checks.push((
             true,
             format!(
-                "{CONFIG_PATH} is valid (main is a safe staging step: {})",
+                "{CONFIG_PATH} parses; nibble-review checks [land] (main is a safe staging step: {})",
                 if file.land.main_is_staging {
                     "yes"
                 } else {
@@ -792,9 +824,7 @@ fn merge(
         .as_str()
         .ok_or_else(|| anyhow!("PR #{number} has no head commit"))?;
     let land = land_description(&pr["statusCheckRollup"]);
-    let clear = land
-        .as_deref()
-        .is_some_and(|text| text.contains("would merge"));
+    let clear = land.as_deref() == Some(LAND_CLEARED);
     writeln!(
         out,
         "#{number} {}\nLand: {}",

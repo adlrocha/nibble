@@ -7,6 +7,7 @@ Land is in **shadow mode**: it reports and never merges or blocks.
 ## Requirements
 
 - An authenticated `gh`, with write access to the repository.
+- A nibble-review release that includes `land`. Until one ships, pass `--ref` with a commit or branch that has it, or the `land` input does nothing.
 - An `OPENCODE_API_KEY` repository secret. Listing secrets needs admin access, so without it the secret check is skipped.
 
 ## Install
