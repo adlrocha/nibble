@@ -47,6 +47,7 @@ What it aims for:
 | 27 | **Local LLM models** | experimental | `nibble lm` lists and manages local model files |
 | 28 | **Kimi backend** | experimental | `claude --kimi` (via the installed claude wrapper) points Claude Code at `KIMI_BASE_URL` / `KIMI_API_KEY` for that session |
 | 29 | **Recoverable zellij sessions** | core | `nibble mux [name]` opens a named zellij session whose Claude Code and pi agents (host and sandbox) come back after a killed session, crash or reboot: a watcher records which agent is in which tab, and a gone session is rebuilt with each pane resuming its own conversation. See [docs/mux.md](docs/mux.md) |
+| 30 | **SDLC flow** | dx | `nibble sdlc` installs nibble-review and the delivery flow into a repo through a PR, reports drift, lists PRs with their `land` result, and merges a PR's exact head. See [docs/sdlc.md](docs/sdlc.md) |
 
 ---
 
@@ -590,6 +591,11 @@ Network is host-mode, so services started inside the container (e.g. `npm run de
 | `nibble keybinds --install` | Add zellij keybindings (Alt a: sidebar, Alt v: vert) to `config.kdl` (or `$ZELLIJ_CONFIG_FILE`); run by `install.sh` |
 | `nibble keybinds --uninstall` | Remove nibble's section from the zellij config (bindings outside it are untouched) |
 | `nibble vert` | Open vert on the current repo, or show how to install it (the Alt v pane) |
+| `nibble sdlc install` | Open a PR that installs nibble-review with `land` in shadow mode (`--dry-run`, `--yes`, `--ref`, `--main-is-staging`) |
+| `nibble sdlc uninstall` | Open a PR that removes the flow and keeps the reviewer (`--dry-run`, `--yes`, `--remove-reviewer`) |
+| `nibble sdlc check` | Report drift between the default branch and the expected setup |
+| `nibble sdlc status` | List open PRs with their land result |
+| `nibble sdlc merge <pr>` | Merge a PR's current head after showing land's result (`--auto`, `--yes`); only a person at a terminal can override land |
 | `nibble prune` | Mark stale processes as exited |
 | `nibble sandbox spawn <repo>` | Start a sandboxed agent |
 | `nibble sandbox list` | List open sandboxes |
@@ -648,6 +654,7 @@ src/
 ├── web/                     # Web session inspector
 ├── cron/                    # Scheduled sandbox prompts
 ├── backup.rs                # Backup / import
+├── sdlc/                    # `nibble sdlc`: install and run the delivery flow
 ├── keybinds.rs, vert.rs     # zellij keybindings and the vert pane
 ├── lm/                      # Local LLM model files
 ├── agent_input.rs           # `nibble inject`
