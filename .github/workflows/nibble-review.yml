@@ -16,6 +16,7 @@ permissions:
   contents: read
   issues: write
   pull-requests: write
+  statuses: write
 
 jobs:
   review:
@@ -38,6 +39,7 @@ jobs:
       # Pinned to the full commit SHA of v1 (mutable tags on an action holding
       # write permissions + secrets are a supply-chain risk). Bump deliberately.
       # Requires the OPENCODE_API_KEY repository secret — see README before first run.
-      - uses: adlrocha/nibble-review@7953cb7ebf8ffe5b112201120f3b6591b37f19e6 # v1.0.5
+      - uses: adlrocha/nibble-review@140adac67e6cdaaf7f2cfc74b59c8dac12a6ebd1 # feat/land-shadow
         with:
+          land: "true"
           api-key: ${{ secrets.OPENCODE_API_KEY }}
