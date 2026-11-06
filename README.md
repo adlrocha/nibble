@@ -654,6 +654,7 @@ src/
 ├── web/                     # Web session inspector
 ├── cron/                    # Scheduled sandbox prompts
 ├── backup.rs                # Backup / import
+├── sdlc/                    # `nibble sdlc`: install and run the delivery flow
 ├── keybinds.rs, vert.rs     # zellij keybindings and the vert pane
 ├── lm/                      # Local LLM model files
 ├── agent_input.rs           # `nibble inject`

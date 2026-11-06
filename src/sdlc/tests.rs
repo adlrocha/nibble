@@ -120,6 +120,32 @@ fn other_spellings_are_rewritten_instead_of_duplicated() {
 }
 
 #[test]
+fn four_space_workflows_keep_their_indentation() {
+    let wide = "jobs:
+    review:
+        permissions:
+            contents: read
+        steps:
+            - uses: adlrocha/nibble-review@v1
+";
+    let updated = ensure_statuses_write(wide).unwrap();
+    assert!(updated.contains("            contents: read\n            statuses: write\n"));
+}
+
+#[test]
+fn removing_land_matches_other_spellings() {
+    let text = "      land: true\n      statuses: write # needed\n      statuses: read\n";
+    assert_eq!(remove_land_lines(text), "      statuses: read\n");
+}
+
+#[test]
+fn files_are_found_from_a_subdirectory() {
+    let shell = tree(&[]);
+    read_default(&shell, &repo(), "AGENTS.md").unwrap();
+    assert!(shell.called("ls-tree --full-tree"));
+}
+
+#[test]
 fn a_step_without_inputs_is_reported() {
     let bare = "steps:\n  - uses: adlrocha/nibble-review@v1\n  - run: echo hi\n";
     let error = ensure_land_input(bare).unwrap_err().to_string();
@@ -371,17 +397,19 @@ fn the_branch_of_a_merged_pr_is_cleared_so_reinstalling_works() {
 
 #[test]
 fn a_killed_run_leaves_nothing_that_blocks_a_retry() {
-    let listing = "worktree /repo\nHEAD a\nbranch refs/heads/main\n\nworktree /tmp/x\nHEAD b\nbranch refs/heads/chore/x";
+    let listing = "worktree /repo\nHEAD a\nbranch refs/heads/main\n\nworktree /tmp/x\nHEAD b\nbranch refs/heads/chore/x\n\nworktree /home/me/review\nHEAD c\nbranch refs/heads/chore/x";
     let shell = FakeShell::new(&[("worktree list", listing)]);
-    clear_local_leftovers(&shell, "chore/x");
+    clear_local_leftovers(&shell, "chore/x", Path::new("/tmp"));
+    assert!(shell.called("worktree prune"));
     assert!(shell.called("worktree remove --force /tmp/x"));
     assert!(!shell.called("worktree remove --force /repo"));
+    assert!(!shell.called("/home/me/review"));
     assert!(shell.called("branch -q -D chore/x"));
 
     let failing = FakeShell::new(&[])
         .failing("worktree list")
         .failing("branch -q -D");
-    clear_local_leftovers(&failing, "chore/x");
+    clear_local_leftovers(&failing, "chore/x", Path::new("/tmp"));
 }
 
 #[test]
@@ -526,16 +554,16 @@ fn the_merge_method_comes_from_the_default_branch() {
 
 #[test]
 fn status_lists_land_results() {
-    let rollup = r#"[
-      {"number": 1, "title": "One", "statusCheckRollup": [
-        {"name": "test"},
-        {"context": "nibble-review/land", "description": "shadow: would merge"}
-      ]},
-      {"number": 2, "title": "Two", "statusCheckRollup": []}
+    let prs = r#"[
+      {"number": 1, "title": "One", "headRefOid": "aaa"},
+      {"number": 2, "title": "Two", "headRefOid": "bbb"}
     ]"#;
-    let text = render_status(&FakeShell::new(&[("pr list", rollup)])).unwrap();
+    let shell = FakeShell::new(&[
+        ("pr list", prs),
+        ("commits/aaa/status", "shadow: would merge"),
+    ]);
     assert_eq!(
-        text,
+        render_status(&shell).unwrap(),
         "#1 One: shadow: would merge\n#2 Two: no land result yet\n"
     );
     let empty = render_status(&FakeShell::new(&[("pr list", "[]")])).unwrap();
@@ -543,22 +571,20 @@ fn status_lists_land_results() {
     assert!(render_status(&FakeShell::new(&[("pr list", "oops")])).is_err());
 }
 
-const CLEARED: &str = r#"{"headRefOid": "abc", "title": "T", "statusCheckRollup": [
-  {"context": "nibble-review/land", "description": "shadow: would merge"}]}"#;
-const ASKS: &str = r#"{"headRefOid": "abc", "title": "T", "statusCheckRollup": [
-  {"context": "nibble-review/land", "description": "shadow: would ask you (size)"}]}"#;
-const QUOTES: &str = r#"{"headRefOid": "abc", "title": "T", "statusCheckRollup": [
-  {"context": "nibble-review/land", "description": "shadow: would ask you (test file removed: `tests/would merge.test.ts`)"}]}"#;
-const UNKNOWN: &str = r#"{"headRefOid": "abc", "title": "T", "statusCheckRollup": []}"#;
+const VIEW: &str = r#"{"headRefOid": "abc", "title": "T"}"#;
+const CLEARED: &str = "shadow: would merge";
+const ASKS: &str = "shadow: would ask you (size)";
+const QUOTES: &str = "shadow: would ask you (test file removed: tests/would merge.test.ts)";
+const UNKNOWN: &str = "";
 
 fn merge_with(
-    view: &str,
+    land: &str,
     yes: bool,
     interactive: bool,
     auto: bool,
     answer: &str,
 ) -> (FakeShell, Result<()>, String) {
-    let shell = FakeShell::new(&[("pr view", view)]);
+    let shell = FakeShell::new(&[("pr view", VIEW), ("commits/abc/status", land)]);
     let mut out = Vec::new();
     let request = MergeRequest {
         pr: 7,
@@ -617,9 +643,25 @@ fn a_cleared_merge_without_a_terminal_still_needs_yes() {
 
 #[test]
 fn merge_fails_on_bad_gh_output() {
-    assert!(merge_with("oops", true, true, false, "").1.is_err());
-    let (_, result, _) = merge_with("{}", true, true, false, "");
-    assert!(result.unwrap_err().to_string().contains("no head commit"));
+    let bad = FakeShell::new(&[("pr view", "oops")]);
+    let request = MergeRequest {
+        pr: 7,
+        auto: false,
+        yes: true,
+        interactive: true,
+        method: "squash".to_string(),
+    };
+    let mut out = Vec::new();
+    assert!(merge(&bad, &request, &mut Cursor::new(String::new()), &mut out).is_err());
+    let headless = FakeShell::new(&[("pr view", "{}")]);
+    let error = merge(
+        &headless,
+        &request,
+        &mut Cursor::new(String::new()),
+        &mut out,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("no head commit"));
 }
 
 #[test]

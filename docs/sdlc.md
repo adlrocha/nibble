@@ -25,7 +25,7 @@ Install works in a throwaway worktree, so your checkout is untouched. It opens o
 - adds `.nibble/sdlc.toml`, unless the repository already has one;
 - adds a marked block to `AGENTS.md`. Everything outside the markers is left alone.
 
-Pin to anything other than the latest release with `--ref <tag, branch, or commit>`. Pass `--main-is-staging` when `main` deploys to dev and a release deploys to production. Rerunning install moves the pin to the latest release, or to `--ref`, and changes nothing else if the repository is already set up. `check` reports an older pin without failing, since it may be deliberate.
+Pin to anything other than the latest release with `--ref <tag, branch, or commit>`. Pass `--main-is-staging` when `main` deploys to dev and a release deploys to production. It only applies when install creates the config; after that, edit the file. Rerunning install moves the pin to the latest release, or to `--ref`, and changes nothing else if the repository is already set up. `check` reports an older pin without failing, since it may be deliberate.
 
 The agent's side is the `nibble-sdlc` skill, which `install.sh` installs globally.
 
@@ -37,7 +37,7 @@ nibble sdlc status       # list open PRs with their land result
 nibble sdlc merge 42     # merge the exact head of PR 42
 ```
 
-`merge` shows land's result, then asks. It pins the commit, so a later push stops it, and uses `[merge] method` from `.nibble/sdlc.toml` on the default branch. `--auto` lets GitHub merge once required checks pass. Without a terminal, `--yes` works only when land cleared that commit, so an agent can't use it to override land.
+`merge` shows land's result, then asks. It pins the commit, so a later push stops it, and uses `[merge] method` from `.nibble/sdlc.toml` on the default branch. `--auto` lets GitHub merge once required checks pass. It is pinned only when you enable it, and land isn't a required check yet, so a later push can merge without land clearing it. Without a terminal, `--yes` works only when land cleared that commit, so an agent can't use it to override land.
 
 ## Remove it
 

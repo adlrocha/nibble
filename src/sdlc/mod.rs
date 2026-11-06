@@ -245,7 +245,11 @@ fn resolve_pin(shell: &dyn Shell, action_ref: Option<&str>) -> Result<Pin> {
 /// Reads a file from the default branch on origin, or `None` when it is absent.
 fn read_default(shell: &dyn Shell, repo: &Repo, path: &str) -> Result<Option<String>> {
     let tree = format!("origin/{}", repo.default_branch);
-    let listed = shell.run("git", &["ls-tree", "--name-only", &tree, "--", path], None)?;
+    let listed = shell.run(
+        "git",
+        &["ls-tree", "--full-tree", "--name-only", &tree, "--", path],
+        None,
+    )?;
     if listed.is_empty() {
         return Ok(None);
     }
@@ -440,7 +444,7 @@ fn governing_permissions(lines: &[&str], uses: usize) -> Option<usize> {
         .map_or(lines.len(), |offset| start + 1 + offset);
     let in_job = lines[start..end]
         .iter()
-        .position(|line| line.trim_end() == format!("{}permissions:", " ".repeat(job_indent + 2)))
+        .position(|line| line.trim() == "permissions:" && indent_of(line) > job_indent)
         .map(|offset| start + offset);
     in_job.or_else(|| {
         lines[..jobs]
@@ -457,12 +461,16 @@ fn ensure_statuses_write(text: &str) -> Result<String> {
     let block = governing_permissions(&borrowed, uses).ok_or_else(|| {
         anyhow!("{WORKFLOW_PATH} has no `permissions:` block; add one with `{STATUSES_PERMISSION}`")
     })?;
-    let child_indent = indent_of(borrowed[block]) + 2;
+    let parent_indent = indent_of(borrowed[block]);
     let count = borrowed[block + 1..]
         .iter()
-        .take_while(|line| indent_of(line) >= child_indent && !line.trim().is_empty())
+        .take_while(|line| indent_of(line) > parent_indent && !line.trim().is_empty())
         .count();
     let range = block + 1..block + 1 + count;
+    // Match the block's own indentation, which isn't always two spaces.
+    let child_indent = borrowed[range.clone()]
+        .first()
+        .map_or(parent_indent + 2, |line| indent_of(line));
     let line = format!("{}{STATUSES_PERMISSION}", " ".repeat(child_indent));
     Ok(set_key(text, range.clone(), "statuses:", range.end, &line))
 }
@@ -470,7 +478,10 @@ fn ensure_statuses_write(text: &str) -> Result<String> {
 fn remove_land_lines(text: &str) -> String {
     let kept: Vec<String> = text
         .lines()
-        .filter(|line| line.trim() != LAND_INPUT && line.trim() != STATUSES_PERMISSION)
+        .filter(|line| {
+            let trimmed = line.trim();
+            !trimmed.starts_with("land:") && !trimmed.starts_with(STATUSES_PERMISSION)
+        })
         .map(str::to_string)
         .collect();
     join_lines(&kept)
@@ -542,7 +553,7 @@ fn apply(
         return Ok(());
     }
     release_branch(shell, publish.branch)?;
-    clear_local_leftovers(shell, publish.branch);
+    clear_local_leftovers(shell, publish.branch, &std::env::temp_dir());
 
     let directory = tempfile::tempdir().context("failed to create a temporary worktree path")?;
     let path = directory.path().to_string_lossy().to_string();
@@ -569,7 +580,16 @@ fn release_branch(shell: &dyn Shell, branch: &str) -> Result<()> {
     let open = shell.run(
         "gh",
         &[
-            "pr", "list", "--state", "open", "--head", branch, "--json", "url", "--jq", ".[0].url",
+            "pr",
+            "list",
+            "--state",
+            "open",
+            "--head",
+            branch,
+            "--json",
+            "url",
+            "--jq",
+            ".[0].url // empty",
         ],
         None,
     )?;
@@ -583,24 +603,26 @@ fn release_branch(shell: &dyn Shell, branch: &str) -> Result<()> {
     Ok(())
 }
 
-/// Removes what a killed run left behind, so a retry starts clean. Best effort:
-/// there is normally nothing here to remove.
-fn clear_local_leftovers(shell: &dyn Shell, branch: &str) {
+/// Removes what a killed run left behind, so a retry starts clean. Best effort,
+/// and limited to temporary directories: a worktree elsewhere is the user's.
+fn clear_local_leftovers(shell: &dyn Shell, branch: &str, temp_root: &Path) {
+    let _ = shell.run("git", &["worktree", "prune"], None);
     let wanted = format!("branch refs/heads/{branch}");
     let listing = shell
         .run("git", &["worktree", "list", "--porcelain"], None)
         .unwrap_or_default();
     for entry in listing.split("\n\n") {
-        if entry.lines().any(|line| line == wanted) {
-            if let Some(path) = entry
-                .lines()
-                .next()
-                .and_then(|line| line.strip_prefix("worktree "))
-            {
+        let path = entry
+            .lines()
+            .next()
+            .and_then(|line| line.strip_prefix("worktree "));
+        if let Some(path) = path.filter(|path| Path::new(path).starts_with(temp_root)) {
+            if entry.lines().any(|line| line == wanted) {
                 let _ = shell.run("git", &["worktree", "remove", "--force", path], None);
             }
         }
     }
+    // Refused while a worktree elsewhere holds the branch, which then fails clearly below.
     let _ = shell.run("git", &["branch", "-q", "-D", branch], None);
 }
 
@@ -773,12 +795,13 @@ fn merge_method(shell: &dyn Shell, repo: &Repo) -> Result<String> {
     }
 }
 
-/// Finds land's report for a commit in a PR's status rollup.
-fn land_description(rollup: &serde_json::Value) -> Option<String> {
-    rollup.as_array()?.iter().find_map(|item| {
-        (item["context"].as_str() == Some(LAND_CONTEXT))
-            .then(|| item["description"].as_str().unwrap_or("").to_string())
-    })
+/// Reads land's report for a commit. PR status rollups leave descriptions out,
+/// so this asks the commit status API.
+fn land_description(shell: &dyn Shell, sha: &str) -> Result<Option<String>> {
+    let filter = format!(".statuses[] | select(.context == \"{LAND_CONTEXT}\") | .description");
+    let endpoint = format!("repos/{{owner}}/{{repo}}/commits/{sha}/status");
+    let text = shell.run("gh", &["api", &endpoint, "--jq", &filter], None)?;
+    Ok(text.lines().next().map(str::to_string))
 }
 
 fn render_status(shell: &dyn Shell) -> Result<String> {
@@ -790,26 +813,27 @@ fn render_status(shell: &dyn Shell) -> Result<String> {
             "--state",
             "open",
             "--json",
-            "number,title,statusCheckRollup",
+            "number,title,headRefOid",
         ],
         None,
     )?;
     let prs: serde_json::Value = serde_json::from_str(&raw).context("failed to parse gh output")?;
-    let lines: Vec<String> = prs
+    let lines = prs
         .as_array()
         .map(Vec::as_slice)
         .unwrap_or_default()
         .iter()
         .map(|pr| {
-            format!(
-                "#{} {}: {}\n",
+            let land = land_description(shell, pr["headRefOid"].as_str().unwrap_or_default())?;
+            Ok(format!(
+                "#{} {}: {}
+",
                 pr["number"],
                 pr["title"].as_str().unwrap_or(""),
-                land_description(&pr["statusCheckRollup"])
-                    .unwrap_or_else(|| "no land result yet".to_string())
-            )
+                land.unwrap_or_else(|| "no land result yet".to_string())
+            ))
         })
-        .collect();
+        .collect::<Result<Vec<String>>>()?;
     Ok(if lines.is_empty() {
         "No open pull requests.\n".to_string()
     } else {
@@ -835,20 +859,14 @@ fn merge(
     let number = request.pr.to_string();
     let raw = shell.run(
         "gh",
-        &[
-            "pr",
-            "view",
-            &number,
-            "--json",
-            "headRefOid,title,statusCheckRollup",
-        ],
+        &["pr", "view", &number, "--json", "headRefOid,title"],
         None,
     )?;
     let pr: serde_json::Value = serde_json::from_str(&raw).context("failed to parse gh output")?;
     let head = pr["headRefOid"]
         .as_str()
         .ok_or_else(|| anyhow!("PR #{number} has no head commit"))?;
-    let land = land_description(&pr["statusCheckRollup"]);
+    let land = land_description(shell, head)?;
     let clear = land.as_deref() == Some(LAND_CLEARED);
     writeln!(
         out,
