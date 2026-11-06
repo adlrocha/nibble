@@ -14,8 +14,10 @@ Land is in **shadow mode**: it reports and never merges or blocks.
 
 ```bash
 nibble sdlc install --dry-run   # show the plan
-nibble sdlc install             # open the PR
+nibble sdlc install             # open the PR, asking first
 ```
+
+Scripts and agents need `--yes`, because without a terminal the prompt counts as no.
 
 Install works in a throwaway worktree, so your checkout is untouched. It opens one PR on `chore/nibble-sdlc` that:
 
@@ -23,7 +25,7 @@ Install works in a throwaway worktree, so your checkout is untouched. It opens o
 - adds `.nibble/sdlc.toml`, unless the repository already has one;
 - adds a marked block to `AGENTS.md`. Everything outside the markers is left alone.
 
-Pin to anything other than the latest release with `--ref <tag, branch, or commit>`. Pass `--main-is-staging` when `main` deploys to dev and a release deploys to production. Rerunning install updates the pin, and changes nothing else if the repository is already set up.
+Pin to anything other than the latest release with `--ref <tag, branch, or commit>`. Pass `--main-is-staging` when `main` deploys to dev and a release deploys to production. Rerunning install moves the pin to the latest release, or to `--ref`, and changes nothing else if the repository is already set up. `check` reports an older pin without failing, since it may be deliberate.
 
 The agent's side is the `nibble-sdlc` skill, which `install.sh` installs globally.
 
@@ -43,6 +45,8 @@ nibble sdlc merge 42     # merge the exact head of PR 42
 nibble sdlc uninstall                    # keeps the reviewer
 nibble sdlc uninstall --remove-reviewer  # deletes the workflow too
 ```
+
+It also takes `--dry-run`, and `--yes` for scripts.
 
 Uninstall opens the reverse PR. It removes the `land` input, `statuses: write`, `.nibble/sdlc.toml`, and the `AGENTS.md` block, including any of these you added by hand. The plan lists each file before you confirm.
 

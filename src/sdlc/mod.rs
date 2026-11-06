@@ -542,6 +542,7 @@ fn apply(
         return Ok(());
     }
     release_branch(shell, publish.branch)?;
+    clear_local_leftovers(shell, publish.branch);
 
     let directory = tempfile::tempdir().context("failed to create a temporary worktree path")?;
     let path = directory.path().to_string_lossy().to_string();
@@ -580,6 +581,27 @@ fn release_branch(shell: &dyn Shell, branch: &str) -> Result<()> {
         shell.run("git", &["push", "-q", "origin", "--delete", branch], None)?;
     }
     Ok(())
+}
+
+/// Removes what a killed run left behind, so a retry starts clean. Best effort:
+/// there is normally nothing here to remove.
+fn clear_local_leftovers(shell: &dyn Shell, branch: &str) {
+    let wanted = format!("branch refs/heads/{branch}");
+    let listing = shell
+        .run("git", &["worktree", "list", "--porcelain"], None)
+        .unwrap_or_default();
+    for entry in listing.split("\n\n") {
+        if entry.lines().any(|line| line == wanted) {
+            if let Some(path) = entry
+                .lines()
+                .next()
+                .and_then(|line| line.strip_prefix("worktree "))
+            {
+                let _ = shell.run("git", &["worktree", "remove", "--force", path], None);
+            }
+        }
+    }
+    let _ = shell.run("git", &["branch", "-q", "-D", branch], None);
 }
 
 fn publish_from(
@@ -703,10 +725,13 @@ fn check_repo(shell: &dyn Shell, repo: &Repo) -> Result<Vec<(bool, String)>> {
     ];
     // A failed lookup says nothing about the repository, so it isn't drift.
     if let Ok(latest) = resolve_pin(shell, None) {
+        // An older pin can be deliberate (`--ref`), so it is reported, not drift.
+        let current = set_pin(text, &latest).is_ok_and(|after| after == text);
+        let note = if current { "" } else { "not " };
         checks.push((
-            text.contains(&latest.sha),
+            true,
             format!(
-                "the action is pinned to the latest release ({})",
+                "the action is {note}pinned to the latest release ({})",
                 latest.label
             ),
         ));

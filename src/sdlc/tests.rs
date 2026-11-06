@@ -370,6 +370,21 @@ fn the_branch_of_a_merged_pr_is_cleared_so_reinstalling_works() {
 }
 
 #[test]
+fn a_killed_run_leaves_nothing_that_blocks_a_retry() {
+    let listing = "worktree /repo\nHEAD a\nbranch refs/heads/main\n\nworktree /tmp/x\nHEAD b\nbranch refs/heads/chore/x";
+    let shell = FakeShell::new(&[("worktree list", listing)]);
+    clear_local_leftovers(&shell, "chore/x");
+    assert!(shell.called("worktree remove --force /tmp/x"));
+    assert!(!shell.called("worktree remove --force /repo"));
+    assert!(shell.called("branch -q -D chore/x"));
+
+    let failing = FakeShell::new(&[])
+        .failing("worktree list")
+        .failing("branch -q -D");
+    clear_local_leftovers(&failing, "chore/x");
+}
+
+#[test]
 fn publishing_writes_files_and_opens_a_pr_without_hooks() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("gone.txt"), "x").unwrap();
@@ -473,7 +488,7 @@ fn check_reports_each_piece() {
     let checks = check_repo(&stale, &repo()).unwrap();
     assert!(checks
         .iter()
-        .any(|(ok, line)| !ok && line.contains("latest release (v9)")));
+        .any(|(ok, line)| *ok && line.contains("not pinned to the latest release (v9)")));
     assert!(checks
         .iter()
         .any(|(ok, line)| !ok && line.contains("current delivery flow block")));

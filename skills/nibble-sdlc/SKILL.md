@@ -5,7 +5,7 @@ description: Deliver a spec as a reviewed pull request. Use when asked to build 
 
 # Nibble SDLC
 
-Take a spec to a pull request that nibble-review has approved, without a person in the middle. Stop only where this skill says to.
+Take a spec to a pull request that nibble-review has approved, without a person in the middle. Stop only where this skill says to. Where the repository's `AGENTS.md` is stricter, it wins.
 
 ## 1. Check the spec
 
