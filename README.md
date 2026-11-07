@@ -649,6 +649,7 @@ src/
 ├── mux.rs                   # `nibble mux`: recoverable zellij sessions
 ├── session/                 # Session discovery, picker, transcript reading
 ├── quota_watch.rs           # Quota auto-continue daemon
+├── pane_input.rs            # Typing into an agent's zellij pane (quota-watch, rc)
 ├── rc/                      # Slack remote control (`nibble rc`, `/nibble-rc`)
 ├── usage/                   # Token usage scanning, pricing, reports
 ├── memory/                  # Cross-session memory store and summarization

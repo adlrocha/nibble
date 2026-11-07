@@ -142,21 +142,28 @@ impl Daemon {
         {
             return Ok(());
         }
+        // The agent may have quit during the grace period: then the pane is
+        // the user's shell and the message would run as a command.
+        if !pane::agent_present(&task, &spawn.zellij_session, spawn.pane_id)? {
+            store::delete_spawn(&self.db, &spawn.thread_ts)?;
+            self.note(
+                &spawn.channel,
+                &spawn.thread_ts,
+                ":warning: The agent quit before its first message, so nothing was typed.",
+            );
+            return Ok(());
+        }
         // Ready: link first, so replies arriving meanwhile find the link.
         let card = card_for(&task, &spawn.zellij_session);
-        let mut link = Link {
-            task_id: task.task_id.clone(),
-            channel: spawn.channel.clone(),
-            thread_ts: spawn.thread_ts.clone(),
-            created_at: now,
-            closed: false,
-            watch: Some(Watch::Working),
-            last_reply_id: self.current_reply(&task).map(|r| r.id),
-            idle_checks: 0,
-            permalink: self.bot.permalink(&spawn.channel, &spawn.thread_ts).ok(),
-            card_ts: None,
+        let mut link = Link::new(
+            &task.task_id,
+            &spawn.channel,
+            &spawn.thread_ts,
             card,
-        };
+            Watch::Working,
+        );
+        link.last_reply_id = self.current_reply(&task).map(|r| r.id);
+        link.permalink = self.bot.permalink(&spawn.channel, &spawn.thread_ts).ok();
         store::put_link(&self.db, &link)?;
         store::delete_spawn(&self.db, &spawn.thread_ts)?;
         for msg in std::iter::once(&spawn.prompt).chain(spawn.queued.iter()) {

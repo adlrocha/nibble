@@ -191,31 +191,16 @@ pub(super) fn status_of(watch: Watch) -> SessionStatus {
 
 #[cfg(test)]
 mod tests {
-    use super::super::store::CardInfo;
     use super::super::test_support::task;
     use super::*;
     use chrono::Utc;
 
     fn link(watch: Option<Watch>, last: Option<&str>, idle_checks: u32) -> Link {
-        Link {
-            task_id: "t".into(),
-            channel: "D1".into(),
-            thread_ts: "1.1".into(),
-            created_at: Utc::now(),
-            closed: false,
-            watch,
-            last_reply_id: last.map(str::to_string),
-            idle_checks,
-            permalink: None,
-            card_ts: None,
-            card: CardInfo {
-                title: "t".into(),
-                agent: "Claude Code".into(),
-                location: "host".into(),
-                cwd: None,
-                zellij: "main".into(),
-            },
-        }
+        let mut l = crate::rc::test_support::link("t", "1.1");
+        l.watch = watch;
+        l.last_reply_id = last.map(str::to_string);
+        l.idle_checks = idle_checks;
+        l
     }
 
     fn reply(id: &str) -> Option<transcript::Reply> {

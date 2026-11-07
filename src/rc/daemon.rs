@@ -61,7 +61,7 @@ pub(crate) fn run(cfg: RcConfig, db_path: PathBuf) -> Result<()> {
         dm,
         db,
         sessions_api: true,
-        seen: VecDeque::new(),
+        seen: Seen::default(),
         last_beat: None,
         repos_cache: None,
     };
@@ -115,7 +115,7 @@ pub(super) struct Daemon {
     /// False once Slack rejected the agent-session methods (app not
     /// declared as an agent): they are skipped from then on.
     pub(super) sessions_api: bool,
-    pub(super) seen: VecDeque<String>,
+    pub(super) seen: Seen,
     pub(super) last_beat: Option<Instant>,
     pub(super) repos_cache: Option<(Instant, Vec<PathBuf>)>,
 }
@@ -175,8 +175,9 @@ impl Daemon {
         let id = env.envelope_id().unwrap_or_default().to_string();
         // Slack redelivers what it did not see acknowledged in 3 seconds
         // (a long poll pass can delay the read): act once, re-ack the rest.
-        if let Some(key) = redelivery_key(&env) {
-            if !self.first_sight(&key) {
+        let key = redelivery_key(&env);
+        if let Some(key) = &key {
+            if !self.first_sight(key) {
                 if !id.is_empty() {
                     conn.send(socket::ack_frame(&id, None))?;
                 }
@@ -199,6 +200,13 @@ impl Daemon {
             }
             Envelope::Hello | Envelope::Disconnect { .. } => (None, After::Nothing),
         };
+        // A rejected form stays open with the same view id: forget the key so
+        // the corrected resubmission is handled.
+        if ack.is_some() {
+            if let Some(key) = &key {
+                self.forget(key);
+            }
+        }
         if !id.is_empty() {
             conn.send(socket::ack_frame(&id, ack.as_ref()))?;
         }
@@ -240,19 +248,12 @@ impl Daemon {
         user == Some(self.secrets.user_id.as_str())
     }
 
-    /// True the first time an event id is seen.
     fn first_sight(&mut self, id: &str) -> bool {
-        if id.is_empty() {
-            return true;
-        }
-        if self.seen.iter().any(|s| s == id) {
-            return false;
-        }
-        if self.seen.len() >= SEEN_CAP {
-            self.seen.pop_front();
-        }
-        self.seen.push_back(id.to_string());
-        true
+        self.seen.first_sight(id)
+    }
+
+    fn forget(&mut self, id: &str) {
+        self.seen.forget(id);
     }
 
     // ── Inbound ───────────────────────────────────────────────────────────
@@ -505,19 +506,8 @@ impl Daemon {
         };
         let card = card_for(&task, &session);
         let topic = crate::status::topic_of(&task).map(str::to_string);
-        let mut link = Link {
-            task_id: task.task_id.clone(),
-            channel: self.dm.clone(),
-            thread_ts: String::new(),
-            created_at: Utc::now(),
-            closed: false,
-            watch: Some(relay::observe(&task)),
-            last_reply_id: None,
-            idle_checks: 0,
-            permalink: None,
-            card_ts: None,
-            card,
-        };
+        // The thread is the card itself, so its ts is filled in on posting.
+        let mut link = Link::new(&task.task_id, &self.dm, "", card, relay::observe(&task));
         let session_card = session_card(&link, topic.as_deref());
         link.thread_ts = self.bot.post(
             &self.dm,
@@ -732,6 +722,33 @@ fn redelivery_key(env: &Envelope) -> Option<String> {
     }
 }
 
+/// Recently handled event and interaction ids, to drop Slack's
+/// redeliveries (bounded to [`SEEN_CAP`]).
+#[derive(Default)]
+pub(super) struct Seen(VecDeque<String>);
+
+impl Seen {
+    /// True the first time `id` is seen (an empty id always counts as new).
+    fn first_sight(&mut self, id: &str) -> bool {
+        if id.is_empty() {
+            return true;
+        }
+        if self.0.iter().any(|s| s == id) {
+            return false;
+        }
+        if self.0.len() >= SEEN_CAP {
+            self.0.pop_front();
+        }
+        self.0.push_back(id.to_string());
+        true
+    }
+
+    /// Drop a remembered id, so it is acted on again.
+    fn forget(&mut self, id: &str) {
+        self.0.retain(|s| s != id);
+    }
+}
+
 /// A DM message the daemon acts on.
 #[derive(Debug, PartialEq)]
 enum Incoming {
@@ -858,6 +875,24 @@ mod tests {
         assert!(classify_message(&msg(json!({"subtype": "message_changed"})), "U1").is_none());
         assert!(classify_message(&msg(json!({"channel_type": "channel"})), "U1").is_none());
         assert!(classify_message(&msg(json!({"text": "  "})), "U1").is_none());
+    }
+
+    #[test]
+    fn seen_ids_dedupe_forget_and_stay_bounded() {
+        let mut seen = Seen::default();
+        assert!(seen.first_sight("a"));
+        assert!(!seen.first_sight("a"));
+        seen.forget("a");
+        assert!(
+            seen.first_sight("a"),
+            "a rejected form's resubmission is handled"
+        );
+        assert!(seen.first_sight("") && seen.first_sight(""));
+        for i in 0..SEEN_CAP {
+            seen.first_sight(&i.to_string());
+        }
+        assert!(seen.first_sight("a"), "the oldest id was evicted");
+        assert_eq!(seen.0.len(), SEEN_CAP);
     }
 
     #[test]

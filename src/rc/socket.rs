@@ -145,12 +145,27 @@ pub(crate) fn connect(url: &str) -> Result<Connection> {
         .to_string();
     let port = uri.port_u16().unwrap_or(443);
 
-    let addr = std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), port))
+    let addrs: Vec<_> = std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), port))
         .with_context(|| format!("cannot resolve {host}"))?
-        .next()
-        .with_context(|| format!("no address for {host}"))?;
-    let tcp = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)
-        .with_context(|| format!("cannot connect to {host}"))?;
+        .collect();
+    // Dual-stack hosts: an unusable first record (IPv6 without IPv6 egress)
+    // must not hide a working one.
+    let mut last_err = None;
+    let tcp = addrs
+        .iter()
+        .find_map(
+            |addr| match TcpStream::connect_timeout(addr, CONNECT_TIMEOUT) {
+                Ok(tcp) => Some(tcp),
+                Err(e) => {
+                    last_err = Some(e);
+                    None
+                }
+            },
+        )
+        .with_context(|| match &last_err {
+            Some(e) => format!("cannot connect to {host}: {e}"),
+            None => format!("no address for {host}"),
+        })?;
     tcp.set_read_timeout(Some(CONNECT_TIMEOUT))?;
     tcp.set_write_timeout(Some(CONNECT_TIMEOUT))?;
     let name = ServerName::try_from(host.clone()).context("invalid TLS server name")?;

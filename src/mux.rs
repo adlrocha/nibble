@@ -263,10 +263,7 @@ fn cmd_open(db: &Database, name: &str) -> Result<()> {
     };
     match plan_open(state, restorable.as_ref()) {
         OpenPlan::Attach => {
-            if manifest.is_none() {
-                save_manifest(db, name, &Manifest::default())?;
-            }
-            spawn_watcher(name)?;
+            record_running_session(db, name, manifest.as_ref())?;
             Err(exec_zellij(&["attach", name]))
         }
         OpenPlan::Restore { discard_dead } => {
@@ -932,15 +929,9 @@ pub(crate) fn ensure_background_session(db: &Database, name: &str) -> Result<()>
     let state = zellij_session_state(name)?;
     let manifest = load_manifest(db, name)?;
     match plan_background(state, manifest.as_ref()) {
-        BackgroundPlan::Ready => {
-            // What `nibble mux NAME` does when attaching: record the session
-            // and make sure a watcher keeps its snapshot, so the tab opened
-            // next comes back after a crash.
-            if manifest.is_none() {
-                save_manifest(db, name, &Manifest::default())?;
-            }
-            return ensure_watcher(name);
-        }
+        // Same as `nibble mux NAME` attaching: the tab opened next comes
+        // back after a crash.
+        BackgroundPlan::Ready => return record_running_session(db, name, manifest.as_ref()),
         BackgroundPlan::Refuse { tabs } => bail!(
             "zellij session '{name}' is not running and nibble mux has {tabs} recorded agent tab(s) \
              for it. Run `nibble mux {name}` to bring them back, then start the session again"
@@ -965,6 +956,16 @@ pub(crate) fn ensure_background_session(db: &Database, name: &str) -> Result<()>
         );
     }
     spawn_watcher(name)
+}
+
+/// Record a running session (an empty manifest if nibble has none) and make
+/// sure a watcher keeps its snapshot. Shared by `nibble mux NAME` attaching
+/// and `nibble rc` opening a tab in it.
+fn record_running_session(db: &Database, name: &str, manifest: Option<&Manifest>) -> Result<()> {
+    if manifest.is_none() {
+        save_manifest(db, name, &Manifest::default())?;
+    }
+    ensure_watcher(name)
 }
 
 /// Start the session's watcher unless one is running (it holds the lock).

@@ -88,6 +88,9 @@ poll_ms = 1500                  # how often finished turns are checked
 start_timeout_secs = 240        # how long a new session may take to start
 ```
 
+The daemon reads `[rc]` when it starts: after editing it, run
+`systemctl --user restart nibble-rc`.
+
 The form lists the directories of your recent nibble sessions first, then
 the repos found under `repo_roots` (up to Slack's 100 options). Any other
 directory can be typed in.
@@ -101,12 +104,13 @@ directory can be typed in.
   pane was closed, so your message was not typed (it would have run in the
   shell left behind). If the zellij session is still running, start the
   agent again in it and send `/nibble-rc` from it. If the whole session is down,
-  `nibble mux main` brings its recorded tabs back (each resuming its
-  conversation); then send `/nibble-rc` again.
-- *"zellij session 'main' is not running and nibble mux has N recorded agent
-  tab(s)"*: starting a session from Slack never rebuilds a session with
-  recorded agents (that would lose them). Run `nibble mux main` once, then
-  start the session again.
+  `nibble mux <name>` (the session the note names) brings its recorded tabs
+  back, each resuming its conversation; then send `/nibble-rc` again.
+- *"zellij session '<name>' is not running and nibble mux has N recorded
+  agent tab(s)"*: starting a session from Slack never rebuilds a session with
+  recorded agents (that would lose them). Run `nibble mux <name>` once (the
+  configured `rc.zellij_session`, `main` by default), then start the session
+  again.
 - If Slack refuses the agent-session calls (status and titles), the daemon
   logs it once and carries on without them; replies still flow.
 - `/nibble-rc` spends a model turn in Claude Code: the hook is missing; re-run

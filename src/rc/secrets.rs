@@ -1,6 +1,7 @@
 //! Slack credentials for `nibble rc`.
 //!
-//! They live in `~/.config/nibble/slack.env` (mode 0600), deliberately
+//! They live in `$XDG_CONFIG_HOME/nibble/slack.env` (default
+//! `~/.config/nibble/slack.env`, mode 0600), deliberately
 //! outside `~/.nibble`: every sandbox bind-mounts `~/.nibble` read-write, and
 //! a sandboxed agent must never be able to read the bot token. Environment
 //! variables of the same name override the file (handy for testing).

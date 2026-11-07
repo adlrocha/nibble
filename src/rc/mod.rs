@@ -237,13 +237,30 @@ fn prompt_line(label: &str, secret: bool) -> Result<String> {
     Ok(line.trim().to_string())
 }
 
+/// The terminal state to restore if `nibble rc setup` is interrupted while
+/// echo is off (a signal ends the process without running `Drop`).
+static SAVED_TERMIOS: std::sync::OnceLock<libc::termios> = std::sync::OnceLock::new();
+
+extern "C" fn restore_and_reraise(sig: libc::c_int) {
+    // SAFETY: tcsetattr, signal and raise are async-signal-safe; the saved
+    // termios was written before this handler was installed.
+    unsafe {
+        if let Some(t) = SAVED_TERMIOS.get() {
+            libc::tcsetattr(0, libc::TCSANOW, t);
+        }
+        libc::signal(sig, libc::SIG_DFL);
+        libc::raise(sig);
+    }
+}
+
 /// Disables terminal echo while alive (no-op when stdin is not a tty).
+/// Ctrl-C or a TERM signal restores echo before the process dies.
 struct EchoOff(libc::termios);
 
 impl EchoOff {
     fn new() -> Option<Self> {
         // SAFETY: tcgetattr/tcsetattr on fd 0 with valid termios pointers;
-        // the saved state is restored on drop.
+        // the saved state is restored on drop or by the signal handler.
         unsafe {
             if libc::isatty(0) != 1 {
                 return None;
@@ -253,6 +270,10 @@ impl EchoOff {
                 return None;
             }
             let orig = t;
+            let _ = SAVED_TERMIOS.set(orig);
+            let handler = restore_and_reraise as extern "C" fn(libc::c_int) as libc::sighandler_t;
+            libc::signal(libc::SIGINT, handler);
+            libc::signal(libc::SIGTERM, handler);
             t.c_lflag &= !libc::ECHO;
             if libc::tcsetattr(0, libc::TCSANOW, &t) != 0 {
                 return None;
@@ -264,9 +285,12 @@ impl EchoOff {
 
 impl Drop for EchoOff {
     fn drop(&mut self) {
-        // SAFETY: restores the termios saved in `new`.
+        // SAFETY: restores the termios saved in `new`, then the default
+        // signal dispositions.
         unsafe {
             libc::tcsetattr(0, libc::TCSANOW, &self.0);
+            libc::signal(libc::SIGINT, libc::SIG_DFL);
+            libc::signal(libc::SIGTERM, libc::SIG_DFL);
         }
     }
 }
@@ -388,25 +412,16 @@ mod test_support {
 
     /// An open link for task `task` on thread `ts` in DM `D1`.
     pub(crate) fn link(task: &str, ts: &str) -> Link {
-        Link {
-            task_id: task.into(),
-            channel: "D1".into(),
-            thread_ts: ts.into(),
-            created_at: Utc::now(),
-            closed: false,
-            watch: None,
-            last_reply_id: None,
-            idle_checks: 0,
-            permalink: None,
-            card_ts: None,
-            card: CardInfo {
-                title: "t".into(),
-                agent: "claude".into(),
-                location: "host".into(),
-                cwd: None,
-                zellij: "main".into(),
-            },
-        }
+        let card = CardInfo {
+            title: "t".into(),
+            agent: "claude".into(),
+            location: "host".into(),
+            cwd: None,
+            zellij: "main".into(),
+        };
+        let mut l = Link::new(task, "D1", ts, card, super::store::Watch::Idle);
+        l.watch = None;
+        l
     }
 
     /// A task registered in zellij pane `pane` of `session`; `window`

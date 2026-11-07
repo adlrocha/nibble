@@ -72,6 +72,30 @@ pub(crate) struct Link {
 }
 
 impl Link {
+    /// A freshly opened link; the caller fills in `permalink`, `card_ts` and
+    /// `last_reply_id` once known.
+    pub(crate) fn new(
+        task_id: &str,
+        channel: &str,
+        thread_ts: &str,
+        card: CardInfo,
+        watch: Watch,
+    ) -> Self {
+        Link {
+            task_id: task_id.to_string(),
+            channel: channel.to_string(),
+            thread_ts: thread_ts.to_string(),
+            created_at: Utc::now(),
+            closed: false,
+            watch: Some(watch),
+            last_reply_id: None,
+            idle_checks: 0,
+            permalink: None,
+            card_ts: None,
+            card,
+        }
+    }
+
     /// The message to rewrite when the session closes.
     pub(crate) fn card_message(&self) -> &str {
         self.card_ts.as_deref().unwrap_or(&self.thread_ts)
@@ -283,25 +307,9 @@ mod tests {
     }
 
     fn sample(task: &str, ts: &str) -> Link {
-        Link {
-            task_id: task.into(),
-            channel: "D1".into(),
-            thread_ts: ts.into(),
-            created_at: Utc::now(),
-            closed: false,
-            watch: None,
-            last_reply_id: None,
-            idle_checks: 0,
-            permalink: None,
-            card_ts: None,
-            card: CardInfo {
-                title: "t".into(),
-                agent: "claude".into(),
-                location: "host".into(),
-                cwd: None,
-                zellij: "main".into(),
-            },
-        }
+        let mut l = crate::rc::test_support::link(task, ts);
+        l.watch = None;
+        l
     }
 
     #[test]
