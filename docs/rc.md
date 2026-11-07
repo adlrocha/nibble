@@ -16,7 +16,7 @@ or start a new one from your phone.
   new tab of zellij session `main` (created in the background and recorded by
   `nibble mux` if it isn't running) and gets its own thread. A plain message
   to the app offers the same form, prefilled with what you wrote.
-- **Close** a thread with the button on its first message, or `/nibble-rc
+- **Close** a thread with the button on its session card, or `/nibble-rc
   stop` in the session. Closing only stops relaying: the zellij tab and the
   agent keep running. Tabs are never closed for you.
 - **`/nibble list`** in Slack, or `nibble rc list`, shows the sessions in
@@ -45,7 +45,8 @@ zellij pane (claude | pi | omp, host or sandbox)
   reply, read from the agent's transcript.
 - `/nibble-rc` never talks to Slack itself. It leaves a request in nibble's
   database and waits for the daemon's answer. The Slack tokens live in
-  `~/.config/nibble/slack.env` (mode 600), outside `~/.nibble`, because every
+  `$XDG_CONFIG_HOME/nibble/slack.env` (default `~/.config/nibble/slack.env`,
+  mode 600), outside `~/.nibble`, because every
   sandbox mounts `~/.nibble`: sandboxed agents cannot read them.
 - In Claude Code, `/nibble-rc` is handled by a `UserPromptSubmit` hook that
   blocks the prompt, so it spends no model turn. In pi/omp it is an extension

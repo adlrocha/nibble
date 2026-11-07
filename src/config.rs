@@ -32,7 +32,8 @@ pub struct Config {
 /// Slack remote control (`nibble rc`) configuration.
 ///
 /// Secrets (Slack tokens, your Slack member ID) are not stored here: they
-/// live in `~/.config/nibble/slack.env`, outside `~/.nibble`, which every
+/// live in `$XDG_CONFIG_HOME/nibble/slack.env` (default `~/.config/…`),
+/// outside `~/.nibble`, which every
 /// sandbox mounts read-write. See `docs/rc.md`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RcConfig {

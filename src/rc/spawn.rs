@@ -12,6 +12,7 @@ use super::pane;
 use super::slack::{self, SessionStatus};
 use super::store::{self, Link, Location, PendingSpawn, SpawnAgent, Watch};
 use crate::models::{AgentType, Task, TaskStatus};
+use crate::mux::sh_quote;
 
 /// Grace period after an agent reports its session before the first
 /// message is typed, so its TUI is reading input.
@@ -20,6 +21,14 @@ const READY_GRACE_SECS: i64 = 2;
 impl Daemon {
     pub(super) fn start_session(&mut self, new: &NewSession) -> Result<()> {
         let channel = new.origin.channel.clone();
+        if let Some(ts) = &new.origin.thread_ts {
+            if thread_busy(
+                store::spawn_for_thread(&self.db, ts)?.is_some(),
+                store::link_by_thread(&self.db, &channel, ts)?.as_ref(),
+            ) {
+                anyhow::bail!("this thread already has a session; start another from a new message or `/nibble`");
+            }
+        }
         let thread_ts = match &new.origin.thread_ts {
             Some(ts) => ts.clone(),
             None => {
@@ -40,6 +49,12 @@ impl Daemon {
                 self.cfg.zellij_session
             ),
         );
+        let wrappers = crate::mux::wrappers_dir()?;
+        if new.location == Location::Host {
+            // Without it the tab would be a bare shell and the thread would
+            // wait out the start timeout.
+            crate::mux::require_wrapper(&wrappers.join(wrapper_name(new.agent)))?;
+        }
         let session = self.cfg.zellij_session.clone();
         crate::mux::ensure_background_session(&self.db, &session)?;
         let script = launch_script(
@@ -47,7 +62,7 @@ impl Daemon {
             new.agent,
             &new.cwd,
             &std::env::current_exe().context("cannot locate nibble binary")?,
-            &crate::mux::wrappers_dir()?,
+            &wrappers,
             &std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()),
         );
         let tab_name = tab_name_for(&new.cwd);
@@ -129,7 +144,7 @@ impl Daemon {
         }
         // Ready: link first, so replies arriving meanwhile find the link.
         let card = card_for(&task, &spawn.zellij_session);
-        let link = Link {
+        let mut link = Link {
             task_id: task.task_id.clone(),
             channel: spawn.channel.clone(),
             thread_ts: spawn.thread_ts.clone(),
@@ -139,6 +154,7 @@ impl Daemon {
             last_reply_id: self.current_reply(&task).map(|r| r.id),
             idle_checks: 0,
             permalink: self.bot.permalink(&spawn.channel, &spawn.thread_ts).ok(),
+            card_ts: None,
             card,
         };
         store::put_link(&self.db, &link)?;
@@ -147,12 +163,16 @@ impl Daemon {
             pane::send_text(&spawn.zellij_session, spawn.pane_id, msg)?;
         }
         let session_card = session_card(&link, Some(&spawn.prompt));
-        self.bot.post(
+        // The thread root is your message or the prompt, so the card is a
+        // reply: remember it, Close rewrites it.
+        let card_ts = self.bot.post(
             &link.channel,
             Some(&link.thread_ts),
             &slack::session_card_text(&session_card),
             &slack::session_card_blocks(&session_card, true),
         )?;
+        link.card_ts = Some(card_ts);
+        store::put_link(&self.db, &link)?;
         self.session_status(&link.channel, &link.thread_ts, SessionStatus::Processing);
         self.session_title(
             &link.channel,
@@ -161,6 +181,12 @@ impl Daemon {
         );
         Ok(())
     }
+}
+
+/// A thread holds one session: a start is refused while one is starting or
+/// open there (pending starts are keyed by thread).
+fn thread_busy(pending: bool, link: Option<&Link>) -> bool {
+    pending || link.is_some_and(|l| !l.closed)
 }
 
 /// Whether the agent reported its conversation (its TUI is up).
@@ -195,10 +221,6 @@ fn find_spawned_task<'a>(tasks: &'a [Task], spawn: &PendingSpawn) -> Option<&'a 
         })
 }
 
-fn sh_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
 /// The command a new session's pane runs: the agent through its nibble
 /// wrapper (host; Claude with `--fresh` so it doesn't resume the repo's
 /// last conversation) or a `--btw` sandbox attach (a side session that
@@ -213,14 +235,13 @@ fn launch_script(
 ) -> String {
     let run = match location {
         Location::Host => {
-            let (wrapper, args) = match agent {
-                SpawnAgent::Claude => ("claude-wrapper", " --fresh"),
-                SpawnAgent::Pi => ("pi-wrapper", ""),
-                SpawnAgent::Omp => ("omp-wrapper", ""),
+            let args = match agent {
+                SpawnAgent::Claude => " --fresh",
+                SpawnAgent::Pi | SpawnAgent::Omp => "",
             };
             format!(
                 "{}{args}",
-                sh_quote(&wrappers.join(wrapper).to_string_lossy())
+                sh_quote(&wrappers.join(wrapper_name(agent)).to_string_lossy())
             )
         }
         Location::Sandbox => {
@@ -237,6 +258,15 @@ fn launch_script(
         }
     };
     format!("{run}; exec {}", sh_quote(shell))
+}
+
+/// The nibble wrapper a host session of `agent` starts through.
+fn wrapper_name(agent: SpawnAgent) -> &'static str {
+    match agent {
+        SpawnAgent::Claude => "claude-wrapper",
+        SpawnAgent::Pi => "pi-wrapper",
+        SpawnAgent::Omp => "omp-wrapper",
+    }
 }
 
 /// The zellij tab name for a session started in `cwd`.
@@ -288,6 +318,19 @@ mod tests {
             "window"
         );
         assert!(find_spawned_task(&tasks[..3], &spawn(now)).is_none());
+    }
+
+    #[test]
+    fn one_session_per_thread() {
+        assert!(thread_busy(true, None));
+        assert!(!thread_busy(false, None));
+        let mut l = crate::rc::test_support::link("t", "1.1");
+        assert!(thread_busy(false, Some(&l)));
+        l.closed = true;
+        assert!(
+            !thread_busy(false, Some(&l)),
+            "a closed thread can host a new session"
+        );
     }
 
     #[test]

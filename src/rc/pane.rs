@@ -1,11 +1,33 @@
 //! Opening a zellij tab for a session started from Slack. Typing into an
 //! agent's pane is [`crate::pane_input`]'s job.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 
+use crate::models::Task;
 use crate::pane_input::zellij;
-pub(crate) use crate::pane_input::{agent_present, pane_alive, send_escape, send_text, target};
-use crate::status::{list_zellij_panes, ZellijPane};
+pub(crate) use crate::pane_input::{pane_alive, send_escape, send_text, target};
+use crate::status::{list_zellij_panes, pane_at_shell, PaneListError, ZellijPane};
+
+/// Whether the task's agent still runs in its pane: the agent process (when
+/// nibble recorded its pid) is alive, and the pane exists, has not exited
+/// and is not back at a shell prompt (sessions started from Slack fall back
+/// to the user's shell). Typing into a pane whose agent is gone would run
+/// the text as a shell command.
+pub(crate) fn agent_present(task: &Task, session: &str, pane: u32) -> Result<bool> {
+    if task.pid.is_some_and(|pid| !crate::status::pid_alive(pid)) {
+        return Ok(false);
+    }
+    match list_zellij_panes(Some(session)) {
+        Ok(panes) => Ok(panes.iter().any(|p| p.id == pane && agent_pane(p))),
+        Err(PaneListError::Gone(_)) => Ok(false),
+        Err(PaneListError::Failed(e)) => bail!("cannot list zellij panes: {e}"),
+    }
+}
+
+/// A terminal pane that may still hold an agent.
+fn agent_pane(p: &ZellijPane) -> bool {
+    !p.is_plugin && !p.exited && !pane_at_shell(p)
+}
 
 /// Parse `terminal_<n>` (what `zellij run` prints) into a pane id.
 fn parse_terminal_pane(out: &str) -> Option<u32> {
@@ -89,6 +111,40 @@ mod tests {
             "terminal_command": command
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn panes_back_at_their_shell_hold_no_agent() {
+        let mut p = zpane(6, 4, false, Some("sh -c 'claude'; exec '/bin/zsh'"));
+        // zellij echoes the launch command while it runs: an agent.
+        p.pane_command = p.terminal_command.clone();
+        assert!(agent_pane(&p));
+        // The launch script exec'd the user's shell: no agent any more.
+        p.pane_command = Some("/bin/zsh".into());
+        assert!(!agent_pane(&p));
+        // A plain shell pane running claude, then back at its prompt.
+        let mut q = zpane(7, 4, false, None);
+        q.pane_command = Some("claude".into());
+        assert!(agent_pane(&q));
+        q.pane_command = Some("zsh".into());
+        assert!(!agent_pane(&q));
+        q.pane_command = Some("claude".into());
+        q.exited = true;
+        assert!(!agent_pane(&q));
+    }
+
+    #[test]
+    fn a_dead_agent_process_is_not_present() {
+        let mut t = Task::new(
+            "t".into(),
+            crate::models::AgentType::ClaudeCode,
+            "x".into(),
+            None,
+            None,
+        );
+        // A pid that cannot exist: the check fails before zellij is asked.
+        t.pid = Some(i32::MAX);
+        assert!(!agent_present(&t, "no-such-session", 1).unwrap());
     }
 
     #[test]

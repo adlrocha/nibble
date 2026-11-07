@@ -173,6 +173,16 @@ impl Daemon {
 
     fn dispatch(&mut self, conn: &mut socket::Connection, env: Envelope) -> Result<()> {
         let id = env.envelope_id().unwrap_or_default().to_string();
+        // Slack redelivers what it did not see acknowledged in 3 seconds
+        // (a long poll pass can delay the read): act once, re-ack the rest.
+        if let Some(key) = redelivery_key(&env) {
+            if !self.first_sight(&key) {
+                if !id.is_empty() {
+                    conn.send(socket::ack_frame(&id, None))?;
+                }
+                return Ok(());
+            }
+        }
         let (ack, after) = match env {
             Envelope::Event { payload, .. } => {
                 conn.send(socket::ack_frame(&id, None))?;
@@ -505,6 +515,7 @@ impl Daemon {
             last_reply_id: None,
             idle_checks: 0,
             permalink: None,
+            card_ts: None,
             card,
         };
         let session_card = session_card(&link, topic.as_deref());
@@ -545,11 +556,11 @@ impl Daemon {
         let card = session_card(&link, None);
         if let Err(e) = self.bot.update(
             &link.channel,
-            &link.thread_ts,
+            link.card_message(),
             &slack::session_card_text(&card),
             &slack::session_card_blocks(&card, false),
         ) {
-            log(&format!("could not update the root message: {e:#}"));
+            log(&format!("could not update the session card: {e:#}"));
         }
         self.note(&link.channel, &link.thread_ts, why);
         self.session_status(&link.channel, &link.thread_ts, SessionStatus::Closed);
@@ -704,6 +715,23 @@ From a running agent, `/nibble-rc` sends its session here; `/nibble-rc stop` tak
 
 // ── Pure helpers ──────────────────────────────────────────────────────────────
 
+/// What identifies an interaction across Slack's redeliveries: a modal's
+/// view id for submissions (one form, one session), the envelope id for
+/// other clicks and slash commands. Events are deduped by their event id.
+fn redelivery_key(env: &Envelope) -> Option<String> {
+    match env {
+        Envelope::Interactive { payload, .. } if payload["type"] == "view_submission" => payload
+            ["view"]["id"]
+            .as_str()
+            .map(|v| format!("view:{v}"))
+            .or_else(|| env.envelope_id().map(|e| format!("env:{e}"))),
+        Envelope::Interactive { .. } | Envelope::SlashCommand { .. } => {
+            env.envelope_id().map(|e| format!("env:{e}"))
+        }
+        _ => None,
+    }
+}
+
 /// A DM message the daemon acts on.
 #[derive(Debug, PartialEq)]
 enum Incoming {
@@ -830,6 +858,25 @@ mod tests {
         assert!(classify_message(&msg(json!({"subtype": "message_changed"})), "U1").is_none());
         assert!(classify_message(&msg(json!({"channel_type": "channel"})), "U1").is_none());
         assert!(classify_message(&msg(json!({"text": "  "})), "U1").is_none());
+    }
+
+    #[test]
+    fn redeliveries_share_a_key() {
+        let submit = |env: &str| Envelope::Interactive {
+            envelope_id: env.into(),
+            payload: json!({"type": "view_submission", "view": {"id": "V1"}}),
+        };
+        assert_eq!(redelivery_key(&submit("e1")), redelivery_key(&submit("e2")));
+        let click = Envelope::Interactive {
+            envelope_id: "e3".into(),
+            payload: json!({"type": "block_actions"}),
+        };
+        assert_eq!(redelivery_key(&click).as_deref(), Some("env:e3"));
+        let event = Envelope::Event {
+            envelope_id: "e4".into(),
+            payload: json!({}),
+        };
+        assert_eq!(redelivery_key(&event), None);
     }
 
     #[test]

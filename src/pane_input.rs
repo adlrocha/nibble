@@ -87,28 +87,6 @@ pub(crate) fn send_escape(session: &str, pane: u32) -> Result<()> {
     zellij(session, &["action", "write", "--pane-id", &pane, "27"]).map(drop)
 }
 
-/// Whether the task's agent still runs in its pane: the pane exists, the
-/// agent process (when nibble recorded its pid) is alive, and a plain shell
-/// pane is not back at its prompt. Typing into a pane whose agent is gone
-/// would run the text as a shell command.
-pub(crate) fn agent_present(task: &Task, session: &str, pane: u32) -> Result<bool> {
-    if task.pid.is_some_and(|pid| !crate::status::pid_alive(pid)) {
-        return Ok(false);
-    }
-    let panes = match list_zellij_panes(Some(session)) {
-        Ok(panes) => panes,
-        Err(PaneListError::Gone(_)) => return Ok(false),
-        Err(PaneListError::Failed(e)) => bail!("cannot list zellij panes: {e}"),
-    };
-    Ok(panes.iter().any(|p| {
-        p.id == pane
-            && !p.is_plugin
-            && !p.exited
-            && !(p.terminal_command.is_none()
-                && p.pane_command.as_deref().is_some_and(crate::mux::is_shell))
-    }))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,19 +116,5 @@ mod tests {
     #[test]
     fn blank_text_sends_nothing() {
         assert_eq!(encode_input(" \n\t"), None);
-    }
-
-    #[test]
-    fn a_dead_agent_process_is_not_present() {
-        let mut t = Task::new(
-            "t".into(),
-            crate::models::AgentType::ClaudeCode,
-            "x".into(),
-            None,
-            None,
-        );
-        // A pid that cannot exist: the check fails before zellij is asked.
-        t.pid = Some(i32::MAX);
-        assert!(!agent_present(&t, "no-such-session", 1).unwrap());
     }
 }

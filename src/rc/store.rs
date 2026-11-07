@@ -63,7 +63,19 @@ pub(crate) struct Link {
     pub idle_checks: u32,
     #[serde(default)]
     pub permalink: Option<String>,
+    /// The session card (the message with the Close button), when it is not
+    /// the thread's root: a thread started from your own DM message, or
+    /// from the prompt `/nibble` posts, carries the card as a reply.
+    #[serde(default)]
+    pub card_ts: Option<String>,
     pub card: CardInfo,
+}
+
+impl Link {
+    /// The message to rewrite when the session closes.
+    pub(crate) fn card_message(&self) -> &str {
+        self.card_ts.as_deref().unwrap_or(&self.thread_ts)
+    }
 }
 
 /// What an agent asks the daemon to do with its own session.
@@ -185,15 +197,19 @@ pub(crate) fn links(db: &Database) -> Result<Vec<Link>> {
     Ok(all(db, LINK_PREFIX)?.into_iter().map(|(_, l)| l).collect())
 }
 
-/// The link whose thread is `thread_ts` in `channel`, open or closed.
+/// The link whose thread is `thread_ts` in `channel`: the open one when a
+/// closed thread later got a new session, else the closed one.
 pub(crate) fn link_by_thread(
     db: &Database,
     channel: &str,
     thread_ts: &str,
 ) -> Result<Option<Link>> {
-    Ok(links(db)?
+    let mut matching: Vec<Link> = links(db)?
         .into_iter()
-        .find(|l| l.channel == channel && l.thread_ts == thread_ts))
+        .filter(|l| l.channel == channel && l.thread_ts == thread_ts)
+        .collect();
+    matching.sort_by_key(|l| (!l.closed, l.created_at));
+    Ok(matching.pop())
 }
 
 pub(crate) fn put_request(db: &Database, task_id: &str, req: &Request) -> Result<()> {
@@ -277,6 +293,7 @@ mod tests {
             last_reply_id: None,
             idle_checks: 0,
             permalink: None,
+            card_ts: None,
             card: CardInfo {
                 title: "t".into(),
                 agent: "claude".into(),
@@ -298,7 +315,15 @@ mod tests {
             "b"
         );
         assert!(link_by_thread(&db, "D2", "2.2").unwrap().is_none());
-        assert_eq!(links(&db).unwrap().len(), 2);
+        // A closed thread that got a new session resolves to the open one.
+        let mut old = sample("old", "2.2");
+        old.closed = true;
+        put_link(&db, &old).unwrap();
+        assert_eq!(
+            link_by_thread(&db, "D1", "2.2").unwrap().unwrap().task_id,
+            "b"
+        );
+        assert_eq!(links(&db).unwrap().len(), 3);
     }
 
     #[test]
@@ -354,6 +379,18 @@ mod tests {
         db.kv_set("rc:link:bad", "{not json").unwrap();
         put_link(&db, &sample("ok", "3.3")).unwrap();
         assert_eq!(links(&db).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn close_rewrites_the_card_not_a_root_the_bot_does_not_own() {
+        let mut l = sample("t", "1.1");
+        assert_eq!(l.card_message(), "1.1");
+        l.card_ts = Some("1.2".into());
+        assert_eq!(l.card_message(), "1.2");
+        // Links stored before card_ts existed still load.
+        let mut v = serde_json::to_value(sample("t", "1.1")).unwrap();
+        v.as_object_mut().unwrap().remove("card_ts");
+        assert_eq!(serde_json::from_value::<Link>(v).unwrap().card_ts, None);
     }
 
     #[test]

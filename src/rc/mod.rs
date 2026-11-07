@@ -383,7 +383,31 @@ mod test_support {
     use serde_json::json;
     use std::collections::HashMap;
 
+    use super::store::{CardInfo, Link};
     use crate::models::{AgentType, Task, TaskContext};
+
+    /// An open link for task `task` on thread `ts` in DM `D1`.
+    pub(crate) fn link(task: &str, ts: &str) -> Link {
+        Link {
+            task_id: task.into(),
+            channel: "D1".into(),
+            thread_ts: ts.into(),
+            created_at: Utc::now(),
+            closed: false,
+            watch: None,
+            last_reply_id: None,
+            idle_checks: 0,
+            permalink: None,
+            card_ts: None,
+            card: CardInfo {
+                title: "t".into(),
+                agent: "claude".into(),
+                location: "host".into(),
+                cwd: None,
+                zellij: "main".into(),
+            },
+        }
+    }
 
     /// A task registered in zellij pane `pane` of `session`; `window`
     /// marks it as a sandbox window (it has a parent sandbox task).

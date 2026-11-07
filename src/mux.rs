@@ -27,7 +27,7 @@ use crate::db::Database;
 use crate::models::{AgentType, SandboxType, Task, TaskStatus};
 use crate::sandbox::podman::PodmanSandbox;
 use crate::sandbox::ContainerStatus;
-use crate::status::{PaneListError, ZellijPane};
+use crate::status::{pane_at_shell, PaneListError, ZellijPane};
 
 /// Session opened by a bare `nibble mux`.
 pub(crate) const DEFAULT_SESSION: &str = "main";
@@ -48,11 +48,6 @@ const LOCK_WAIT: Duration = Duration::from_secs(90);
 const RESUME_FLAG: &str = "--resume";
 /// kv_store key prefix for session snapshots.
 const KV_PREFIX: &str = "mux:";
-/// Shells whose presence as a pane's foreground process means no agent runs
-/// there (the agent exited back to the prompt, or never started).
-const SHELLS: &[&str] = &[
-    "sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu", "elvish", "xonsh",
-];
 
 /// What nibble remembers about a mux session.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -504,7 +499,7 @@ fn kdl_str(s: &str) -> String {
 }
 
 /// A POSIX shell single-quoted word.
-fn sh_quote(s: &str) -> String {
+pub(crate) fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
@@ -529,8 +524,7 @@ fn snapshot(
         // For a pane started with a command (restored panes), zellij keeps
         // reporting that launch command, so only a pane_command that
         // differs from it is a live reading of the foreground process.
-        let foreground_known = pane.pane_command != pane.terminal_command;
-        if foreground_known && pane.pane_command.as_deref().is_some_and(is_shell) {
+        if pane_at_shell(pane) {
             continue;
         }
         let in_pane = |t: &&Task| {
@@ -595,15 +589,6 @@ fn mux_pane(task: &Task, pane: &ZellijPane) -> MuxPane {
 /// Agents `plan_resume` knows how to bring back.
 fn resumable_agent(agent: &AgentType) -> bool {
     matches!(agent, AgentType::ClaudeCode | AgentType::Pi)
-}
-
-/// Whether a pane's foreground command is a plain shell.
-pub(crate) fn is_shell(command: &str) -> bool {
-    let Some(program) = command.split_whitespace().next() else {
-        return false;
-    };
-    let base = program.rsplit('/').next().unwrap_or(program);
-    SHELLS.contains(&base.trim_start_matches('-'))
 }
 
 /// The task id in a restored pane's command, as written by
@@ -994,6 +979,15 @@ fn ensure_watcher(name: &str) -> Result<()> {
     }
 }
 
+/// Fail as a restore does when a nibble agent wrapper is not installed.
+pub(crate) fn require_wrapper(path: &Path) -> Result<()> {
+    if path.exists() {
+        Ok(())
+    } else {
+        Err(MissingWrapper(path.to_path_buf()).into())
+    }
+}
+
 /// A nibble agent wrapper is not installed: fixable by re-running
 /// install.sh, so restores stop instead of skipping the agent.
 #[derive(Debug)]
@@ -1242,6 +1236,7 @@ mod tests {
 
     #[test]
     fn is_shell_matches_shell_basenames_only() {
+        use crate::status::is_shell;
         assert!(is_shell("zsh"));
         assert!(is_shell("/usr/bin/bash --login"));
         assert!(is_shell("-zsh"));

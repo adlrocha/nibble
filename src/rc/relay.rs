@@ -207,6 +207,7 @@ mod tests {
             last_reply_id: last.map(str::to_string),
             idle_checks,
             permalink: None,
+            card_ts: None,
             card: CardInfo {
                 title: "t".into(),
                 agent: "Claude Code".into(),

@@ -1581,6 +1581,29 @@ pub(crate) struct ZellijPane {
     pub(crate) pane_cwd: Option<String>,
 }
 
+/// Shells whose presence as a pane's foreground process means no agent runs
+/// there (the agent exited back to the prompt, or never started).
+const SHELLS: &[&str] = &[
+    "sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu", "elvish", "xonsh",
+];
+
+/// Whether a pane's foreground command is a plain shell.
+pub(crate) fn is_shell(command: &str) -> bool {
+    let Some(program) = command.split_whitespace().next() else {
+        return false;
+    };
+    let base = program.rsplit('/').next().unwrap_or(program);
+    SHELLS.contains(&base.trim_start_matches('-'))
+}
+
+/// Whether a pane is back at a plain shell prompt (no agent in it). For a
+/// command pane zellij reports the launch command as `pane_command` too, so
+/// only a reading that differs from the launch command says what runs in
+/// the foreground.
+pub(crate) fn pane_at_shell(pane: &ZellijPane) -> bool {
+    pane.pane_command != pane.terminal_command && pane.pane_command.as_deref().is_some_and(is_shell)
+}
+
 /// Why listing a session's panes failed.
 #[derive(Debug, PartialEq)]
 pub(crate) enum PaneListError {
