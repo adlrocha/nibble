@@ -96,9 +96,15 @@ directory can be typed in.
 - **`nibble rc doctor`** first.
 - Daemon log: `~/.nibble/logs/rc.log`.
 - *"the nibble rc daemon is not running"*: `systemctl --user status nibble-rc`.
-- *"The session's pane is gone"*: the agent's zellij pane was closed. Reopen
-  the session (`nibble mux main` restores recorded tabs) and send
-  `/nibble-rc` again.
+- *"The session's pane is gone"*: the agent's zellij pane was closed. If
+  its zellij session is still running, start the agent again in a pane of
+  that session and send `/nibble-rc` from it. If the whole session is down,
+  `nibble mux main` brings its recorded tabs back (each resuming its
+  conversation); then send `/nibble-rc` again.
+- *"zellij session 'main' is not running and nibble mux has N recorded agent
+  tab(s)"*: starting a session from Slack never rebuilds a session with
+  recorded agents (that would lose them). Run `nibble mux main` once, then
+  start the session again.
 - If Slack refuses the agent-session calls (status and titles), the daemon
   logs it once and carries on without them; replies still flow.
 - `/nibble-rc` spends a model turn in Claude Code: the hook is missing; re-run

@@ -16,37 +16,29 @@
 //! link (the zellij tab stays). Only the configured Slack user is heard.
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use serde_json::{json, Value};
 use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use super::modal::{self, NewSession, Origin};
 use super::secrets::Secrets;
 use super::slack::{self, SessionCard, SessionStatus, Slack};
 use super::socket::{self, Envelope, Read};
-use super::store::{
-    self, CardInfo, Link, Location, PendingSpawn, RequestAction, Response, SpawnAgent, Watch,
-};
-use super::{pane, transcript};
+use super::store::{self, CardInfo, Link, RequestAction, Response, Watch};
+use super::{pane, relay, transcript};
 use crate::config::RcConfig;
 use crate::db::Database;
-use crate::models::{AgentType, SandboxType, Task, TaskStatus};
+use crate::models::{SandboxType, Task};
 
-/// Reconnect when Slack has been silent this long (it pings far more often).
+/// Reconnect when the socket has carried no frame at all (not even one of
+/// Slack's pings, which arrive far more often) for this long.
 const SILENCE_LIMIT: Duration = Duration::from_secs(180);
 /// Longest wait between reconnect attempts.
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 /// How often the heartbeat is written.
 const BEAT_EVERY: Duration = Duration::from_secs(30);
-/// Polls an idle task may show no new reply before the turn is considered
-/// over without one (the transcript can lag the idle report; and a message
-/// that never started a turn must not wait forever).
-const IDLE_GIVE_UP: u32 = 20;
-/// Grace period after an agent reports its session before the first
-/// message is typed, so its TUI is reading input.
-const READY_GRACE_SECS: i64 = 2;
 /// Remembered event ids, to drop Slack's redeliveries.
 const SEEN_CAP: usize = 256;
 
@@ -116,18 +108,18 @@ enum After {
 /// every click.
 const REPOS_TTL: Duration = Duration::from_secs(300);
 
-struct Daemon {
-    cfg: RcConfig,
-    secrets: Secrets,
-    bot: Slack,
-    dm: String,
-    db: Database,
+pub(super) struct Daemon {
+    pub(super) cfg: RcConfig,
+    pub(super) secrets: Secrets,
+    pub(super) bot: Slack,
+    pub(super) dm: String,
+    pub(super) db: Database,
     /// False once Slack rejected the agent-session methods (app not
     /// declared as an agent): they are skipped from then on.
-    sessions_api: bool,
-    seen: VecDeque<String>,
-    last_beat: Option<Instant>,
-    repos_cache: Option<(Instant, Vec<PathBuf>)>,
+    pub(super) sessions_api: bool,
+    pub(super) seen: VecDeque<String>,
+    pub(super) last_beat: Option<Instant>,
+    pub(super) repos_cache: Option<(Instant, Vec<PathBuf>)>,
 }
 
 impl Daemon {
@@ -154,6 +146,8 @@ impl Daemon {
                         Err(e) => log(&format!("ignoring frame: {e:#}")),
                     }
                 }
+                // Pings count: Slack keeps a quiet socket alive with them.
+                Read::Control => last_frame = Instant::now(),
                 Read::Idle => {}
             }
             if last_poll.elapsed() >= poll {
@@ -315,7 +309,7 @@ impl Daemon {
             return Ok(());
         }
         let task = self.db.get_task_by_id(&link.task_id)?;
-        let target = task.as_ref().and_then(pane_target);
+        let target = task.as_ref().and_then(pane::target);
         let Some((session, pane_id)) = target else {
             self.note(
                 channel,
@@ -328,14 +322,13 @@ impl Daemon {
             self.note(
                 channel,
                 thread_ts,
-                &format!(":warning: The session's pane is gone (zellij `{session}`). Reopen it and send `/nibble-rc` again."),
+                &format!(":warning: The session's pane is gone (zellij `{session}`). Start the agent again in that session (if the whole session is down, `nibble mux {session}` brings its recorded tabs back), then send `/nibble-rc` from it."),
             );
             return Ok(());
         }
         pane::send_text(&session, pane_id, text)?;
         let _ = self.bot.react(channel, ts, "eyes");
-        // Expect a turn: a fast one may finish between two polls.
-        link.watch = Some(Watch::Working);
+        link.watch = relay::after_reply(link.watch);
         link.idle_checks = 0;
         store::put_link(&self.db, &link)?;
         self.session_status(channel, thread_ts, SessionStatus::Processing);
@@ -350,7 +343,7 @@ impl Daemon {
             .db
             .get_task_by_id(&link.task_id)?
             .as_ref()
-            .and_then(pane_target)
+            .and_then(pane::target)
         {
             pane::send_escape(&session, pane_id)?;
             self.note(channel, thread_ts, ":black_square_for_stop: Interrupted.");
@@ -473,148 +466,6 @@ impl Daemon {
         }
     }
 
-    // ── Starting sessions from Slack ──────────────────────────────────────
-
-    fn start_session(&mut self, new: &NewSession) -> Result<()> {
-        let channel = new.origin.channel.clone();
-        let thread_ts = match &new.origin.thread_ts {
-            Some(ts) => ts.clone(),
-            None => {
-                let blocks = slack::markdown_blocks(&new.prompt);
-                self.bot
-                    .post(&channel, None, &slack::preview(&new.prompt), &blocks)?
-            }
-        };
-        let cwd = new.cwd.to_string_lossy().to_string();
-        self.note(
-            &channel,
-            &thread_ts,
-            &format!(
-                ":hourglass_flowing_sand: Starting {} on {} in `{}` (zellij `{}`)…",
-                new.agent.as_str(),
-                new.location.as_str(),
-                slack::escape(&cwd),
-                self.cfg.zellij_session
-            ),
-        );
-        let session = self.cfg.zellij_session.clone();
-        crate::mux::ensure_background_session(&self.db, &session)?;
-        let script = launch_script(
-            new.location,
-            new.agent,
-            &new.cwd,
-            &std::env::current_exe().context("cannot locate nibble binary")?,
-            &crate::mux::wrappers_dir()?,
-            &std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()),
-        );
-        let tab_name = tab_name_for(&new.cwd);
-        let pane_id = pane::open_tab(&session, &tab_name, &cwd, &script)?;
-        store::put_spawn(
-            &self.db,
-            &PendingSpawn {
-                channel,
-                thread_ts,
-                location: new.location,
-                agent: new.agent,
-                cwd,
-                prompt: new.prompt.clone(),
-                zellij_session: session,
-                pane_id,
-                tab_name,
-                started_at: Utc::now(),
-                task_id: None,
-                ready_at: None,
-                queued: Vec::new(),
-            },
-        )
-    }
-
-    /// Advance one pending spawn: find its agent, wait for its TUI, hand it
-    /// the first message and link the thread.
-    fn advance_spawn(&mut self, mut spawn: PendingSpawn, now: DateTime<Utc>) -> Result<()> {
-        let timeout =
-            chrono::Duration::seconds(i64::try_from(self.cfg.start_timeout_secs).unwrap_or(240));
-        if now - spawn.started_at > timeout {
-            store::delete_spawn(&self.db, &spawn.thread_ts)?;
-            self.note(
-                &spawn.channel,
-                &spawn.thread_ts,
-                &format!(
-                    ":warning: The agent did not come up within {}s. Look at tab `{}` in zellij `{}`.",
-                    self.cfg.start_timeout_secs, spawn.tab_name, spawn.zellij_session
-                ),
-            );
-            return Ok(());
-        }
-        if spawn.task_id.is_none() {
-            let tasks = self.db.list_tasks()?;
-            spawn.task_id = find_spawned_task(&tasks, &spawn).map(|t| t.task_id.clone());
-            if spawn.task_id.is_none() {
-                if !pane::pane_alive(&spawn.zellij_session, spawn.pane_id).unwrap_or(true) {
-                    store::delete_spawn(&self.db, &spawn.thread_ts)?;
-                    self.note(
-                        &spawn.channel,
-                        &spawn.thread_ts,
-                        ":warning: The agent's pane closed before it started.",
-                    );
-                    return Ok(());
-                }
-                return store::put_spawn(&self.db, &spawn);
-            }
-        }
-        let task_id = spawn.task_id.clone().unwrap_or_default();
-        let Some(task) = self.db.get_task_by_id(&task_id)? else {
-            spawn.task_id = None;
-            return store::put_spawn(&self.db, &spawn);
-        };
-        if spawn.ready_at.is_none() {
-            if !session_known(&task) {
-                return store::put_spawn(&self.db, &spawn);
-            }
-            spawn.ready_at = Some(now);
-            return store::put_spawn(&self.db, &spawn);
-        }
-        if spawn
-            .ready_at
-            .is_some_and(|r| (now - r).num_seconds() < READY_GRACE_SECS)
-        {
-            return Ok(());
-        }
-        // Ready: link first, so replies arriving meanwhile find the link.
-        let card = card_for(&task, &spawn.zellij_session);
-        let link = Link {
-            task_id: task.task_id.clone(),
-            channel: spawn.channel.clone(),
-            thread_ts: spawn.thread_ts.clone(),
-            created_at: now,
-            closed: false,
-            watch: Some(Watch::Working),
-            last_reply_id: self.current_reply(&task).map(|r| r.id),
-            idle_checks: 0,
-            permalink: self.bot.permalink(&spawn.channel, &spawn.thread_ts).ok(),
-            card,
-        };
-        store::put_link(&self.db, &link)?;
-        store::delete_spawn(&self.db, &spawn.thread_ts)?;
-        for msg in std::iter::once(&spawn.prompt).chain(spawn.queued.iter()) {
-            pane::send_text(&spawn.zellij_session, spawn.pane_id, msg)?;
-        }
-        let session_card = session_card(&link, Some(&spawn.prompt));
-        self.bot.post(
-            &link.channel,
-            Some(&link.thread_ts),
-            &slack::session_card_text(&session_card),
-            &slack::session_card_blocks(&session_card, true),
-        )?;
-        self.session_status(&link.channel, &link.thread_ts, SessionStatus::Processing);
-        self.session_title(
-            &link.channel,
-            &link.thread_ts,
-            &slack::preview(&spawn.prompt),
-        );
-        Ok(())
-    }
-
     // ── Links: /nibble-rc and Close ───────────────────────────────────────
 
     fn start_link(&mut self, task_id: &str) -> Result<String> {
@@ -628,7 +479,7 @@ impl Daemon {
             .db
             .get_task_by_id(task_id)?
             .with_context(|| format!("nibble has no task {task_id}"))?;
-        let Some((session, _)) = pane_target(&task) else {
+        let Some((session, _)) = pane::target(&task) else {
             anyhow::bail!(
                 "this session's zellij pane is unknown to nibble; run the agent inside zellij"
             );
@@ -641,7 +492,7 @@ impl Daemon {
             thread_ts: String::new(),
             created_at: Utc::now(),
             closed: false,
-            watch: Some(observe(&task)),
+            watch: Some(relay::observe(&task)),
             last_reply_id: None,
             idle_checks: 0,
             permalink: None,
@@ -660,11 +511,7 @@ impl Daemon {
             link.last_reply_id = Some(reply.id);
         }
         store::put_link(&self.db, &link)?;
-        let status = match link.watch {
-            Some(Watch::Working) => SessionStatus::Processing,
-            Some(Watch::Blocked) => SessionStatus::Suspended,
-            _ => SessionStatus::Active,
-        };
+        let status = relay::status_of(link.watch.unwrap_or(Watch::Idle));
         self.session_status(&link.channel, &link.thread_ts, status);
         self.session_title(
             &link.channel,
@@ -677,7 +524,7 @@ impl Daemon {
         ))
     }
 
-    fn close_link(&mut self, task_id: &str, why: &str) -> Result<()> {
+    pub(super) fn close_link(&mut self, task_id: &str, why: &str) -> Result<()> {
         let Some(mut link) = store::link(&self.db, task_id)? else {
             return Ok(());
         };
@@ -751,61 +598,16 @@ impl Daemon {
         Ok(())
     }
 
-    fn relay(&mut self, mut link: Link) -> Result<()> {
-        let Some(task) = self.db.get_task_by_id(&link.task_id)? else {
-            return self.close_link(&link.task_id, "The session is gone from nibble.");
-        };
-        let observed = observe(&task);
-        let step = next_step(&link, observed, &|| self.current_reply(&task));
-        for effect in &step.effects {
-            match effect {
-                Effect::Status(s) => self.session_status(&link.channel, &link.thread_ts, *s),
-                Effect::Blocked => {
-                    let reason = task.attention_reason.as_deref().unwrap_or("Needs input");
-                    self.note(
-                        &link.channel,
-                        &link.thread_ts,
-                        &format!(
-                            ":raised_hand: *{}*. Reply here to answer (a number picks a menu option), or answer at the terminal.",
-                            slack::escape(reason)
-                        ),
-                    );
-                }
-                Effect::Reply(reply) => self.post_reply(&link, &reply.text)?,
-                Effect::NoReply => self.note(
-                    &link.channel,
-                    &link.thread_ts,
-                    "The turn ended without a text reply (check the pane for details).",
-                ),
-                Effect::Close => {
-                    return self.close_link(&link.task_id, "The agent exited.");
-                }
-            }
-        }
-        if step.changed(&link) {
-            link.watch = Some(step.watch);
-            link.idle_checks = step.idle_checks;
-            if let Some(id) = step.reply_id {
-                link.last_reply_id = Some(id);
-            }
-            // Re-read before writing: a reply may have closed the link meanwhile.
-            if store::link(&self.db, &link.task_id)?.is_some_and(|l| !l.closed) {
-                store::put_link(&self.db, &link)?;
-            }
-        }
-        Ok(())
-    }
-
     // ── Slack helpers ─────────────────────────────────────────────────────
 
-    fn current_reply(&self, task: &Task) -> Option<transcript::Reply> {
+    pub(super) fn current_reply(&self, task: &Task) -> Option<transcript::Reply> {
         let path = crate::quota_watch::session_file_for(task)?;
         transcript::last_reply(&path, &task.agent_type)
             .ok()
             .flatten()
     }
 
-    fn post_reply(&self, link: &Link, text: &str) -> Result<()> {
+    pub(super) fn post_reply(&self, link: &Link, text: &str) -> Result<()> {
         for chunk in slack::chunk_text(text, slack::MARKDOWN_LIMIT) {
             self.bot.post(
                 &link.channel,
@@ -818,7 +620,7 @@ impl Daemon {
     }
 
     /// Post a top-level message (no thread to put it in).
-    fn say(&self, channel: &str, text: &str) {
+    pub(super) fn say(&self, channel: &str, text: &str) {
         if let Err(e) = self
             .bot
             .post(channel, None, text, &slack::note_blocks(text))
@@ -827,7 +629,7 @@ impl Daemon {
         }
     }
 
-    fn note(&self, channel: &str, thread_ts: &str, text: &str) {
+    pub(super) fn note(&self, channel: &str, thread_ts: &str, text: &str) {
         if let Err(e) = self
             .bot
             .post(channel, Some(thread_ts), text, &slack::note_blocks(text))
@@ -838,7 +640,7 @@ impl Daemon {
 
     /// Best-effort agent-session status; disabled after Slack rejects the
     /// method (the app is not declared as an agent).
-    fn session_status(&mut self, channel: &str, thread_ts: &str, status: SessionStatus) {
+    pub(super) fn session_status(&mut self, channel: &str, thread_ts: &str, status: SessionStatus) {
         if !self.sessions_api {
             return;
         }
@@ -847,7 +649,7 @@ impl Daemon {
         }
     }
 
-    fn session_title(&mut self, channel: &str, thread_ts: &str, title: &str) {
+    pub(super) fn session_title(&mut self, channel: &str, thread_ts: &str, title: &str) {
         if !self.sessions_api {
             return;
         }
@@ -939,133 +741,7 @@ fn unescape(s: &str) -> String {
         .replace("&amp;", "&")
 }
 
-/// The zellij session and pane hosting a task's agent.
-fn pane_target(task: &Task) -> Option<(String, u32)> {
-    let session = crate::status::session_of(task)?.to_string();
-    let pane = crate::status::pane_id_of(task)?;
-    Some((session, pane))
-}
-
-/// The task's state as the relay sees it.
-fn observe(task: &Task) -> Watch {
-    // The reported status as is: the sidebar's "stale running looks idle"
-    // display rule would make a long tool run look finished and lose the
-    // reply that follows it.
-    match task.status {
-        TaskStatus::Exited => Watch::Exited,
-        _ if task.attention_reason.is_some() => Watch::Blocked,
-        TaskStatus::Running => Watch::Working,
-        TaskStatus::Completed => Watch::Idle,
-    }
-}
-
-#[derive(Debug, PartialEq)]
-enum Effect {
-    Status(SessionStatus),
-    Blocked,
-    Reply(transcript::Reply),
-    /// The turn ended without any text to relay.
-    NoReply,
-    Close,
-}
-
-#[derive(Debug, PartialEq)]
-struct Step {
-    watch: Watch,
-    idle_checks: u32,
-    reply_id: Option<String>,
-    effects: Vec<Effect>,
-}
-
-impl Step {
-    fn changed(&self, link: &Link) -> bool {
-        link.watch != Some(self.watch)
-            || link.idle_checks != self.idle_checks
-            || self.reply_id.is_some()
-    }
-}
-
-/// What to relay for a link whose task is now `observed`. The transcript is
-/// only read when a turn may have just finished.
-fn next_step(link: &Link, observed: Watch, reply: &dyn Fn() -> Option<transcript::Reply>) -> Step {
-    let prev = link.watch;
-    let same = |effects| Step {
-        watch: observed,
-        idle_checks: 0,
-        reply_id: None,
-        effects,
-    };
-    match observed {
-        Watch::Exited => same(vec![Effect::Close]),
-        Watch::Working if prev == Some(Watch::Working) => Step {
-            watch: Watch::Working,
-            idle_checks: 0,
-            reply_id: None,
-            effects: vec![],
-        },
-        Watch::Working => same(vec![Effect::Status(SessionStatus::Processing)]),
-        Watch::Blocked if prev == Some(Watch::Blocked) => same(vec![]),
-        Watch::Blocked => same(vec![
-            Effect::Blocked,
-            Effect::Status(SessionStatus::Suspended),
-        ]),
-        Watch::Idle if prev == Some(Watch::Idle) || prev.is_none() => same(vec![]),
-        Watch::Idle => {
-            match reply().filter(|r| link.last_reply_id.as_deref() != Some(r.id.as_str())) {
-                Some(r) => Step {
-                    watch: Watch::Idle,
-                    idle_checks: 0,
-                    reply_id: Some(r.id.clone()),
-                    effects: vec![Effect::Reply(r), Effect::Status(SessionStatus::Active)],
-                },
-                None if link.idle_checks + 1 >= IDLE_GIVE_UP => {
-                    same(vec![Effect::NoReply, Effect::Status(SessionStatus::Active)])
-                }
-                // Not yet: keep the previous state and count the miss.
-                None => Step {
-                    watch: prev.unwrap_or(Watch::Idle),
-                    idle_checks: link.idle_checks + 1,
-                    reply_id: None,
-                    effects: vec![],
-                },
-            }
-        }
-    }
-}
-
-/// Whether the agent reported its conversation (its TUI is up).
-fn session_known(task: &Task) -> bool {
-    let Some(ctx) = task.context.as_ref() else {
-        return false;
-    };
-    match task.agent_type {
-        AgentType::ClaudeCode => ctx.claude_session_id.is_some(),
-        _ => ctx.extra.contains_key("pi_session_path"),
-    }
-}
-
-/// The task an agent started in `spawn`'s pane registered: same zellij
-/// session and pane, registered after the spawn began. A sandbox attach
-/// registers both the sandbox and its window; the window is the agent.
-fn find_spawned_task<'a>(tasks: &'a [Task], spawn: &PendingSpawn) -> Option<&'a Task> {
-    let since = spawn.started_at - chrono::Duration::seconds(5);
-    tasks
-        .iter()
-        .filter(|t| t.created_at >= since)
-        .filter(|t| t.status != TaskStatus::Exited)
-        .filter(|t| {
-            pane_target(t).is_some_and(|(s, p)| s == spawn.zellij_session && p == spawn.pane_id)
-        })
-        .max_by_key(|t| {
-            let window = t
-                .context
-                .as_ref()
-                .is_some_and(|c| c.extra.contains_key("parent_task_id"));
-            (window, t.created_at)
-        })
-}
-
-fn card_for(task: &Task, zellij: &str) -> CardInfo {
+pub(super) fn card_for(task: &Task, zellij: &str) -> CardInfo {
     let sandboxed = task.sandbox_type == SandboxType::Podman
         || task
             .context
@@ -1080,7 +756,7 @@ fn card_for(task: &Task, zellij: &str) -> CardInfo {
     }
 }
 
-fn session_card(link: &Link, topic: Option<&str>) -> SessionCard {
+pub(super) fn session_card(link: &Link, topic: Option<&str>) -> SessionCard {
     SessionCard {
         task_id: link.task_id.clone(),
         title: link.card.title.clone(),
@@ -1092,183 +768,10 @@ fn session_card(link: &Link, topic: Option<&str>) -> SessionCard {
     }
 }
 
-fn sh_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-/// The command a new session's pane runs: the agent through its nibble
-/// wrapper (host; Claude with `--fresh` so it doesn't resume the repo's
-/// last conversation) or a `--btw` sandbox attach (a side session that
-/// leaves the repo's main one alone), then the user's shell.
-fn launch_script(
-    location: Location,
-    agent: SpawnAgent,
-    cwd: &Path,
-    nibble_bin: &Path,
-    wrappers: &Path,
-    shell: &str,
-) -> String {
-    let run = match location {
-        Location::Host => {
-            let (wrapper, args) = match agent {
-                SpawnAgent::Claude => ("claude-wrapper", " --fresh"),
-                SpawnAgent::Pi => ("pi-wrapper", ""),
-                SpawnAgent::Omp => ("omp-wrapper", ""),
-            };
-            format!(
-                "{}{args}",
-                sh_quote(&wrappers.join(wrapper).to_string_lossy())
-            )
-        }
-        Location::Sandbox => {
-            let flag = match agent {
-                SpawnAgent::Claude => "",
-                SpawnAgent::Pi => " --pi",
-                SpawnAgent::Omp => " --omp",
-            };
-            format!(
-                "{} sandbox attach {} --btw{flag}",
-                sh_quote(&nibble_bin.to_string_lossy()),
-                sh_quote(&cwd.to_string_lossy())
-            )
-        }
-    };
-    format!("{run}; exec {}", sh_quote(shell))
-}
-
-/// The zellij tab name for a session started in `cwd`.
-fn tab_name_for(cwd: &Path) -> String {
-    let base = cwd
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "session".to_string());
-    format!("{base} (slack)")
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::task;
     use super::*;
-    use crate::models::TaskContext;
-    use std::collections::HashMap;
-
-    fn link(watch: Option<Watch>, last: Option<&str>, idle_checks: u32) -> Link {
-        Link {
-            task_id: "t".into(),
-            channel: "D1".into(),
-            thread_ts: "1.1".into(),
-            created_at: Utc::now(),
-            closed: false,
-            watch,
-            last_reply_id: last.map(str::to_string),
-            idle_checks,
-            permalink: None,
-            card: CardInfo {
-                title: "t".into(),
-                agent: "Claude Code".into(),
-                location: "host".into(),
-                cwd: None,
-                zellij: "main".into(),
-            },
-        }
-    }
-
-    fn reply(id: &str) -> Option<transcript::Reply> {
-        Some(transcript::Reply {
-            id: id.into(),
-            text: format!("text {id}"),
-        })
-    }
-
-    #[test]
-    fn finished_turn_posts_the_new_reply_once() {
-        let l = link(Some(Watch::Working), Some("old"), 0);
-        let s = next_step(&l, Watch::Idle, &|| reply("new"));
-        assert_eq!(s.watch, Watch::Idle);
-        assert_eq!(s.reply_id.as_deref(), Some("new"));
-        assert_eq!(s.effects[0], Effect::Reply(reply("new").unwrap()));
-        assert_eq!(s.effects[1], Effect::Status(SessionStatus::Active));
-
-        // Already idle: nothing, and the transcript is not even read.
-        let l = link(Some(Watch::Idle), Some("new"), 0);
-        let s = next_step(&l, Watch::Idle, &|| panic!("must not read"));
-        assert!(s.effects.is_empty());
-        assert!(!s.changed(&l));
-    }
-
-    #[test]
-    fn idle_without_a_new_reply_waits_then_gives_up() {
-        let l = link(Some(Watch::Working), Some("same"), 0);
-        let s = next_step(&l, Watch::Idle, &|| reply("same"));
-        assert_eq!((s.watch, s.idle_checks), (Watch::Working, 1));
-        assert!(s.effects.is_empty());
-        let l = link(Some(Watch::Working), Some("same"), IDLE_GIVE_UP - 1);
-        let s = next_step(&l, Watch::Idle, &|| None);
-        assert_eq!((s.watch, s.idle_checks), (Watch::Idle, 0));
-        assert_eq!(
-            s.effects,
-            vec![Effect::NoReply, Effect::Status(SessionStatus::Active)]
-        );
-    }
-
-    #[test]
-    fn long_running_turns_stay_working() {
-        // An hour without reports is still a working turn for the relay.
-        let mut t = task(
-            "t",
-            1,
-            "main",
-            Utc::now() - chrono::Duration::hours(1),
-            false,
-        );
-        t.status = TaskStatus::Running;
-        assert_eq!(observe(&t), Watch::Working);
-        t.attention_reason = Some("Permission required: Bash".into());
-        assert_eq!(observe(&t), Watch::Blocked);
-        t.attention_reason = None;
-        t.status = TaskStatus::Completed;
-        assert_eq!(observe(&t), Watch::Idle);
-        t.status = TaskStatus::Exited;
-        assert_eq!(observe(&t), Watch::Exited);
-    }
-
-    #[test]
-    fn working_blocked_and_exit_transitions() {
-        let s = next_step(&link(Some(Watch::Idle), None, 0), Watch::Working, &|| None);
-        assert_eq!(s.effects, vec![Effect::Status(SessionStatus::Processing)]);
-        let s = next_step(
-            &link(Some(Watch::Working), None, 3),
-            Watch::Working,
-            &|| None,
-        );
-        assert!(s.effects.is_empty());
-        assert_eq!(s.idle_checks, 0);
-
-        let s = next_step(
-            &link(Some(Watch::Working), None, 0),
-            Watch::Blocked,
-            &|| None,
-        );
-        assert_eq!(
-            s.effects,
-            vec![Effect::Blocked, Effect::Status(SessionStatus::Suspended)]
-        );
-        let s = next_step(
-            &link(Some(Watch::Blocked), None, 0),
-            Watch::Blocked,
-            &|| None,
-        );
-        assert!(s.effects.is_empty());
-        // Approved, then finished: the reply is posted.
-        let s = next_step(&link(Some(Watch::Blocked), None, 0), Watch::Idle, &|| {
-            reply("r")
-        });
-        assert!(matches!(s.effects[0], Effect::Reply(_)));
-
-        let s = next_step(&link(Some(Watch::Working), None, 0), Watch::Exited, &|| {
-            None
-        });
-        assert_eq!(s.effects, vec![Effect::Close]);
-    }
 
     fn msg(extra: Value) -> Value {
         let mut v = json!({
@@ -1309,101 +812,6 @@ mod tests {
         assert!(classify_message(&msg(json!({"subtype": "message_changed"})), "U1").is_none());
         assert!(classify_message(&msg(json!({"channel_type": "channel"})), "U1").is_none());
         assert!(classify_message(&msg(json!({"text": "  "})), "U1").is_none());
-    }
-
-    fn task(id: &str, pane: u32, session: &str, created: DateTime<Utc>, window: bool) -> Task {
-        let mut extra = HashMap::new();
-        crate::models::stamp_zellij(&mut extra, Some(pane), Some(session));
-        if window {
-            extra.insert("parent_task_id".into(), json!("sandbox"));
-        }
-        let mut t = Task::new(
-            id.to_string(),
-            AgentType::ClaudeCode,
-            "[repo]".to_string(),
-            None,
-            None,
-        );
-        t.context = Some(TaskContext {
-            extra,
-            ..Default::default()
-        });
-        t.created_at = created;
-        t.updated_at = created;
-        t
-    }
-
-    fn spawn(started: DateTime<Utc>) -> PendingSpawn {
-        PendingSpawn {
-            channel: "D1".into(),
-            thread_ts: "1.1".into(),
-            location: Location::Sandbox,
-            agent: SpawnAgent::Claude,
-            cwd: "/r".into(),
-            prompt: "go".into(),
-            zellij_session: "main".into(),
-            pane_id: 7,
-            tab_name: "r (slack)".into(),
-            started_at: started,
-            task_id: None,
-            ready_at: None,
-            queued: vec![],
-        }
-    }
-
-    #[test]
-    fn finds_the_agent_registered_in_the_new_pane() {
-        let now = Utc::now();
-        let old = now - chrono::Duration::hours(1);
-        let tasks = vec![
-            task("stale", 7, "main", old, false), // old pane-id reuse
-            task("other-pane", 8, "main", now, false),
-            task("other-session", 7, "work", now, false),
-            task("sandbox", 7, "main", now, false),
-            task("window", 7, "main", now, true),
-        ];
-        assert_eq!(
-            find_spawned_task(&tasks, &spawn(now)).unwrap().task_id,
-            "window"
-        );
-        assert!(find_spawned_task(&tasks[..3], &spawn(now)).is_none());
-    }
-
-    #[test]
-    fn readiness_needs_the_agent_session() {
-        let mut t = task("t", 1, "main", Utc::now(), false);
-        assert!(!session_known(&t));
-        t.context.as_mut().unwrap().claude_session_id = Some("s".into());
-        assert!(session_known(&t));
-        let mut p = task("p", 1, "main", Utc::now(), false);
-        p.agent_type = AgentType::Pi;
-        assert!(!session_known(&p));
-        p.context
-            .as_mut()
-            .unwrap()
-            .extra
-            .insert("pi_session_path".into(), json!("/x.jsonl"));
-        assert!(session_known(&p));
-    }
-
-    #[test]
-    fn launch_scripts_per_location_and_agent() {
-        let bin = Path::new("/bin/nib ble");
-        let wr = Path::new("/w");
-        let cwd = Path::new("/r/it's");
-        assert_eq!(
-            launch_script(Location::Host, SpawnAgent::Claude, cwd, bin, wr, "/bin/zsh"),
-            "'/w/claude-wrapper' --fresh; exec '/bin/zsh'"
-        );
-        assert_eq!(
-            launch_script(Location::Host, SpawnAgent::Omp, cwd, bin, wr, "/bin/zsh"),
-            "'/w/omp-wrapper'; exec '/bin/zsh'"
-        );
-        assert_eq!(
-            launch_script(Location::Sandbox, SpawnAgent::Pi, cwd, bin, wr, "/bin/sh"),
-            "'/bin/nib ble' sandbox attach '/r/it'\\''s' --btw --pi; exec '/bin/sh'"
-        );
-        assert_eq!(tab_name_for(cwd), "it's (slack)");
     }
 
     #[test]

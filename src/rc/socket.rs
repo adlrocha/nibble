@@ -105,7 +105,9 @@ pub(crate) struct Connection {
 pub(crate) enum Read {
     /// A text frame.
     Text(String),
-    /// Nothing within the read timeout (or a control frame).
+    /// A ping, pong or other non-text frame: the connection is alive.
+    Control,
+    /// Nothing arrived within the read timeout.
     Idle,
 }
 
@@ -167,7 +169,7 @@ impl Connection {
         match self.ws.read() {
             Ok(Message::Text(t)) => Ok(Read::Text(t.to_string())),
             Ok(Message::Close(frame)) => bail!("Slack closed the socket ({frame:?})"),
-            Ok(_) => Ok(Read::Idle), // ping/pong/binary; pongs are queued by tungstenite
+            Ok(_) => Ok(Read::Control), // ping/pong/binary; pongs are queued by tungstenite
             Err(tungstenite::Error::Io(e))
                 if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) =>
             {

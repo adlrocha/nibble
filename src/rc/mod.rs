@@ -18,10 +18,12 @@
 
 mod daemon;
 mod modal;
-mod pane;
+pub(crate) mod pane;
+mod relay;
 mod secrets;
 mod slack;
 mod socket;
+mod spawn;
 mod store;
 mod transcript;
 
@@ -372,6 +374,46 @@ pub(crate) fn cmd_doctor(db: &Database, cfg: &RcConfig) -> Result<()> {
         bail!("some checks failed");
     }
     Ok(())
+}
+
+/// Fixtures shared by the rc modules' tests.
+#[cfg(test)]
+mod test_support {
+    use chrono::{DateTime, Utc};
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    use crate::models::{AgentType, Task, TaskContext};
+
+    /// A task registered in zellij pane `pane` of `session`; `window`
+    /// marks it as a sandbox window (it has a parent sandbox task).
+    pub(crate) fn task(
+        id: &str,
+        pane: u32,
+        session: &str,
+        created: DateTime<Utc>,
+        window: bool,
+    ) -> Task {
+        let mut extra = HashMap::new();
+        crate::models::stamp_zellij(&mut extra, Some(pane), Some(session));
+        if window {
+            extra.insert("parent_task_id".into(), json!("sandbox"));
+        }
+        let mut t = Task::new(
+            id.to_string(),
+            AgentType::ClaudeCode,
+            "[repo]".to_string(),
+            None,
+            None,
+        );
+        t.context = Some(TaskContext {
+            extra,
+            ..Default::default()
+        });
+        t.created_at = created;
+        t.updated_at = created;
+        t
+    }
 }
 
 #[cfg(test)]

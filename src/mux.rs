@@ -913,16 +913,49 @@ fn plan_resume(
     })
 }
 
+/// What `nibble rc` may do so a tab can be opened in a session from
+/// outside it, given the same inputs `nibble mux NAME` decides from.
+#[derive(Debug, PartialEq)]
+enum BackgroundPlan {
+    /// The session is running.
+    Ready,
+    /// Start it (fresh, or zellij's resurrectable copy) in the background.
+    Start,
+    /// It is down with recorded agent tabs. Only `nibble mux NAME` rebuilds
+    /// those (each pane resuming its conversation); starting it here would
+    /// let the watcher record the session without them and forget them.
+    Refuse { tabs: usize },
+}
+
+fn plan_background(state: ZellijState, manifest: Option<&Manifest>) -> BackgroundPlan {
+    match plan_open(state, manifest) {
+        OpenPlan::Attach => BackgroundPlan::Ready,
+        OpenPlan::Create | OpenPlan::Resurrect => BackgroundPlan::Start,
+        OpenPlan::Restore { .. } => BackgroundPlan::Refuse {
+            tabs: manifest.map_or(0, |m| m.tabs.len()),
+        },
+    }
+}
+
 /// Make sure zellij session `name` is running so tabs can be opened in it
-/// from outside (`nibble rc`). A missing or dead session is started in the
-/// background and recorded like `nibble mux NAME`, so the agents opened in
-/// it come back after a crash; a live one is left as it is.
+/// from outside (`nibble rc`). A live session is used as it is; a missing
+/// or dead one without recorded agents is started in the background and
+/// recorded like `nibble mux NAME`. A session that is down with recorded
+/// agent tabs is refused: `nibble mux NAME` must restore it first.
 pub(crate) fn ensure_background_session(db: &Database, name: &str) -> Result<()> {
     validate_session_name(name)?;
-    if zellij_session_state(name)? == ZellijState::Live {
-        return Ok(());
+    let state = zellij_session_state(name)?;
+    let manifest = load_manifest(db, name)?;
+    match plan_background(state, manifest.as_ref()) {
+        BackgroundPlan::Ready => return Ok(()),
+        BackgroundPlan::Refuse { tabs } => bail!(
+            "zellij session '{name}' is not running and nibble mux has {tabs} recorded agent tab(s) \
+             for it. Run `nibble mux {name}` to bring them back, then start the session again"
+        ),
+        BackgroundPlan::Start => {}
     }
-    let mut manifest = load_manifest(db, name)?.unwrap_or_default();
+    // Same bookkeeping as `nibble mux NAME` creating or resurrecting it.
+    let mut manifest = manifest.unwrap_or_default();
     manifest.epoch = Some(Utc::now());
     save_manifest(db, name, &manifest)?;
     let out = Command::new("zellij")
@@ -1263,6 +1296,28 @@ mod tests {
         assert_eq!(parse_session_state(listing, "mainly"), ZellijState::Live);
         assert_eq!(parse_session_state(listing, "nope"), ZellijState::Missing);
         assert_eq!(parse_session_state("", "main"), ZellijState::Missing);
+    }
+
+    #[test]
+    fn background_start_never_bypasses_a_restore() {
+        let recorded = Manifest {
+            tabs: one_tab(&[("t1", Some("/r"))]),
+            ..Manifest::default()
+        };
+        let empty = Manifest::default();
+        assert_eq!(
+            plan_background(ZellijState::Live, Some(&recorded)),
+            BackgroundPlan::Ready
+        );
+        for state in [ZellijState::Dead, ZellijState::Missing] {
+            assert_eq!(
+                plan_background(state, Some(&recorded)),
+                BackgroundPlan::Refuse { tabs: 1 },
+                "{state:?} with recorded agents must be left to `nibble mux`"
+            );
+            assert_eq!(plan_background(state, Some(&empty)), BackgroundPlan::Start);
+            assert_eq!(plan_background(state, None), BackgroundPlan::Start);
+        }
     }
 
     #[test]

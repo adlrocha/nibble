@@ -9,6 +9,7 @@
 use anyhow::{bail, Context, Result};
 use std::process::Command;
 
+use crate::models::Task;
 use crate::status::{list_zellij_panes, PaneListError, ZellijPane};
 
 const PASTE_START: &str = "\x1b[200~";
@@ -48,6 +49,13 @@ fn zellij(session: &str, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// The zellij session and pane hosting a task's agent.
+pub(crate) fn target(task: &Task) -> Option<(String, u32)> {
+    let session = crate::status::session_of(task)?.to_string();
+    let pane = crate::status::pane_id_of(task)?;
+    Some((session, pane))
+}
+
 /// Whether terminal pane `pane` still exists in `session`.
 pub(crate) fn pane_alive(session: &str, pane: u32) -> Result<bool> {
     match list_zellij_panes(Some(session)) {
@@ -63,18 +71,19 @@ pub(crate) fn send_text(session: &str, pane: u32, text: &str) -> Result<()> {
         return Ok(());
     };
     let pane = pane.to_string();
+    // `--` so text starting with `-` (a bullet list) is not read as a flag.
     zellij(
         session,
-        &["action", "write-chars", &chars, "--pane-id", &pane],
+        &["action", "write-chars", "--pane-id", &pane, "--", &chars],
     )?;
-    zellij(session, &["action", "write", "13", "--pane-id", &pane])?;
+    zellij(session, &["action", "write", "--pane-id", &pane, "13"])?;
     Ok(())
 }
 
 /// Press Escape in the pane: interrupts the agent's current turn.
 pub(crate) fn send_escape(session: &str, pane: u32) -> Result<()> {
     let pane = pane.to_string();
-    zellij(session, &["action", "write", "27", "--pane-id", &pane]).map(drop)
+    zellij(session, &["action", "write", "--pane-id", &pane, "27"]).map(drop)
 }
 
 /// Parse `terminal_<n>` (what `zellij run` prints) into a pane id.
@@ -231,9 +240,11 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(800));
             assert!(pane_alive(&session, pane).unwrap());
             send_text(&session, pane, "hello from slack").unwrap();
+            send_text(&session, pane, "- a bullet").unwrap();
             std::thread::sleep(std::time::Duration::from_millis(800));
             let typed = std::fs::read_to_string(&out).unwrap_or_default();
             assert!(typed.contains("hello from slack"), "typed: {typed:?}");
+            assert!(typed.contains("- a bullet"), "typed: {typed:?}");
             assert!(!pane_alive(&session, 9999).unwrap());
         });
         let _ = Command::new("zellij")

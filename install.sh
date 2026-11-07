@@ -732,6 +732,7 @@ RestartSec=30
 Environment=HOME=%h
 Environment="PATH=$BIN_DIR:$PATH"
 Environment="SHELL=${SHELL:-/bin/sh}"
+$( [ -n "${XDG_CONFIG_HOME:-}" ] && printf 'Environment="XDG_CONFIG_HOME=%s"' "$XDG_CONFIG_HOME" )
 StandardOutput=append:%h/.nibble/logs/rc.log
 StandardError=append:%h/.nibble/logs/rc.log
 

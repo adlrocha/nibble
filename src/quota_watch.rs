@@ -839,56 +839,15 @@ fn continue_host(task: &Task, msg: &str) -> Result<&'static str> {
 /// Type `msg` + Enter into the task's zellij pane, if it is still alive.
 /// Returns `Ok(Some(label))` when the keystrokes were delivered.
 fn zellij_send(task: &Task, msg: &str) -> Result<Option<&'static str>> {
-    let (Some(pane_id), Some(session)) = (
-        crate::status::pane_id_of(task),
-        crate::status::session_of(task),
-    ) else {
+    let Some((session, pane)) = crate::rc::pane::target(task) else {
         return Ok(None);
     };
-
-    // Is the pane still there?
     // Any listing failure means no reachable pane: fall back to the
     // headless resume rather than aborting the attempt.
-    let Ok(panes) = crate::status::list_zellij_panes(Some(session)) else {
-        return Ok(None);
-    };
-    let alive = panes.iter().any(|p| p.id == pane_id && !p.is_plugin);
-    if !alive {
+    if !crate::rc::pane::pane_alive(&session, pane).unwrap_or(false) {
         return Ok(None);
     }
-
-    let pane = pane_id.to_string();
-    let chars = Command::new("zellij")
-        .args([
-            "--session",
-            session,
-            "action",
-            "write-chars",
-            msg,
-            "--pane-id",
-            &pane,
-        ])
-        .status()
-        .context("zellij write-chars")?;
-    if !chars.success() {
-        anyhow::bail!("zellij write-chars failed for pane {pane}");
-    }
-    // CR submits the TUI input line.
-    let enter = Command::new("zellij")
-        .args([
-            "--session",
-            session,
-            "action",
-            "write",
-            "13",
-            "--pane-id",
-            &pane,
-        ])
-        .status()
-        .context("zellij write")?;
-    if !enter.success() {
-        anyhow::bail!("zellij write failed for pane {pane}");
-    }
+    crate::rc::pane::send_text(&session, pane, msg)?;
     Ok(Some("zellij"))
 }
 

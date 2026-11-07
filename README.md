@@ -604,6 +604,10 @@ Network is host-mode, so services started inside the container (e.g. `npm run de
 | `nibble session info <id>` / `read <id>` | Show a session's transcript path and resume command, or print its transcript |
 | `nibble inject <id> <msg>` | Send a message into a running sandbox agent |
 | `nibble quota-watch` | Quota auto-continue daemon (`--once` for a single pass) |
+| `nibble rc setup` / `doctor` / `manifest` | Store the Slack credentials, check the whole chain, print the Slack app manifest |
+| `nibble rc start [task]` / `stop [task]` | Send a session to Slack or take it back (what `/nibble-rc` runs) |
+| `nibble rc list` | Sessions sent to or started from Slack |
+| `nibble rc daemon` | Slack remote-control daemon (`nibble-rc.service`) |
 | `nibble web` | Web session inspector (port 7878, token auth) |
 | `nibble usage scan` / `report` / `pricing` | Collect token usage, print aggregated cost, show the pricing table |
 | `nibble memory <action>` | Search, write, load and sync cross-session memories and lessons |
@@ -645,6 +649,7 @@ src/
 ├── mux.rs                   # `nibble mux`: recoverable zellij sessions
 ├── session/                 # Session discovery, picker, transcript reading
 ├── quota_watch.rs           # Quota auto-continue daemon
+├── rc/                      # Slack remote control (`nibble rc`, `/nibble-rc`)
 ├── usage/                   # Token usage scanning, pricing, reports
 ├── memory/                  # Cross-session memory store and summarization
 ├── web/                     # Web session inspector

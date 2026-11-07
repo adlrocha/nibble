@@ -198,6 +198,12 @@ if [ -f "$CLAUDE_SETTINGS" ] && command -v jq >/dev/null 2>&1; then
     fi
 fi
 
+# Slash commands install.sh copied from claude-commands/.
+for cmd in nibble-rc; do
+    dest="$HOME/.claude/commands/$cmd.md"
+    [ -f "$dest" ] && rm -f "$dest" && ok "Removed Claude command /$cmd"
+done
+
 # ── 9. Remove config and data ────────────────────────────────────────────────
 step "Removing config and data"
 
@@ -207,8 +213,16 @@ if [ "$KEEP_CONFIG" = false ]; then
         rm -rf "$NIBBLE_DIR"
         ok "Removed $NIBBLE_DIR/"
     fi
+    # Slack credentials from `nibble rc setup` (kept outside ~/.nibble so
+    # sandboxes cannot read them).
+    RC_SECRETS="${XDG_CONFIG_HOME:-$HOME/.config}/nibble/slack.env"
+    if [ -f "$RC_SECRETS" ]; then
+        rm -f "$RC_SECRETS"
+        rmdir "$(dirname "$RC_SECRETS")" 2>/dev/null || true
+        ok "Removed $RC_SECRETS"
+    fi
 else
-    warn "Keeping $HOME/.nibble/ (--keep-config)"
+    warn "Keeping $HOME/.nibble/ and the Slack credentials (--keep-config)"
 fi
 
 # ── 9b. Remove the one-command install's source checkout ─────────────────────

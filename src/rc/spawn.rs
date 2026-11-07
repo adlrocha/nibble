@@ -1,0 +1,329 @@
+//! Sessions started from Slack: open a zellij tab running the agent, wait
+//! for the agent to register in that pane and report its session, then
+//! type the first message and link the thread.
+
+use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
+use std::path::Path;
+
+use super::daemon::{card_for, session_card, Daemon};
+use super::modal::NewSession;
+use super::pane;
+use super::slack::{self, SessionStatus};
+use super::store::{self, Link, Location, PendingSpawn, SpawnAgent, Watch};
+use crate::models::{AgentType, Task, TaskStatus};
+
+/// Grace period after an agent reports its session before the first
+/// message is typed, so its TUI is reading input.
+const READY_GRACE_SECS: i64 = 2;
+
+impl Daemon {
+    pub(super) fn start_session(&mut self, new: &NewSession) -> Result<()> {
+        let channel = new.origin.channel.clone();
+        let thread_ts = match &new.origin.thread_ts {
+            Some(ts) => ts.clone(),
+            None => {
+                let blocks = slack::markdown_blocks(&new.prompt);
+                self.bot
+                    .post(&channel, None, &slack::preview(&new.prompt), &blocks)?
+            }
+        };
+        let cwd = new.cwd.to_string_lossy().to_string();
+        self.note(
+            &channel,
+            &thread_ts,
+            &format!(
+                ":hourglass_flowing_sand: Starting {} on {} in `{}` (zellij `{}`)…",
+                new.agent.as_str(),
+                new.location.as_str(),
+                slack::escape(&cwd),
+                self.cfg.zellij_session
+            ),
+        );
+        let session = self.cfg.zellij_session.clone();
+        crate::mux::ensure_background_session(&self.db, &session)?;
+        let script = launch_script(
+            new.location,
+            new.agent,
+            &new.cwd,
+            &std::env::current_exe().context("cannot locate nibble binary")?,
+            &crate::mux::wrappers_dir()?,
+            &std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()),
+        );
+        let tab_name = tab_name_for(&new.cwd);
+        let pane_id = pane::open_tab(&session, &tab_name, &cwd, &script)?;
+        store::put_spawn(
+            &self.db,
+            &PendingSpawn {
+                channel,
+                thread_ts,
+                location: new.location,
+                agent: new.agent,
+                cwd,
+                prompt: new.prompt.clone(),
+                zellij_session: session,
+                pane_id,
+                tab_name,
+                started_at: Utc::now(),
+                task_id: None,
+                ready_at: None,
+                queued: Vec::new(),
+            },
+        )
+    }
+
+    /// Advance one pending spawn: find its agent, wait for its TUI, hand it
+    /// the first message and link the thread.
+    pub(super) fn advance_spawn(
+        &mut self,
+        mut spawn: PendingSpawn,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let timeout =
+            chrono::Duration::seconds(i64::try_from(self.cfg.start_timeout_secs).unwrap_or(240));
+        if now - spawn.started_at > timeout {
+            store::delete_spawn(&self.db, &spawn.thread_ts)?;
+            self.note(
+                &spawn.channel,
+                &spawn.thread_ts,
+                &format!(
+                    ":warning: The agent did not come up within {}s. Look at tab `{}` in zellij `{}`.",
+                    self.cfg.start_timeout_secs, spawn.tab_name, spawn.zellij_session
+                ),
+            );
+            return Ok(());
+        }
+        if spawn.task_id.is_none() {
+            let tasks = self.db.list_tasks()?;
+            spawn.task_id = find_spawned_task(&tasks, &spawn).map(|t| t.task_id.clone());
+            if spawn.task_id.is_none() {
+                if !pane::pane_alive(&spawn.zellij_session, spawn.pane_id).unwrap_or(true) {
+                    store::delete_spawn(&self.db, &spawn.thread_ts)?;
+                    self.note(
+                        &spawn.channel,
+                        &spawn.thread_ts,
+                        ":warning: The agent's pane closed before it started.",
+                    );
+                    return Ok(());
+                }
+                return store::put_spawn(&self.db, &spawn);
+            }
+        }
+        let task_id = spawn.task_id.clone().unwrap_or_default();
+        let Some(task) = self.db.get_task_by_id(&task_id)? else {
+            spawn.task_id = None;
+            return store::put_spawn(&self.db, &spawn);
+        };
+        if spawn.ready_at.is_none() {
+            if !session_known(&task) {
+                return store::put_spawn(&self.db, &spawn);
+            }
+            spawn.ready_at = Some(now);
+            return store::put_spawn(&self.db, &spawn);
+        }
+        if spawn
+            .ready_at
+            .is_some_and(|r| (now - r).num_seconds() < READY_GRACE_SECS)
+        {
+            return Ok(());
+        }
+        // Ready: link first, so replies arriving meanwhile find the link.
+        let card = card_for(&task, &spawn.zellij_session);
+        let link = Link {
+            task_id: task.task_id.clone(),
+            channel: spawn.channel.clone(),
+            thread_ts: spawn.thread_ts.clone(),
+            created_at: now,
+            closed: false,
+            watch: Some(Watch::Working),
+            last_reply_id: self.current_reply(&task).map(|r| r.id),
+            idle_checks: 0,
+            permalink: self.bot.permalink(&spawn.channel, &spawn.thread_ts).ok(),
+            card,
+        };
+        store::put_link(&self.db, &link)?;
+        store::delete_spawn(&self.db, &spawn.thread_ts)?;
+        for msg in std::iter::once(&spawn.prompt).chain(spawn.queued.iter()) {
+            pane::send_text(&spawn.zellij_session, spawn.pane_id, msg)?;
+        }
+        let session_card = session_card(&link, Some(&spawn.prompt));
+        self.bot.post(
+            &link.channel,
+            Some(&link.thread_ts),
+            &slack::session_card_text(&session_card),
+            &slack::session_card_blocks(&session_card, true),
+        )?;
+        self.session_status(&link.channel, &link.thread_ts, SessionStatus::Processing);
+        self.session_title(
+            &link.channel,
+            &link.thread_ts,
+            &slack::preview(&spawn.prompt),
+        );
+        Ok(())
+    }
+}
+
+/// Whether the agent reported its conversation (its TUI is up).
+fn session_known(task: &Task) -> bool {
+    let Some(ctx) = task.context.as_ref() else {
+        return false;
+    };
+    match task.agent_type {
+        AgentType::ClaudeCode => ctx.claude_session_id.is_some(),
+        _ => ctx.extra.contains_key("pi_session_path"),
+    }
+}
+
+/// The task an agent started in `spawn`'s pane registered: same zellij
+/// session and pane, registered after the spawn began. A sandbox attach
+/// registers both the sandbox and its window; the window is the agent.
+fn find_spawned_task<'a>(tasks: &'a [Task], spawn: &PendingSpawn) -> Option<&'a Task> {
+    let since = spawn.started_at - chrono::Duration::seconds(5);
+    tasks
+        .iter()
+        .filter(|t| t.created_at >= since)
+        .filter(|t| t.status != TaskStatus::Exited)
+        .filter(|t| {
+            pane::target(t).is_some_and(|(s, p)| s == spawn.zellij_session && p == spawn.pane_id)
+        })
+        .max_by_key(|t| {
+            let window = t
+                .context
+                .as_ref()
+                .is_some_and(|c| c.extra.contains_key("parent_task_id"));
+            (window, t.created_at)
+        })
+}
+
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// The command a new session's pane runs: the agent through its nibble
+/// wrapper (host; Claude with `--fresh` so it doesn't resume the repo's
+/// last conversation) or a `--btw` sandbox attach (a side session that
+/// leaves the repo's main one alone), then the user's shell.
+fn launch_script(
+    location: Location,
+    agent: SpawnAgent,
+    cwd: &Path,
+    nibble_bin: &Path,
+    wrappers: &Path,
+    shell: &str,
+) -> String {
+    let run = match location {
+        Location::Host => {
+            let (wrapper, args) = match agent {
+                SpawnAgent::Claude => ("claude-wrapper", " --fresh"),
+                SpawnAgent::Pi => ("pi-wrapper", ""),
+                SpawnAgent::Omp => ("omp-wrapper", ""),
+            };
+            format!(
+                "{}{args}",
+                sh_quote(&wrappers.join(wrapper).to_string_lossy())
+            )
+        }
+        Location::Sandbox => {
+            let flag = match agent {
+                SpawnAgent::Claude => "",
+                SpawnAgent::Pi => " --pi",
+                SpawnAgent::Omp => " --omp",
+            };
+            format!(
+                "{} sandbox attach {} --btw{flag}",
+                sh_quote(&nibble_bin.to_string_lossy()),
+                sh_quote(&cwd.to_string_lossy())
+            )
+        }
+    };
+    format!("{run}; exec {}", sh_quote(shell))
+}
+
+/// The zellij tab name for a session started in `cwd`.
+fn tab_name_for(cwd: &Path) -> String {
+    let base = cwd
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "session".to_string());
+    format!("{base} (slack)")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::test_support::task;
+    use super::*;
+    use serde_json::json;
+
+    fn spawn(started: DateTime<Utc>) -> PendingSpawn {
+        PendingSpawn {
+            channel: "D1".into(),
+            thread_ts: "1.1".into(),
+            location: Location::Sandbox,
+            agent: SpawnAgent::Claude,
+            cwd: "/r".into(),
+            prompt: "go".into(),
+            zellij_session: "main".into(),
+            pane_id: 7,
+            tab_name: "r (slack)".into(),
+            started_at: started,
+            task_id: None,
+            ready_at: None,
+            queued: vec![],
+        }
+    }
+
+    #[test]
+    fn finds_the_agent_registered_in_the_new_pane() {
+        let now = Utc::now();
+        let old = now - chrono::Duration::hours(1);
+        let tasks = vec![
+            task("stale", 7, "main", old, false), // old pane-id reuse
+            task("other-pane", 8, "main", now, false),
+            task("other-session", 7, "work", now, false),
+            task("sandbox", 7, "main", now, false),
+            task("window", 7, "main", now, true),
+        ];
+        assert_eq!(
+            find_spawned_task(&tasks, &spawn(now)).unwrap().task_id,
+            "window"
+        );
+        assert!(find_spawned_task(&tasks[..3], &spawn(now)).is_none());
+    }
+
+    #[test]
+    fn readiness_needs_the_agent_session() {
+        let mut t = task("t", 1, "main", Utc::now(), false);
+        assert!(!session_known(&t));
+        t.context.as_mut().unwrap().claude_session_id = Some("s".into());
+        assert!(session_known(&t));
+        let mut p = task("p", 1, "main", Utc::now(), false);
+        p.agent_type = AgentType::Pi;
+        assert!(!session_known(&p));
+        p.context
+            .as_mut()
+            .unwrap()
+            .extra
+            .insert("pi_session_path".into(), json!("/x.jsonl"));
+        assert!(session_known(&p));
+    }
+
+    #[test]
+    fn launch_scripts_per_location_and_agent() {
+        let bin = Path::new("/bin/nib ble");
+        let wr = Path::new("/w");
+        let cwd = Path::new("/r/it's");
+        assert_eq!(
+            launch_script(Location::Host, SpawnAgent::Claude, cwd, bin, wr, "/bin/zsh"),
+            "'/w/claude-wrapper' --fresh; exec '/bin/zsh'"
+        );
+        assert_eq!(
+            launch_script(Location::Host, SpawnAgent::Omp, cwd, bin, wr, "/bin/zsh"),
+            "'/w/omp-wrapper'; exec '/bin/zsh'"
+        );
+        assert_eq!(
+            launch_script(Location::Sandbox, SpawnAgent::Pi, cwd, bin, wr, "/bin/sh"),
+            "'/bin/nib ble' sandbox attach '/r/it'\\''s' --btw --pi; exec '/bin/sh'"
+        );
+        assert_eq!(tab_name_for(cwd), "it's (slack)");
+    }
+}
