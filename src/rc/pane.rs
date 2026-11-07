@@ -5,7 +5,6 @@ use anyhow::{bail, Context, Result};
 
 use crate::models::Task;
 use crate::pane_input::zellij;
-pub(crate) use crate::pane_input::{pane_alive, send_escape, send_text, target};
 use crate::status::{list_zellij_panes, pane_at_shell, PaneListError, ZellijPane};
 
 /// Whether the task's agent still runs in its pane: the agent process (when
@@ -103,6 +102,7 @@ fn stray_shells(panes: &[ZellijPane], tab: u32, keep: u32) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pane_input::{pane_alive, send_text};
     use std::process::Command;
 
     fn zpane(id: u32, tab: u32, plugin: bool, command: Option<&str>) -> ZellijPane {

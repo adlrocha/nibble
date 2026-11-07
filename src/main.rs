@@ -11,6 +11,7 @@ mod format;
 mod hermes;
 mod keybinds;
 mod lm;
+mod lock;
 mod memory;
 mod models;
 mod mux;

@@ -24,6 +24,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use crate::db::Database;
+use crate::lock::{try_lock_in, InstanceLock};
 use crate::models::{AgentType, SandboxType, Task, TaskStatus};
 use crate::sandbox::podman::PodmanSandbox;
 use crate::sandbox::ContainerStatus;
@@ -663,14 +664,7 @@ impl Debounce {
     }
 }
 
-/// Holds an exclusive lock on `<dir>/<name>.lock` (the mux watcher's in
-/// `~/.nibble/mux`, the rc daemon's in `~/.nibble`) for the holder's
-/// lifetime; released by the kernel when the process exits.
-pub(crate) struct WatcherLock {
-    _file: std::fs::File,
-}
-
-fn try_lock(name: &str) -> Result<Option<WatcherLock>> {
+fn try_lock(name: &str) -> Result<Option<InstanceLock>> {
     try_lock_in(&mux_dir()?, name)
 }
 
@@ -680,7 +674,7 @@ fn wait_for_lock(
     name: &str,
     timeout: Duration,
     interval: Duration,
-) -> Result<Option<WatcherLock>> {
+) -> Result<Option<InstanceLock>> {
     let deadline = std::time::Instant::now() + timeout;
     loop {
         if let Some(lock) = try_lock_in(dir, name)? {
@@ -691,28 +685,6 @@ fn wait_for_lock(
         }
         std::thread::sleep(interval);
     }
-}
-
-/// `None` when another process (a running watcher) holds the lock.
-pub(crate) fn try_lock_in(dir: &Path, name: &str) -> Result<Option<WatcherLock>> {
-    use std::os::fd::AsRawFd;
-    let path = dir.join(format!("{name}.lock"));
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&path)
-        .with_context(|| format!("failed to open {}", path.display()))?;
-    // SAFETY: flock on a valid, owned file descriptor.
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if rc != 0 {
-        let err = std::io::Error::last_os_error();
-        if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
-            return Ok(None);
-        }
-        return Err(anyhow::Error::new(err).context("failed to lock mux watcher"));
-    }
-    Ok(Some(WatcherLock { _file: file }))
 }
 
 fn log_line(name: &str, msg: &str) {

@@ -198,10 +198,10 @@ if [ -f "$CLAUDE_SETTINGS" ] && command -v jq >/dev/null 2>&1; then
     fi
 fi
 
-# Slash commands install.sh copied from claude-commands/.
-for cmd in nibble-rc; do
-    dest="$HOME/.claude/commands/$cmd.md"
-    [ -f "$dest" ] && rm -f "$dest" && ok "Removed Claude command /$cmd"
+# Slash commands install.sh copied from claude-commands/ (all nibble-*.md).
+for dest in "$HOME"/.claude/commands/nibble-*.md; do
+    [ -f "$dest" ] || continue
+    rm -f "$dest" && ok "Removed Claude command /$(basename "$dest" .md)"
 done
 
 # ── 9. Remove config and data ────────────────────────────────────────────────

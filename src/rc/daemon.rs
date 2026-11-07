@@ -31,6 +31,7 @@ use super::{pane, relay, transcript};
 use crate::config::RcConfig;
 use crate::db::Database;
 use crate::models::{SandboxType, Task};
+use crate::pane_input;
 
 /// Reconnect when the socket has carried no frame at all (not even one of
 /// Slack's pings, which arrive far more often) for this long.
@@ -48,7 +49,7 @@ const SEEN_CAP: usize = 256;
 pub(crate) fn run(cfg: RcConfig, db_path: PathBuf) -> Result<()> {
     // One daemon per machine: a second would relay the same turns and
     // answer the same requests, posting everything twice.
-    let _lock = crate::mux::try_lock_in(&crate::db::ensure_data_dir()?, DAEMON_LOCK)?
+    let _lock = crate::lock::try_lock_in(&crate::db::ensure_data_dir()?, DAEMON_LOCK)?
         .with_context(|| {
             "another nibble rc daemon is already running (systemctl --user status nibble-rc)"
         })?;
@@ -339,7 +340,7 @@ impl Daemon {
         let task = self.db.get_task_by_id(&link.task_id)?;
         let target = task
             .as_ref()
-            .and_then(|t| pane::target(t).map(|(s, p)| (t, s, p)));
+            .and_then(|t| pane_input::target(t).map(|(s, p)| (t, s, p)));
         let Some((task, session, pane_id)) = target else {
             self.note(
                 channel,
@@ -356,7 +357,7 @@ impl Daemon {
             );
             return Ok(());
         }
-        pane::send_text(&session, pane_id, text)?;
+        pane_input::send_text(&session, pane_id, text)?;
         let _ = self.bot.react(channel, ts, "eyes");
         link.watch = relay::after_reply(link.watch);
         link.idle_checks = 0;
@@ -369,15 +370,26 @@ impl Daemon {
         let Some(link) = store::link_by_thread(&self.db, channel, thread_ts)? else {
             return Ok(());
         };
-        if let Some((session, pane_id)) = self
+        if link.closed {
+            // Nothing to interrupt; keep Slack's state at closed.
+            self.session_status(channel, thread_ts, SessionStatus::Closed);
+            return Ok(());
+        }
+        let target = self
             .db
             .get_task_by_id(&link.task_id)?
             .as_ref()
-            .and_then(pane::target)
-        {
-            pane::send_escape(&session, pane_id)?;
-            self.note(channel, thread_ts, ":black_square_for_stop: Interrupted.");
-        }
+            .and_then(pane_input::target);
+        let note = match target {
+            Some((session, pane_id)) => match pane_input::send_escape(&session, pane_id) {
+                Ok(()) => ":black_square_for_stop: Interrupted.".to_string(),
+                Err(e) => format!(":warning: Could not interrupt the agent: {e:#}"),
+            },
+            None => {
+                ":warning: nibble does not know this session's zellij pane any more.".to_string()
+            }
+        };
+        self.note(channel, thread_ts, &note);
         self.session_status(channel, thread_ts, SessionStatus::Active);
         Ok(())
     }
@@ -514,7 +526,7 @@ impl Daemon {
             .db
             .get_task_by_id(task_id)?
             .with_context(|| format!("nibble has no task {task_id}"))?;
-        let Some((session, _)) = pane::target(&task) else {
+        let Some((session, _)) = pane_input::target(&task) else {
             anyhow::bail!(
                 "this session's zellij pane is unknown to nibble; run the agent inside zellij"
             );

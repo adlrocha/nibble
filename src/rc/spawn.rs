@@ -13,6 +13,7 @@ use super::slack::{self, SessionStatus};
 use super::store::{self, Link, Location, PendingSpawn, SpawnAgent, Watch};
 use crate::models::{AgentType, Task, TaskStatus};
 use crate::mux::sh_quote;
+use crate::pane_input;
 
 /// Grace period after an agent reports its session before the first
 /// message is typed, so its TUI is reading input.
@@ -84,6 +85,7 @@ impl Daemon {
                 ready_at: None,
                 queued: Vec::new(),
                 typed: 0,
+                baseline_reply: None,
                 last_error: None,
             },
         )
@@ -121,7 +123,7 @@ impl Daemon {
             let tasks = self.db.list_tasks()?;
             spawn.task_id = find_spawned_task(&tasks, &spawn).map(|t| t.task_id.clone());
             if spawn.task_id.is_none() {
-                if !pane::pane_alive(&spawn.zellij_session, spawn.pane_id).unwrap_or(true) {
+                if !pane_input::pane_alive(&spawn.zellij_session, spawn.pane_id).unwrap_or(true) {
                     store::delete_spawn(&self.db, &spawn.thread_ts)?;
                     self.note(
                         &spawn.channel,
@@ -162,6 +164,12 @@ impl Daemon {
             );
             return Ok(());
         }
+        // What counts as "already posted" is fixed before typing, so a
+        // replay after the agent answered still relays that answer.
+        if spawn.baseline_reply.is_none() {
+            spawn.baseline_reply = Some(self.current_reply(&task).map(|r| r.id));
+            store::put_spawn(&self.db, &spawn)?;
+        }
         // Type the first message and anything queued, recording progress so
         // a retry (after a transient zellij or database error) resumes where
         // it stopped instead of typing a message twice.
@@ -169,22 +177,33 @@ impl Daemon {
             .chain(spawn.queued.iter().cloned())
             .collect();
         while spawn.typed < messages.len() {
-            pane::send_text(&spawn.zellij_session, spawn.pane_id, &messages[spawn.typed])?;
+            pane_input::send_text(&spawn.zellij_session, spawn.pane_id, &messages[spawn.typed])?;
             spawn.typed += 1;
             store::put_spawn(&self.db, &spawn)?;
         }
-        let card = card_for(&task, &spawn.zellij_session);
-        let mut link = Link::new(
-            &task.task_id,
-            &spawn.channel,
-            &spawn.thread_ts,
-            card,
-            Watch::Working,
-        );
-        link.last_reply_id = self.current_reply(&task).map(|r| r.id);
-        link.permalink = self.bot.permalink(&spawn.channel, &spawn.thread_ts).ok();
-        store::put_link(&self.db, &link)?;
+        // A replay that already linked the thread reuses that link.
+        let existing = reusable_link(store::link(&self.db, &task.task_id)?, &spawn.thread_ts);
+        let mut link = match existing {
+            Some(link) => link,
+            None => {
+                let card = card_for(&task, &spawn.zellij_session);
+                let mut link = Link::new(
+                    &task.task_id,
+                    &spawn.channel,
+                    &spawn.thread_ts,
+                    card,
+                    Watch::Working,
+                );
+                link.last_reply_id = spawn.baseline_reply.clone().flatten();
+                link.permalink = self.bot.permalink(&spawn.channel, &spawn.thread_ts).ok();
+                store::put_link(&self.db, &link)?;
+                link
+            }
+        };
         store::delete_spawn(&self.db, &spawn.thread_ts)?;
+        if link.card_ts.is_some() {
+            return Ok(());
+        }
         // From here on the session is linked; the card is best effort. The
         // thread root is your message or the prompt, so the card is a reply:
         // remember it, Close rewrites it.
@@ -209,6 +228,11 @@ impl Daemon {
         );
         Ok(())
     }
+}
+
+/// The task's link when a replayed start already created it for this thread.
+fn reusable_link(existing: Option<Link>, thread_ts: &str) -> Option<Link> {
+    existing.filter(|l| !l.closed && l.thread_ts == thread_ts)
 }
 
 /// A thread holds one session: a start is refused while one is starting or
@@ -238,7 +262,8 @@ fn find_spawned_task<'a>(tasks: &'a [Task], spawn: &PendingSpawn) -> Option<&'a 
         .filter(|t| t.created_at >= since)
         .filter(|t| t.status != TaskStatus::Exited)
         .filter(|t| {
-            pane::target(t).is_some_and(|(s, p)| s == spawn.zellij_session && p == spawn.pane_id)
+            pane_input::target(t)
+                .is_some_and(|(s, p)| s == spawn.zellij_session && p == spawn.pane_id)
         })
         .max_by_key(|t| {
             let window = t
@@ -326,6 +351,7 @@ mod tests {
             ready_at: None,
             queued: vec![],
             typed: 0,
+            baseline_reply: None,
             last_error: None,
         }
     }
@@ -346,6 +372,18 @@ mod tests {
             "window"
         );
         assert!(find_spawned_task(&tasks[..3], &spawn(now)).is_none());
+    }
+
+    #[test]
+    fn a_replayed_start_reuses_its_link() {
+        let mut l = crate::rc::test_support::link("t", "1.1");
+        l.card_ts = Some("1.2".into());
+        let reused = reusable_link(Some(l.clone()), "1.1").unwrap();
+        assert_eq!(reused.card_ts.as_deref(), Some("1.2"), "no second card");
+        assert!(reusable_link(Some(l.clone()), "9.9").is_none());
+        l.closed = true;
+        assert!(reusable_link(Some(l), "1.1").is_none());
+        assert!(reusable_link(None, "1.1").is_none());
     }
 
     #[test]

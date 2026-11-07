@@ -63,11 +63,16 @@ fn resolve_task(task: Option<&str>) -> Result<String> {
         .context("no task given and AGENT_TASK_ID is not set (run this from an agent, or pass a task id)")
 }
 
+/// Whether a daemon heartbeat at `beat` means the daemon is running now.
+/// Shared by `/nibble-rc` (refuses when not) and `nibble rc doctor`.
+fn daemon_alive(beat: Option<chrono::DateTime<Utc>>, now: chrono::DateTime<Utc>) -> bool {
+    beat.is_some_and(|b| (now - b).num_seconds() <= BEAT_STALE_SECS)
+}
+
 /// Ask the daemon to start or stop relaying `task_id`, and wait for its
 /// answer.
 fn request(db: &Database, task_id: &str, action: RequestAction) -> Result<String> {
-    let fresh =
-        store::last_beat(db)?.is_some_and(|b| (Utc::now() - b).num_seconds() <= BEAT_STALE_SECS);
+    let fresh = daemon_alive(store::last_beat(db)?, Utc::now());
     if !fresh {
         bail!("the nibble rc daemon is not running (systemctl --user start nibble-rc; check `nibble rc doctor`)");
     }
@@ -399,7 +404,7 @@ pub(crate) fn cmd_doctor(db: &Database, cfg: &RcConfig) -> Result<()> {
     ok &= check(
         "daemon",
         store::last_beat(db).and_then(|b| match b {
-            Some(b) if (Utc::now() - b).num_seconds() <= BEAT_STALE_SECS => {
+            Some(b) if daemon_alive(Some(b), Utc::now()) => {
                 Ok(format!("alive ({}s ago)", (Utc::now() - b).num_seconds()))
             }
             Some(b) => bail!("last seen {b}; systemctl --user status nibble-rc"),
@@ -533,6 +538,17 @@ mod tests {
         let out =
             claude_hook_response(&json!({"prompt": "/nibble-rc"}), None, &|_, _| panic!()).unwrap();
         assert!(out["reason"].as_str().unwrap().contains("no task id"));
+    }
+
+    #[test]
+    fn heartbeat_age_decides_liveness() {
+        let now = Utc::now();
+        assert!(daemon_alive(Some(now - chrono::Duration::seconds(30)), now));
+        assert!(!daemon_alive(
+            Some(now - chrono::Duration::seconds(BEAT_STALE_SECS + 1)),
+            now
+        ));
+        assert!(!daemon_alive(None, now));
     }
 
     #[test]

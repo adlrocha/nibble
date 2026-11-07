@@ -192,6 +192,11 @@ pub(crate) struct PendingSpawn {
     /// retried start never types one twice.
     #[serde(default)]
     pub typed: usize,
+    /// The transcript's last reply before anything was typed (`Some(None)`:
+    /// none yet), taken once so a replayed start never mistakes the agent's
+    /// answer to the first message for an old reply.
+    #[serde(default)]
+    pub baseline_reply: Option<Option<String>>,
     /// The last transient failure, reported if the start times out.
     #[serde(default)]
     pub last_error: Option<String>,
