@@ -36,6 +36,11 @@ zip = { version = "2.2", default-features = false, features = ["deflate"] }
 walkdir = "2.5"
 tiny_http = { version = "0.12", default-features = false }
 flate2 = "1.1.10"
+# Slack Socket Mode (`nibble rc`): a sync WebSocket over our own rustls
+# stream, so TLS uses the same system trust store as ureq (no webpki-roots).
+tungstenite = { version = "0.27", default-features = false, features = ["handshake"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
+rustls-native-certs = "0.7"
 
 [dev-dependencies]
 filetime = "0.2.29"

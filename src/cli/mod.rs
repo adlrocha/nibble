@@ -191,6 +191,39 @@ pub enum Commands {
         #[arg(long, env = "NIBBLE_WEB_TOKEN")]
         token: Option<String>,
     },
+
+    /// Remote-control agent sessions from Slack (see docs/rc.md)
+    Rc {
+        #[command(subcommand)]
+        action: RcAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum RcAction {
+    /// Store the Slack app's tokens and your member ID (prompts)
+    Setup,
+    /// Check credentials, Socket Mode, zellij and the daemon
+    Doctor,
+    /// Print the Slack app manifest to create the app from
+    Manifest,
+    /// Run the Slack daemon (normally nibble-rc.service)
+    Daemon,
+    /// Send a session to Slack (default: this agent's, from AGENT_TASK_ID)
+    Start {
+        /// Task ID (from `nibble status --json`)
+        task_id: Option<String>,
+    },
+    /// Stop relaying a session to Slack; the session itself keeps running
+    Stop {
+        /// Task ID (default: AGENT_TASK_ID)
+        task_id: Option<String>,
+    },
+    /// List sessions sent to or started from Slack
+    List,
+    /// Claude Code UserPromptSubmit hook: handles `/nibble-rc` without a model turn
+    #[command(name = "claude-hook", hide = true)]
+    ClaudeHook,
 }
 
 #[derive(Subcommand)]

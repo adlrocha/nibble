@@ -1,0 +1,105 @@
+# Slack remote control (`nibble rc`)
+
+Carry on with an agent session from Slack while it keeps running in zellij,
+or start a new one from your phone.
+
+- **`/nibble-rc`** inside a Claude Code, pi or omp session (on the host or in
+  a sandbox) posts the session to your DM with the nibble Slack app as a new
+  thread, with its last reply. From then on:
+  - a message in that thread is typed into the session's zellij pane;
+  - each finished turn's reply comes back to the thread;
+  - a permission prompt is posted as a note (reply with a number to pick a
+    menu option, or answer at the terminal);
+  - Slack's stop button interrupts the turn (Escape in the pane).
+- **`/nibble`** in Slack opens a form: host or sandbox, agent (Claude Code,
+  pi, omp), repo or directory, and the first message. The session opens in a
+  new tab of zellij session `main` (created in the background and recorded by
+  `nibble mux` if it isn't running) and gets its own thread. A plain message
+  to the app offers the same form, prefilled with what you wrote.
+- **Close** a thread with the button on its first message, or `/nibble-rc
+  stop` in the session. Closing only stops relaying: the zellij tab and the
+  agent keep running. Tabs are never closed for you.
+- **`/nibble list`** in Slack, or `nibble rc list`, shows the sessions in
+  Slack.
+
+The session in Slack is the one in the pane, so you can type at the
+terminal and in Slack interchangeably. A session started from Slack on the
+host is a fresh Claude conversation (`claude --fresh`); in a sandbox it is a
+`--btw` side session, so the repo's main session is left alone.
+
+## How it works
+
+```
+zellij pane (claude | pi | omp, host or sandbox)
+   ▲ typed in: zellij write-chars        │ hooks / pi extension:
+   │ (bracketed paste for multi-line)     ▼ nibble report status …
+ nibble rc daemon ◄──── nibble's database (tasks, rc:* records) ────► transcript
+   ▲  Socket Mode (outbound WebSocket, no public URL)                  (last reply)
+   ▼
+ Slack DM with the nibble app: one thread per session
+```
+
+- One daemon (`nibble-rc.service`) holds the Slack connection. It watches the
+  task status agents already report: working → the thread shows Slack's
+  "processing" state; a permission prompt → a note; a finished turn → the
+  reply, read from the agent's transcript.
+- `/nibble-rc` never talks to Slack itself. It leaves a request in nibble's
+  database and waits for the daemon's answer. The Slack tokens live in
+  `~/.config/nibble/slack.env` (mode 600), outside `~/.nibble`, because every
+  sandbox mounts `~/.nibble`: sandboxed agents cannot read them.
+- In Claude Code, `/nibble-rc` is handled by a `UserPromptSubmit` hook that
+  blocks the prompt, so it spends no model turn. In pi/omp it is an extension
+  command.
+- Only your Slack member ID is listened to. Messages from anyone else, and
+  from other channels, are ignored.
+
+## Setup
+
+1. **Create the Slack app.** At <https://api.slack.com/apps>: *Create New
+   App* → *From a manifest* → pick your workspace → paste the output of
+   `nibble rc manifest` (the file is `docs/rc-slack-manifest.yml`) → *Create*.
+2. **Install it.** *Install App* → *Install to Workspace*. Copy the *Bot User
+   OAuth Token* (`xoxb-…`).
+3. **App-level token.** *Basic Information* → *App-Level Tokens* → *Generate
+   Token and Scopes*, add scope `connections:write`, generate, copy the
+   `xapp-…` token.
+4. **Your member ID.** In Slack: your profile → ⋮ → *Copy member ID*
+   (`U…`).
+5. **Store them:** `nibble rc setup` (tokens are read without echo).
+6. **Start the daemon:** `systemctl --user enable --now nibble-rc` (or re-run
+   `./install.sh`, which enables it once the credentials exist).
+7. **Check:** `nibble rc doctor` verifies the credentials, your DM with the
+   app, Socket Mode, zellij and the daemon.
+
+Then open the app in Slack (it is under *Apps*, or the agent entry in the
+top bar), and send `/nibble-rc` from any agent running in zellij.
+
+## Configuration
+
+`~/.nibble/config.toml`:
+
+```toml
+[rc]
+zellij_session = "main"         # where sessions started from Slack open
+repo_roots = ["~/workspace"]    # searched for git repos for the form
+repo_depth = 3                  # levels below each root
+poll_ms = 1500                  # how often finished turns are checked
+start_timeout_secs = 240        # how long a new session may take to start
+```
+
+The form lists the directories of your recent nibble sessions first, then
+the repos found under `repo_roots` (up to Slack's 100 options). Any other
+directory can be typed in.
+
+## Troubleshooting
+
+- **`nibble rc doctor`** first.
+- Daemon log: `~/.nibble/logs/rc.log`.
+- *"the nibble rc daemon is not running"*: `systemctl --user status nibble-rc`.
+- *"The session's pane is gone"*: the agent's zellij pane was closed. Reopen
+  the session (`nibble mux main` restores recorded tabs) and send
+  `/nibble-rc` again.
+- If Slack refuses the agent-session calls (status and titles), the daemon
+  logs it once and carries on without them; replies still flow.
+- `/nibble-rc` spends a model turn in Claude Code: the hook is missing; re-run
+  `./install.sh`.

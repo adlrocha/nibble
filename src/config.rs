@@ -24,6 +24,73 @@ pub struct Config {
 
     #[serde(default)]
     pub quota_watch: QuotaWatchConfig,
+
+    #[serde(default)]
+    pub rc: RcConfig,
+}
+
+/// Slack remote control (`nibble rc`) configuration.
+///
+/// Secrets (Slack tokens, your Slack member ID) are not stored here: they
+/// live in `~/.config/nibble/slack.env`, outside `~/.nibble`, which every
+/// sandbox mounts read-write. See `docs/rc.md`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RcConfig {
+    /// zellij session that sessions started from Slack open their tab in.
+    /// Created in the background (and recorded by `nibble mux`) if missing.
+    #[serde(default = "default_rc_zellij_session")]
+    pub zellij_session: String,
+
+    /// Directories searched for git repos to offer in the new-session form.
+    /// `~/` expands to the home directory.
+    #[serde(default = "default_rc_repo_roots")]
+    pub repo_roots: Vec<String>,
+
+    /// How many directory levels below each root are searched for repos.
+    #[serde(default = "default_rc_repo_depth")]
+    pub repo_depth: usize,
+
+    /// How often the daemon checks linked sessions for finished turns (ms).
+    #[serde(default = "default_rc_poll_ms")]
+    pub poll_ms: u64,
+
+    /// How long a session started from Slack may take to register its
+    /// agent before the start is reported as failed (seconds). Sandboxes
+    /// that have to be created first need the most.
+    #[serde(default = "default_rc_start_timeout_secs")]
+    pub start_timeout_secs: u64,
+}
+
+fn default_rc_zellij_session() -> String {
+    "main".to_string()
+}
+
+fn default_rc_repo_roots() -> Vec<String> {
+    vec!["~/workspace".to_string()]
+}
+
+fn default_rc_repo_depth() -> usize {
+    3
+}
+
+fn default_rc_poll_ms() -> u64 {
+    1500
+}
+
+fn default_rc_start_timeout_secs() -> u64 {
+    240
+}
+
+impl Default for RcConfig {
+    fn default() -> Self {
+        Self {
+            zellij_session: default_rc_zellij_session(),
+            repo_roots: default_rc_repo_roots(),
+            repo_depth: default_rc_repo_depth(),
+            poll_ms: default_rc_poll_ms(),
+            start_timeout_secs: default_rc_start_timeout_secs(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -419,6 +486,18 @@ impl Default for LmConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rc_config_defaults_and_overrides() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.rc.zellij_session, "main");
+        assert_eq!(cfg.rc.repo_roots, vec!["~/workspace".to_string()]);
+        let cfg: Config =
+            toml::from_str("[rc]\nzellij_session = \"work\"\npoll_ms = 500\n").unwrap();
+        assert_eq!(cfg.rc.zellij_session, "work");
+        assert_eq!(cfg.rc.poll_ms, 500);
+        assert_eq!(cfg.rc.repo_depth, 3);
+    }
 
     #[test]
     fn test_pi_extensions_default_from_manifest() {

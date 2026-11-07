@@ -40,8 +40,14 @@ SESSIONSTART_CMD='INPUT=$(cat); mkdir -p "$HOME/.nibble/logs" 2>/dev/null; exec 
 
 # UserPromptSubmit — turn started: status → working, capture the user
 # message into memory, and report the first substantive prompt as the
-# task's sidebar topic.
-USERPROMPT_CMD='INPUT=$(cat); mkdir -p "$HOME/.nibble/logs" 2>/dev/null; exec 2>>"$HOME/.nibble/logs/hooks.log" || true; SID=""; if command -v jq >/dev/null 2>&1; then SID=$(printf "%s" "$INPUT" | jq -r ".sessionId // .session_id // empty"); fi; TID="${AGENT_TASK_ID:-claude-$SID}"; if [ -n "$TID" ]; then export NIBBLE_AGENT_TYPE=claude; nibble report status "$TID" working || true; if command -v jq >/dev/null 2>&1; then MSG=$(printf "%s" "$INPUT" | jq -r ".prompt // .message // empty"); [ -n "$MSG" ] && nibble report topic "$TID" "$MSG" || true; [ -n "$MSG" ] && nibble memory capture "$TID" "user" "$MSG" || true; fi; fi'
+# task's sidebar topic. `/nibble-rc` prompts are skipped: RC_CMD blocks
+# them, so no turn starts.
+USERPROMPT_CMD='INPUT=$(cat); case "$(printf "%s" "$INPUT" | jq -r ".prompt // empty" 2>/dev/null)" in /nibble-rc|"/nibble-rc "*) exit 0 ;; esac; mkdir -p "$HOME/.nibble/logs" 2>/dev/null; exec 2>>"$HOME/.nibble/logs/hooks.log" || true; SID=""; if command -v jq >/dev/null 2>&1; then SID=$(printf "%s" "$INPUT" | jq -r ".sessionId // .session_id // empty"); fi; TID="${AGENT_TASK_ID:-claude-$SID}"; if [ -n "$TID" ]; then export NIBBLE_AGENT_TYPE=claude; nibble report status "$TID" working || true; if command -v jq >/dev/null 2>&1; then MSG=$(printf "%s" "$INPUT" | jq -r ".prompt // .message // empty"); [ -n "$MSG" ] && nibble report topic "$TID" "$MSG" || true; [ -n "$MSG" ] && nibble memory capture "$TID" "user" "$MSG" || true; fi; fi'
+
+# UserPromptSubmit (second hook) — `/nibble-rc [stop]` sends this session
+# to Slack or takes it back via the nibble rc daemon, and blocks the prompt
+# so it never reaches the model. Any other prompt passes through untouched.
+RC_CMD='mkdir -p "$HOME/.nibble/logs" 2>/dev/null; exec 2>>"$HOME/.nibble/logs/hooks.log" || true; export NIBBLE_AGENT_TYPE=claude; exec nibble rc claude-hook'
 
 # PostToolUse — agent active mid-turn: status → working + capture tool calls.
 POSTTOOL_CMD='INPUT=$(cat); mkdir -p "$HOME/.nibble/logs" 2>/dev/null; exec 2>>"$HOME/.nibble/logs/hooks.log" || true; SID=""; if command -v jq >/dev/null 2>&1; then SID=$(printf "%s" "$INPUT" | jq -r ".sessionId // .session_id // empty"); fi; TID="${AGENT_TASK_ID:-claude-$SID}"; if [ -n "$TID" ]; then export NIBBLE_AGENT_TYPE=claude; nibble report status "$TID" working || true; if command -v jq >/dev/null 2>&1; then TOOL=$(printf "%s" "$INPUT" | jq -r ".tool_name // empty"); TOOL_INPUT=$(printf "%s" "$INPUT" | jq -c ".tool_input // {}" | cut -c1-4096); TOOL_OUTPUT=$(printf "%s" "$INPUT" | jq -r ".tool_output // \"\"" | cut -c1-4096); [ -n "$TOOL" ] && nibble memory capture "$TID" "tool" "" --tool-name "$TOOL" --tool-input "$TOOL_INPUT" --tool-output "$TOOL_OUTPUT" || true; fi; fi'
@@ -89,6 +95,7 @@ if [ -f "$CLAUDE_SETTINGS_FILE" ]; then
         HOOKS_JSON=$(jq -n \
             --arg sessionstart "$SESSIONSTART_CMD" \
             --arg userprompt "$USERPROMPT_CMD" \
+            --arg rc "$RC_CMD" \
             --arg posttool "$POSTTOOL_CMD" \
             --arg permissionreq "$PERMISSIONREQ_CMD" \
             --arg stop   "$STOP_CMD" \
@@ -99,7 +106,7 @@ if [ -f "$CLAUDE_SETTINGS_FILE" ]; then
               cleanupPeriodDays: $cleanup,
               hooks: {
                 SessionStart:      [{hooks: [{type:"command", command:$sessionstart, timeout:5}]}],
-                UserPromptSubmit:  [{hooks: [{type:"command", command:$userprompt, timeout:5}]}],
+                UserPromptSubmit:  [{hooks: [{type:"command", command:$userprompt, timeout:5}, {type:"command", command:$rc, timeout:30}]}],
                 PostToolUse:       [{hooks: [{type:"command", command:$posttool, timeout:5}]}],
                 PermissionRequest: [{hooks: [{type:"command", command:$permissionreq, timeout:5}]}],
                 Stop:              [{hooks: [{type:"command", command:$stop, timeout:30}]}],
@@ -129,6 +136,7 @@ else
     jq -n \
         --arg sessionstart "$SESSIONSTART_CMD" \
         --arg userprompt "$USERPROMPT_CMD" \
+        --arg rc "$RC_CMD" \
         --arg posttool "$POSTTOOL_CMD" \
         --arg permissionreq "$PERMISSIONREQ_CMD" \
         --arg stop   "$STOP_CMD" \
@@ -139,7 +147,7 @@ else
           cleanupPeriodDays: $cleanup,
           hooks: {
             SessionStart:      [{hooks: [{type:"command", command:$sessionstart, timeout:5}]}],
-            UserPromptSubmit:  [{hooks: [{type:"command", command:$userprompt, timeout:5}]}],
+            UserPromptSubmit:  [{hooks: [{type:"command", command:$userprompt, timeout:5}, {type:"command", command:$rc, timeout:30}]}],
             PostToolUse:       [{hooks: [{type:"command", command:$posttool, timeout:5}]}],
             PermissionRequest: [{hooks: [{type:"command", command:$permissionreq, timeout:5}]}],
             Stop:              [{hooks: [{type:"command", command:$stop, timeout:30}]}],
@@ -154,7 +162,8 @@ echo "Claude Code hooks installed for nibble!"
 echo ""
 echo "  - SessionStart:      registers the task at launch (wrapper UUID or"
 echo "                      derived claude-<session_id> for unwrapped sessions)"
-echo "  - UserPromptSubmit:  status → working (turn started) + user capture"
+echo "  - UserPromptSubmit:  status → working (turn started) + user capture;"
+echo "                      /nibble-rc sends the session to Slack (no model turn)"
 echo "  - PostToolUse:       status → working (agent active) + tool capture"
 echo "  - PermissionRequest: status → blocked (permission dialog pending)"
 echo "  - Stop:              status → idle + session_id + summarize"

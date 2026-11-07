@@ -388,6 +388,20 @@ if systemctl --user is-active --quiet nibble-quota-watch.service 2>/dev/null; th
     ok "Stopped nibble-quota-watch.service for upgrade"
 fi
 
+# And the Slack remote-control daemon.
+RC_WAS_ACTIVE=false
+if systemctl --user is-active --quiet nibble-rc.service 2>/dev/null; then
+    RC_WAS_ACTIVE=true
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 5 systemctl --user stop nibble-rc.service 2>/dev/null || true
+    else
+        systemctl --user stop --no-block nibble-rc.service 2>/dev/null || true
+        sleep 2
+        systemctl --user kill --signal=SIGKILL nibble-rc.service 2>/dev/null || true
+    fi
+    ok "Stopped nibble-rc.service for upgrade"
+fi
+
 cp "$REPO_DIR/target/release/nibble" "$BIN_DIR/nibble.new"
 chmod +x "$BIN_DIR/nibble.new"
 mv -f "$BIN_DIR/nibble.new" "$BIN_DIR/nibble"
@@ -399,6 +413,10 @@ ok "nibble"
 if [ "$QUOTA_WATCH_WAS_ACTIVE" = true ]; then
     systemctl --user start nibble-quota-watch.service 2>/dev/null || warn "Could not restart nibble-quota-watch.service"
     ok "Restarted nibble-quota-watch.service"
+fi
+if [ "$RC_WAS_ACTIVE" = true ]; then
+    systemctl --user start nibble-rc.service 2>/dev/null || warn "Could not restart nibble-rc.service"
+    ok "Restarted nibble-rc.service"
 fi
 
 # Warn if BIN_DIR is not on PATH
@@ -693,6 +711,47 @@ else
     warn "systemd user session not available. Run manually: nibble quota-watch"
 fi
 
+# ── 5e2. Slack remote control (nibble rc) ─────────────────────────────────────
+# Relays agent sessions to and from Slack (see docs/rc.md). Enabled only once
+# `nibble rc setup` has stored the Slack credentials; until then the unit is
+# installed but left off. PATH and SHELL are taken from this install so
+# sessions it starts find the same agents, podman and shell as your terminal.
+step "Installing Slack remote-control daemon"
+
+RC_SECRETS="${XDG_CONFIG_HOME:-$HOME/.config}/nibble/slack.env"
+cat > "$SYSTEMD_DIR/nibble-rc.service" << UNIT
+[Unit]
+Description=Nibble — remote-control agent sessions from Slack
+After=default.target network-online.target
+
+[Service]
+Type=simple
+ExecStart=$BIN_DIR/nibble rc daemon
+Restart=on-failure
+RestartSec=30
+Environment=HOME=%h
+Environment="PATH=$BIN_DIR:$PATH"
+Environment="SHELL=${SHELL:-/bin/sh}"
+StandardOutput=append:%h/.nibble/logs/rc.log
+StandardError=append:%h/.nibble/logs/rc.log
+
+[Install]
+WantedBy=default.target
+UNIT
+
+if systemctl --user daemon-reload 2>/dev/null; then
+    if [ -f "$RC_SECRETS" ]; then
+        systemctl --user enable nibble-rc.service 2>/dev/null || true
+        systemctl --user restart nibble-rc.service 2>/dev/null \
+            && ok "Slack remote control enabled (nibble-rc.service)" \
+            || warn "Could not start nibble-rc.service. Check: nibble rc doctor"
+    else
+        ok "nibble-rc.service installed (off until set up: nibble rc setup, then systemctl --user enable --now nibble-rc)"
+    fi
+else
+    warn "systemd user session not available. Run manually: nibble rc daemon"
+fi
+
 # ── 5f. Agent usage records (omarchy agents panel) ────────────────────────────
 # Writes Z.AI / Kimi / Grok subscription quota records into
 # ~/.local/state/omarchy/agents/usage/ every 10 minutes, where Omarchy's
@@ -892,6 +951,14 @@ if [ -f "$CLAUDE_SETTINGS" ] && command -v jq >/dev/null 2>&1 \
 fi
 
 bash "$REPO_DIR/scripts/setup-claude-hooks.sh"
+
+# Slash commands nibble provides inside Claude Code (/nibble-rc).
+mkdir -p "$HOME/.claude/commands"
+for cmd_file in "$REPO_DIR/claude-commands/"*.md; do
+    [ -f "$cmd_file" ] || continue
+    cp "$cmd_file" "$HOME/.claude/commands/$(basename "$cmd_file")"
+    ok "Claude command: /$(basename "$cmd_file" .md)"
+done
 
 # ── 6b. Zellij keybindings ───────────────────────────────────────────────────
 # Alt-a jumps to the agents sidebar; Alt-v splits the pane and opens vert on

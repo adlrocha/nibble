@@ -47,6 +47,7 @@ What it aims for:
 | 27 | **Local LLM models** | experimental | `nibble lm` lists and manages local model files |
 | 28 | **Kimi backend** | experimental | `claude --kimi` (via the installed claude wrapper) points Claude Code at `KIMI_BASE_URL` / `KIMI_API_KEY` for that session |
 | 29 | **Recoverable zellij sessions** | core | `nibble mux [name]` opens a named zellij session whose Claude Code and pi agents (host and sandbox) come back after a killed session, crash or reboot: a watcher records which agent is in which tab, and a gone session is rebuilt with each pane resuming its own conversation. See [docs/mux.md](docs/mux.md) |
+| 30 | **Slack remote control** | core | `/nibble-rc` in a Claude Code, pi or omp session (host or sandbox) continues it from a Slack thread while it stays live in zellij: thread replies are typed into the pane, finished turns post their reply, Slack's stop button interrupts. `/nibble` in Slack starts a new session (host or sandbox, any repo) in a new tab of `nibble mux main`. `nibble-rc.service` holds the Socket Mode connection; tokens stay outside sandbox reach. See [docs/rc.md](docs/rc.md) |
 
 ---
 
@@ -59,6 +60,7 @@ What it aims for:
 - **Sessions are never deleted**: every conversation (main, `--fresh`, `--btw`) stays on disk forever; Claude's built-in 30-day transcript purge is disabled
 - **Quota auto-continue**: Tasks that hit a subscription limit are parked and resumed once the quota resets
 - **Usage and cost visibility**: Token usage, subscription quotas and market prices, in the CLI, the web inspector and the Omarchy panel
+- **Slack remote control**: Send a session to Slack with `/nibble-rc`, or start one from Slack, and carry on from your phone while it stays open in zellij
 - **Auto-Resume**: Sandbox agents are tracked across host reboots
 - **SQLite Backend**: Fast, reliable, concurrent-safe storage
 

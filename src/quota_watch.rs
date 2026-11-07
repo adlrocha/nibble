@@ -272,7 +272,7 @@ fn extract_session_error(line: &str) -> Option<SessionError> {
 /// Resolve the host-side transcript file for a task, if one is linked and
 /// exists. pi/omp archive cold sessions as `.jsonl.gz` — those are not live
 /// and are skipped.
-fn session_file_for(task: &Task) -> Option<PathBuf> {
+pub(crate) fn session_file_for(task: &Task) -> Option<PathBuf> {
     let home = dirs::home_dir()?;
     let ctx = task.context.as_ref()?;
     match &task.agent_type {

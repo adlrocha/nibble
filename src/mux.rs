@@ -913,6 +913,34 @@ fn plan_resume(
     })
 }
 
+/// Make sure zellij session `name` is running so tabs can be opened in it
+/// from outside (`nibble rc`). A missing or dead session is started in the
+/// background and recorded like `nibble mux NAME`, so the agents opened in
+/// it come back after a crash; a live one is left as it is.
+pub(crate) fn ensure_background_session(db: &Database, name: &str) -> Result<()> {
+    validate_session_name(name)?;
+    if zellij_session_state(name)? == ZellijState::Live {
+        return Ok(());
+    }
+    let mut manifest = load_manifest(db, name)?.unwrap_or_default();
+    manifest.epoch = Some(Utc::now());
+    save_manifest(db, name, &manifest)?;
+    let out = Command::new("zellij")
+        .args(["attach", "--create-background", name])
+        .env_remove("ZELLIJ")
+        .env_remove("ZELLIJ_SESSION_NAME")
+        .env_remove("ZELLIJ_PANE_ID")
+        .output()
+        .context("zellij is not installed or not on PATH")?;
+    if !out.status.success() {
+        bail!(
+            "could not start zellij session '{name}': {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    spawn_watcher(name)
+}
+
 /// A nibble agent wrapper is not installed: fixable by re-running
 /// install.sh, so restores stop instead of skipping the agent.
 #[derive(Debug)]
@@ -931,7 +959,7 @@ impl std::fmt::Display for MissingWrapper {
 impl std::error::Error for MissingWrapper {}
 
 /// Where install.sh puts the agent wrappers (`~/.nibble/wrappers`).
-fn wrappers_dir() -> Result<PathBuf> {
+pub(crate) fn wrappers_dir() -> Result<PathBuf> {
     Ok(crate::db::ensure_data_dir()?.join("wrappers"))
 }
 
