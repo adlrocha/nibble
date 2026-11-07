@@ -32,7 +32,7 @@ impl Daemon {
         // post that fails or times out after Slack delivered it must not be
         // retried on the next poll and appear twice.
         if step.changed(&link) {
-            link.watch = Some(step.watch);
+            link.watch = step.watch;
             link.idle_checks = step.idle_checks;
             if let Some(id) = &step.reply_id {
                 link.last_reply_id = Some(id.clone());
@@ -114,9 +114,7 @@ struct Step {
 
 impl Step {
     fn changed(&self, link: &Link) -> bool {
-        link.watch != Some(self.watch)
-            || link.idle_checks != self.idle_checks
-            || self.reply_id.is_some()
+        link.watch != self.watch || link.idle_checks != self.idle_checks || self.reply_id.is_some()
     }
 }
 
@@ -132,19 +130,19 @@ fn next_step(link: &Link, observed: Watch, reply: &dyn Fn() -> Option<transcript
     };
     match observed {
         Watch::Exited => same(vec![Effect::Close]),
-        Watch::Working if prev == Some(Watch::Working) => Step {
+        Watch::Working if prev == Watch::Working => Step {
             watch: Watch::Working,
             idle_checks: 0,
             reply_id: None,
             effects: vec![],
         },
         Watch::Working => same(vec![Effect::Status(status_of(Watch::Working))]),
-        Watch::Blocked if prev == Some(Watch::Blocked) => same(vec![]),
+        Watch::Blocked if prev == Watch::Blocked => same(vec![]),
         Watch::Blocked => same(vec![
             Effect::Blocked,
             Effect::Status(status_of(Watch::Blocked)),
         ]),
-        Watch::Idle if prev == Some(Watch::Idle) || prev.is_none() => same(vec![]),
+        Watch::Idle if prev == Watch::Idle => same(vec![]),
         Watch::Idle => {
             match reply().filter(|r| link.last_reply_id.as_deref() != Some(r.id.as_str())) {
                 Some(r) => Step {
@@ -159,7 +157,7 @@ fn next_step(link: &Link, observed: Watch, reply: &dyn Fn() -> Option<transcript
                 ]),
                 // Not yet: keep the previous state and count the miss.
                 None => Step {
-                    watch: prev.unwrap_or(Watch::Idle),
+                    watch: prev,
                     idle_checks: link.idle_checks + 1,
                     reply_id: None,
                     effects: vec![],
@@ -173,10 +171,10 @@ fn next_step(link: &Link, observed: Watch, reply: &dyn Fn() -> Option<transcript
 /// turn is expected (a fast one may finish between two polls), except that
 /// an answer to a permission prompt stays `Blocked` until the agent reports
 /// again, so the prompt is not posted a second time.
-pub(super) fn after_reply(watch: Option<Watch>) -> Option<Watch> {
+pub(super) fn after_reply(watch: Watch) -> Watch {
     match watch {
-        Some(Watch::Blocked) => watch,
-        _ => Some(Watch::Working),
+        Watch::Blocked => Watch::Blocked,
+        _ => Watch::Working,
     }
 }
 
@@ -195,7 +193,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
 
-    fn link(watch: Option<Watch>, last: Option<&str>, idle_checks: u32) -> Link {
+    fn link(watch: Watch, last: Option<&str>, idle_checks: u32) -> Link {
         let mut l = crate::rc::test_support::link("t", "1.1");
         l.watch = watch;
         l.last_reply_id = last.map(str::to_string);
@@ -212,7 +210,7 @@ mod tests {
 
     #[test]
     fn finished_turn_posts_the_new_reply_once() {
-        let l = link(Some(Watch::Working), Some("old"), 0);
+        let l = link(Watch::Working, Some("old"), 0);
         let s = next_step(&l, Watch::Idle, &|| reply("new"));
         assert_eq!(s.watch, Watch::Idle);
         assert_eq!(s.reply_id.as_deref(), Some("new"));
@@ -220,7 +218,7 @@ mod tests {
         assert_eq!(s.effects[1], Effect::Status(SessionStatus::Active));
 
         // Already idle: nothing, and the transcript is not even read.
-        let l = link(Some(Watch::Idle), Some("new"), 0);
+        let l = link(Watch::Idle, Some("new"), 0);
         let s = next_step(&l, Watch::Idle, &|| panic!("must not read"));
         assert!(s.effects.is_empty());
         assert!(!s.changed(&l));
@@ -228,11 +226,11 @@ mod tests {
 
     #[test]
     fn idle_without_a_new_reply_waits_then_gives_up() {
-        let l = link(Some(Watch::Working), Some("same"), 0);
+        let l = link(Watch::Working, Some("same"), 0);
         let s = next_step(&l, Watch::Idle, &|| reply("same"));
         assert_eq!((s.watch, s.idle_checks), (Watch::Working, 1));
         assert!(s.effects.is_empty());
-        let l = link(Some(Watch::Working), Some("same"), IDLE_GIVE_UP - 1);
+        let l = link(Watch::Working, Some("same"), IDLE_GIVE_UP - 1);
         let s = next_step(&l, Watch::Idle, &|| None);
         assert_eq!((s.watch, s.idle_checks), (Watch::Idle, 0));
         assert_eq!(
@@ -264,52 +262,35 @@ mod tests {
 
     #[test]
     fn working_blocked_and_exit_transitions() {
-        let s = next_step(&link(Some(Watch::Idle), None, 0), Watch::Working, &|| None);
+        let s = next_step(&link(Watch::Idle, None, 0), Watch::Working, &|| None);
         assert_eq!(s.effects, vec![Effect::Status(SessionStatus::Processing)]);
-        let s = next_step(
-            &link(Some(Watch::Working), None, 3),
-            Watch::Working,
-            &|| None,
-        );
+        let s = next_step(&link(Watch::Working, None, 3), Watch::Working, &|| None);
         assert!(s.effects.is_empty());
         assert_eq!(s.idle_checks, 0);
 
-        let s = next_step(
-            &link(Some(Watch::Working), None, 0),
-            Watch::Blocked,
-            &|| None,
-        );
+        let s = next_step(&link(Watch::Working, None, 0), Watch::Blocked, &|| None);
         assert_eq!(
             s.effects,
             vec![Effect::Blocked, Effect::Status(SessionStatus::Suspended)]
         );
-        let s = next_step(
-            &link(Some(Watch::Blocked), None, 0),
-            Watch::Blocked,
-            &|| None,
-        );
+        let s = next_step(&link(Watch::Blocked, None, 0), Watch::Blocked, &|| None);
         assert!(s.effects.is_empty());
         // Approved, then finished: the reply is posted.
-        let s = next_step(&link(Some(Watch::Blocked), None, 0), Watch::Idle, &|| {
-            reply("r")
-        });
+        let s = next_step(&link(Watch::Blocked, None, 0), Watch::Idle, &|| reply("r"));
         assert!(matches!(s.effects[0], Effect::Reply(_)));
 
-        let s = next_step(&link(Some(Watch::Working), None, 0), Watch::Exited, &|| {
-            None
-        });
+        let s = next_step(&link(Watch::Working, None, 0), Watch::Exited, &|| None);
         assert_eq!(s.effects, vec![Effect::Close]);
     }
 
     #[test]
     fn answering_a_permission_prompt_does_not_repost_it() {
-        let watch = after_reply(Some(Watch::Blocked));
+        let watch = after_reply(Watch::Blocked);
         // The agent has not reported yet: still blocked, nothing to post.
         let s = next_step(&link(watch, None, 0), Watch::Blocked, &|| None);
         assert!(s.effects.is_empty());
         // Ordinary replies expect a turn.
-        assert_eq!(after_reply(Some(Watch::Idle)), Some(Watch::Working));
-        assert_eq!(after_reply(None), Some(Watch::Working));
+        assert_eq!(after_reply(Watch::Idle), Watch::Working);
     }
 
     #[test]

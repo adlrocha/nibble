@@ -22,16 +22,17 @@ const SPAWN_PREFIX: &str = "rc:spawn:";
 const HEARTBEAT_KEY: &str = "rc:heartbeat";
 
 /// The session state the daemon last relayed for a link.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Watch {
     Working,
+    #[default]
     Idle,
     Blocked,
     Exited,
 }
 
-/// What the root message shows; kept so the card can be redrawn on close.
+/// What the session card shows; kept so it can be redrawn on close.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct CardInfo {
     pub title: String,
@@ -51,9 +52,9 @@ pub(crate) struct Link {
     pub created_at: DateTime<Utc>,
     #[serde(default)]
     pub closed: bool,
-    /// Last relayed state; `None` until the first poll.
+    /// Last relayed state.
     #[serde(default)]
-    pub watch: Option<Watch>,
+    pub watch: Watch,
     /// Transcript id of the last reply posted, so it is never posted twice.
     #[serde(default)]
     pub last_reply_id: Option<String>,
@@ -87,7 +88,7 @@ impl Link {
             thread_ts: thread_ts.to_string(),
             created_at: Utc::now(),
             closed: false,
-            watch: Some(watch),
+            watch,
             last_reply_id: None,
             idle_checks: 0,
             permalink: None,
@@ -307,9 +308,7 @@ mod tests {
     }
 
     fn sample(task: &str, ts: &str) -> Link {
-        let mut l = crate::rc::test_support::link(task, ts);
-        l.watch = None;
-        l
+        crate::rc::test_support::link(task, ts)
     }
 
     #[test]

@@ -419,9 +419,7 @@ mod test_support {
             cwd: None,
             zellij: "main".into(),
         };
-        let mut l = Link::new(task, "D1", ts, card, super::store::Watch::Idle);
-        l.watch = None;
-        l
+        Link::new(task, "D1", ts, card, super::store::Watch::Idle)
     }
 
     /// A task registered in zellij pane `pane` of `session`; `window`

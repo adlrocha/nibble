@@ -928,7 +928,15 @@ pub(crate) fn ensure_background_session(db: &Database, name: &str) -> Result<()>
     validate_session_name(name)?;
     let state = zellij_session_state(name)?;
     let manifest = load_manifest(db, name)?;
-    match plan_background(state, manifest.as_ref()) {
+    // Judge a down session by what `nibble mux NAME` would actually
+    // restore (the same filter cmd_open applies), not the raw record.
+    let restorable = match (&manifest, state) {
+        (Some(m), ZellijState::Dead | ZellijState::Missing) => Some(filter_restorable(m, &|id| {
+            resume_plan_for(db, id).map(drop)
+        })?),
+        (m, _) => m.clone(),
+    };
+    match plan_background(state, restorable.as_ref()) {
         // Same as `nibble mux NAME` attaching: the tab opened next comes
         // back after a crash.
         BackgroundPlan::Ready => return record_running_session(db, name, manifest.as_ref()),
@@ -1333,6 +1341,13 @@ mod tests {
             );
             assert_eq!(plan_background(state, Some(&empty)), BackgroundPlan::Start);
             assert_eq!(plan_background(state, None), BackgroundPlan::Start);
+            // Tabs `nibble mux` could not restore (their tasks are gone) do
+            // not block a start: the filtered record is what is judged.
+            let unrestorable = filter_restorable(&recorded, &|_| bail!("task gone")).unwrap();
+            assert_eq!(
+                plan_background(state, Some(&unrestorable)),
+                BackgroundPlan::Start
+            );
         }
     }
 

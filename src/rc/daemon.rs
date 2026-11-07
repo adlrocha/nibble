@@ -26,7 +26,7 @@ use super::modal::{self, NewSession, Origin};
 use super::secrets::Secrets;
 use super::slack::{self, SessionCard, SessionStatus, Slack};
 use super::socket::{self, Envelope, Read};
-use super::store::{self, CardInfo, Link, RequestAction, Response, Watch};
+use super::store::{self, CardInfo, Link, RequestAction, Response};
 use super::{pane, relay, transcript};
 use crate::config::RcConfig;
 use crate::db::Database;
@@ -516,12 +516,17 @@ impl Daemon {
             &slack::session_card_blocks(&session_card, true),
         )?;
         link.permalink = self.bot.permalink(&self.dm, &link.thread_ts).ok();
-        if let Some(reply) = self.current_reply(&task) {
-            self.post_reply(&link, &format!("*Last reply*\n\n{}", reply.text))?;
-            link.last_reply_id = Some(reply.id);
-        }
+        // The card exists now: record the link before anything else can
+        // fail, so its thread and Close button always have a session.
+        let reply = self.current_reply(&task);
+        link.last_reply_id = reply.as_ref().map(|r| r.id.clone());
         store::put_link(&self.db, &link)?;
-        let status = relay::status_of(link.watch.unwrap_or(Watch::Idle));
+        if let Some(reply) = reply {
+            if let Err(e) = self.post_reply(&link, &format!("*Last reply*\n\n{}", reply.text)) {
+                log(&format!("could not post the last reply: {e:#}"));
+            }
+        }
+        let status = relay::status_of(link.watch);
         self.session_status(&link.channel, &link.thread_ts, status);
         self.session_title(
             &link.channel,

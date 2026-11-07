@@ -307,7 +307,7 @@ pub(crate) fn markdown_blocks(text: &str) -> Value {
     json!([{ "type": "markdown", "text": text }])
 }
 
-/// What the root message of a session thread says about it.
+/// What a session's card (the message with its Close button) says about it.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SessionCard {
     pub task_id: String,
@@ -320,13 +320,14 @@ pub(crate) struct SessionCard {
     pub topic: Option<String>,
 }
 
-/// Action id of the root message's Close button.
+/// Action id of the session card's Close button.
 pub(crate) const CLOSE_ACTION: &str = "rc_close";
 /// Action id of the "Start a session" button offered on a top-level DM.
 pub(crate) const NEW_ACTION: &str = "rc_new";
 
-/// The root message of a session thread. `open` shows the Close button;
-/// a closed session gets a closed footer instead.
+/// A session card: the thread root for `/nibble-rc`, a reply in threads
+/// started from Slack. `open` shows the Close button; a closed session gets
+/// a closed footer instead.
 pub(crate) fn session_card_blocks(card: &SessionCard, open: bool) -> Value {
     let mut facts = format!(
         "*{}* · {} · {} · zellij `{}`",
@@ -377,7 +378,7 @@ pub(crate) fn session_card_blocks(card: &SessionCard, open: bool) -> Value {
     json!(blocks)
 }
 
-/// Fallback text for the root message.
+/// Fallback text for the session card.
 pub(crate) fn session_card_text(card: &SessionCard) -> String {
     format!("{} · {} · {}", card.title, card.agent, card.location)
 }
