@@ -39,11 +39,19 @@ const SILENCE_LIMIT: Duration = Duration::from_secs(180);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 /// How often the heartbeat is written.
 const BEAT_EVERY: Duration = Duration::from_secs(30);
+/// Lock file (in `~/.nibble`) held by the running daemon.
+const DAEMON_LOCK: &str = "rc-daemon";
 /// Remembered event ids, to drop Slack's redeliveries.
 const SEEN_CAP: usize = 256;
 
 /// Run the daemon until killed.
 pub(crate) fn run(cfg: RcConfig, db_path: PathBuf) -> Result<()> {
+    // One daemon per machine: a second would relay the same turns and
+    // answer the same requests, posting everything twice.
+    let _lock = crate::mux::try_lock_in(&crate::db::ensure_data_dir()?, DAEMON_LOCK)?
+        .with_context(|| {
+            "another nibble rc daemon is already running (systemctl --user status nibble-rc)"
+        })?;
     let secrets = super::secrets::load()?;
     let bot = Slack::new(&secrets.bot_token);
     let app = Slack::new(&secrets.app_token);
@@ -208,7 +216,14 @@ impl Daemon {
             }
         }
         if !id.is_empty() {
-            conn.send(socket::ack_frame(&id, ack.as_ref()))?;
+            if let Err(e) = conn.send(socket::ack_frame(&id, ack.as_ref())) {
+                // Unacknowledged: Slack redelivers it, and it must be acted
+                // on then rather than dropped as a repeat.
+                if let Some(key) = &key {
+                    self.forget(key);
+                }
+                return Err(e);
+            }
         }
         match after {
             After::Nothing => {}

@@ -361,46 +361,22 @@ fi
 # ── 3. Install binaries ───────────────────────────────────────────────────────
 step "Installing binaries to $BIN_DIR"
 
-# Also stop the web UI so we can overwrite the binary if it's running.
-# (It is restarted unconditionally further down, in 5d.)
-if systemctl --user is-active --quiet nibble-web.service 2>/dev/null; then
+# Stop the long-running services so the binary can be overwritten. The web
+# UI is restarted unconditionally further down (5d); the daemons only if
+# they were running.
+RESTART_AFTER_UPGRADE=()
+for svc in nibble-web nibble-quota-watch nibble-rc; do
+    systemctl --user is-active --quiet "$svc.service" 2>/dev/null || continue
     if command -v timeout >/dev/null 2>&1; then
-        timeout 5 systemctl --user stop nibble-web.service 2>/dev/null || true
+        timeout 5 systemctl --user stop "$svc.service" 2>/dev/null || true
     else
-        systemctl --user stop --no-block nibble-web.service 2>/dev/null || true
-        sleep 1
-        systemctl --user kill --signal=SIGKILL nibble-web.service 2>/dev/null || true
-    fi
-    ok "Stopped nibble-web.service for upgrade"
-fi
-
-# Also stop the quota-watch daemon before overwriting the binary.
-QUOTA_WATCH_WAS_ACTIVE=false
-if systemctl --user is-active --quiet nibble-quota-watch.service 2>/dev/null; then
-    QUOTA_WATCH_WAS_ACTIVE=true
-    if command -v timeout >/dev/null 2>&1; then
-        timeout 5 systemctl --user stop nibble-quota-watch.service 2>/dev/null || true
-    else
-        systemctl --user stop --no-block nibble-quota-watch.service 2>/dev/null || true
+        systemctl --user stop --no-block "$svc.service" 2>/dev/null || true
         sleep 2
-        systemctl --user kill --signal=SIGKILL nibble-quota-watch.service 2>/dev/null || true
+        systemctl --user kill --signal=SIGKILL "$svc.service" 2>/dev/null || true
     fi
-    ok "Stopped nibble-quota-watch.service for upgrade"
-fi
-
-# And the Slack remote-control daemon.
-RC_WAS_ACTIVE=false
-if systemctl --user is-active --quiet nibble-rc.service 2>/dev/null; then
-    RC_WAS_ACTIVE=true
-    if command -v timeout >/dev/null 2>&1; then
-        timeout 5 systemctl --user stop nibble-rc.service 2>/dev/null || true
-    else
-        systemctl --user stop --no-block nibble-rc.service 2>/dev/null || true
-        sleep 2
-        systemctl --user kill --signal=SIGKILL nibble-rc.service 2>/dev/null || true
-    fi
-    ok "Stopped nibble-rc.service for upgrade"
-fi
+    ok "Stopped $svc.service for upgrade"
+    [ "$svc" = nibble-web ] || RESTART_AFTER_UPGRADE+=("$svc")
+done
 
 cp "$REPO_DIR/target/release/nibble" "$BIN_DIR/nibble.new"
 chmod +x "$BIN_DIR/nibble.new"
@@ -410,14 +386,13 @@ ok "nibble"
 
 # Restart services that were running before.
 
-if [ "$QUOTA_WATCH_WAS_ACTIVE" = true ]; then
-    systemctl --user start nibble-quota-watch.service 2>/dev/null || warn "Could not restart nibble-quota-watch.service"
-    ok "Restarted nibble-quota-watch.service"
-fi
-if [ "$RC_WAS_ACTIVE" = true ]; then
-    systemctl --user start nibble-rc.service 2>/dev/null || warn "Could not restart nibble-rc.service"
-    ok "Restarted nibble-rc.service"
-fi
+for svc in "${RESTART_AFTER_UPGRADE[@]}"; do
+    if systemctl --user start "$svc.service" 2>/dev/null; then
+        ok "Restarted $svc.service"
+    else
+        warn "Could not restart $svc.service"
+    fi
+done
 
 # Warn if BIN_DIR is not on PATH
 if ! echo "$PATH" | tr ':' '\n' | grep -qx "$BIN_DIR"; then

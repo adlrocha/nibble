@@ -242,10 +242,7 @@ fn cmd_open(db: &Database, name: &str) -> Result<()> {
             );
         }
         // Adopt the session we are in: start recording its agents.
-        if load_manifest(db, name)?.is_none() {
-            save_manifest(db, name, &Manifest::default())?;
-        }
-        spawn_watcher(name)?;
+        record_running_session(db, name, load_manifest(db, name)?.as_ref())?;
         println!("Mux session '{name}' is now recorded. Its agents will come back after a crash: run `nibble mux {name}`.");
         return Ok(());
     }
@@ -670,9 +667,10 @@ impl Debounce {
     }
 }
 
-/// Holds an exclusive lock on `~/.nibble/mux/<name>.lock` for the watcher's
+/// Holds an exclusive lock on `<dir>/<name>.lock` (the mux watcher's in
+/// `~/.nibble/mux`, the rc daemon's in `~/.nibble`) for the holder's
 /// lifetime; released by the kernel when the process exits.
-struct WatcherLock {
+pub(crate) struct WatcherLock {
     _file: std::fs::File,
 }
 
@@ -700,7 +698,7 @@ fn wait_for_lock(
 }
 
 /// `None` when another process (a running watcher) holds the lock.
-fn try_lock_in(dir: &Path, name: &str) -> Result<Option<WatcherLock>> {
+pub(crate) fn try_lock_in(dir: &Path, name: &str) -> Result<Option<WatcherLock>> {
     use std::os::fd::AsRawFd;
     let path = dir.join(format!("{name}.lock"));
     let file = std::fs::OpenOptions::new()
@@ -967,8 +965,9 @@ pub(crate) fn ensure_background_session(db: &Database, name: &str) -> Result<()>
 }
 
 /// Record a running session (an empty manifest if nibble has none) and make
-/// sure a watcher keeps its snapshot. Shared by `nibble mux NAME` attaching
-/// and `nibble rc` opening a tab in it.
+/// sure a watcher keeps its snapshot. Shared by `nibble mux NAME` (adopting
+/// the session it runs in, or attaching to it) and `nibble rc` opening a tab
+/// in it.
 fn record_running_session(db: &Database, name: &str, manifest: Option<&Manifest>) -> Result<()> {
     if manifest.is_none() {
         save_manifest(db, name, &Manifest::default())?;
