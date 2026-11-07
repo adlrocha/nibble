@@ -133,7 +133,10 @@ mod tests {
         assert!(!agent_pane(&q));
     }
 
+    /// Linux only: `status::pid_alive` reads /proc and treats every pid as
+    /// alive elsewhere, so only the pane check applies on macOS.
     #[test]
+    #[cfg(target_os = "linux")]
     fn a_dead_agent_process_is_not_present() {
         let mut t = Task::new(
             "t".into(),
