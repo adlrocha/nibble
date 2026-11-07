@@ -598,7 +598,7 @@ fn resumable_agent(agent: &AgentType) -> bool {
 }
 
 /// Whether a pane's foreground command is a plain shell.
-fn is_shell(command: &str) -> bool {
+pub(crate) fn is_shell(command: &str) -> bool {
     let Some(program) = command.split_whitespace().next() else {
         return false;
     };
@@ -947,7 +947,15 @@ pub(crate) fn ensure_background_session(db: &Database, name: &str) -> Result<()>
     let state = zellij_session_state(name)?;
     let manifest = load_manifest(db, name)?;
     match plan_background(state, manifest.as_ref()) {
-        BackgroundPlan::Ready => return Ok(()),
+        BackgroundPlan::Ready => {
+            // What `nibble mux NAME` does when attaching: record the session
+            // and make sure a watcher keeps its snapshot, so the tab opened
+            // next comes back after a crash.
+            if manifest.is_none() {
+                save_manifest(db, name, &Manifest::default())?;
+            }
+            return ensure_watcher(name);
+        }
         BackgroundPlan::Refuse { tabs } => bail!(
             "zellij session '{name}' is not running and nibble mux has {tabs} recorded agent tab(s) \
              for it. Run `nibble mux {name}` to bring them back, then start the session again"
@@ -972,6 +980,18 @@ pub(crate) fn ensure_background_session(db: &Database, name: &str) -> Result<()>
         );
     }
     spawn_watcher(name)
+}
+
+/// Start the session's watcher unless one is running (it holds the lock).
+fn ensure_watcher(name: &str) -> Result<()> {
+    match try_lock(name)? {
+        // Nobody holds it: release it for the watcher we start.
+        Some(lock) => {
+            drop(lock);
+            spawn_watcher(name)
+        }
+        None => Ok(()),
+    }
 }
 
 /// A nibble agent wrapper is not installed: fixable by re-running

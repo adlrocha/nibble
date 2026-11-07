@@ -96,9 +96,10 @@ directory can be typed in.
 - **`nibble rc doctor`** first.
 - Daemon log: `~/.nibble/logs/rc.log`.
 - *"the nibble rc daemon is not running"*: `systemctl --user status nibble-rc`.
-- *"The session's pane is gone"*: the agent's zellij pane was closed. If
-  its zellij session is still running, start the agent again in a pane of
-  that session and send `/nibble-rc` from it. If the whole session is down,
+- *"The agent is no longer running in its pane"*: the agent exited or its
+  pane was closed, so your message was not typed (it would have run in the
+  shell left behind). If the zellij session is still running, start the
+  agent again in it and send `/nibble-rc` from it. If the whole session is down,
   `nibble mux main` brings its recorded tabs back (each resuming its
   conversation); then send `/nibble-rc` again.
 - *"zellij session 'main' is not running and nibble mux has N recorded agent

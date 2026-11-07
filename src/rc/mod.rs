@@ -18,7 +18,7 @@
 
 mod daemon;
 mod modal;
-pub(crate) mod pane;
+mod pane;
 mod relay;
 mod secrets;
 mod slack;
@@ -288,7 +288,7 @@ pub(crate) fn cmd_setup() -> Result<()> {
     println!("Saved to {} (mode 600).", path.display());
     let (team, user) = slack::Slack::new(&secrets.bot_token).auth_test()?;
     println!("Bot token works: {user} in {team}.");
-    println!("Next: systemctl --user restart nibble-rc, then `nibble rc doctor`.");
+    println!("Next: systemctl --user enable nibble-rc && systemctl --user restart nibble-rc, then `nibble rc doctor`.");
     Ok(())
 }
 

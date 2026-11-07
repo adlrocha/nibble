@@ -20,8 +20,28 @@ impl Daemon {
         let Some(task) = self.db.get_task_by_id(&link.task_id)? else {
             return self.close_link(&link.task_id, "The session is gone from nibble.");
         };
-        let observed = observe(&task);
+        // An agent killed without its exit report leaves a Running row;
+        // its dead process means the session is over.
+        let observed = if task.pid.is_some_and(|pid| !crate::status::pid_alive(pid)) {
+            Watch::Exited
+        } else {
+            observe(&task)
+        };
         let step = next_step(&link, observed, &|| self.current_reply(&task));
+        // Record the new state (the reply included) before acting on it: a
+        // post that fails or times out after Slack delivered it must not be
+        // retried on the next poll and appear twice.
+        if step.changed(&link) {
+            link.watch = Some(step.watch);
+            link.idle_checks = step.idle_checks;
+            if let Some(id) = &step.reply_id {
+                link.last_reply_id = Some(id.clone());
+            }
+            // Re-read before writing: a reply may have closed the link meanwhile.
+            if store::link(&self.db, &link.task_id)?.is_some_and(|l| !l.closed) {
+                store::put_link(&self.db, &link)?;
+            }
+        }
         for effect in &step.effects {
             match effect {
                 Effect::Status(s) => self.session_status(&link.channel, &link.thread_ts, *s),
@@ -36,7 +56,17 @@ impl Daemon {
                         ),
                     );
                 }
-                Effect::Reply(reply) => self.post_reply(&link, &reply.text)?,
+                Effect::Reply(reply) => {
+                    if let Err(e) = self.post_reply(&link, &reply.text) {
+                        self.note(
+                            &link.channel,
+                            &link.thread_ts,
+                            &format!(
+                                ":warning: Could not post the reply ({e:#}); it is in the pane."
+                            ),
+                        );
+                    }
+                }
                 Effect::NoReply => self.note(
                     &link.channel,
                     &link.thread_ts,
@@ -45,17 +75,6 @@ impl Daemon {
                 Effect::Close => {
                     return self.close_link(&link.task_id, "The agent exited.");
                 }
-            }
-        }
-        if step.changed(&link) {
-            link.watch = Some(step.watch);
-            link.idle_checks = step.idle_checks;
-            if let Some(id) = step.reply_id {
-                link.last_reply_id = Some(id);
-            }
-            // Re-read before writing: a reply may have closed the link meanwhile.
-            if store::link(&self.db, &link.task_id)?.is_some_and(|l| !l.closed) {
-                store::put_link(&self.db, &link)?;
             }
         }
         Ok(())

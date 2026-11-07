@@ -103,9 +103,7 @@ enum After {
     OpenForm(String),
 }
 
-/// How long the repo list for the form is reused. Opening a form must beat
-/// Slack's 3-second trigger expiry, so the directory walk is not redone on
-/// every click.
+/// How old the form's repo list may get before the poll pass rescans.
 const REPOS_TTL: Duration = Duration::from_secs(300);
 
 pub(super) struct Daemon {
@@ -185,7 +183,11 @@ impl Daemon {
             }
             Envelope::Interactive { payload, .. } => self.on_interactive(payload),
             Envelope::SlashCommand { payload, .. } => self.on_slash(&payload),
-            _ => (None, After::Nothing),
+            Envelope::Other { kind, .. } => {
+                log(&format!("acknowledged unhandled {kind} envelope"));
+                (None, After::Nothing)
+            }
+            Envelope::Hello | Envelope::Disconnect { .. } => (None, After::Nothing),
         };
         if !id.is_empty() {
             conn.send(socket::ack_frame(&id, ack.as_ref()))?;
@@ -309,8 +311,10 @@ impl Daemon {
             return Ok(());
         }
         let task = self.db.get_task_by_id(&link.task_id)?;
-        let target = task.as_ref().and_then(pane::target);
-        let Some((session, pane_id)) = target else {
+        let target = task
+            .as_ref()
+            .and_then(|t| pane::target(t).map(|(s, p)| (t, s, p)));
+        let Some((task, session, pane_id)) = target else {
             self.note(
                 channel,
                 thread_ts,
@@ -318,11 +322,11 @@ impl Daemon {
             );
             return Ok(());
         };
-        if !pane::pane_alive(&session, pane_id)? {
+        if !pane::agent_present(task, &session, pane_id)? {
             self.note(
                 channel,
                 thread_ts,
-                &format!(":warning: The session's pane is gone (zellij `{session}`). Start the agent again in that session (if the whole session is down, `nibble mux {session}` brings its recorded tabs back), then send `/nibble-rc` from it."),
+                &format!(":warning: The agent is no longer running in its pane (zellij `{session}`), so nothing was typed. Start the agent again in that session (if the whole session is down, `nibble mux {session}` brings its recorded tabs back), then send `/nibble-rc` from it."),
             );
             return Ok(());
         }
@@ -398,13 +402,18 @@ impl Daemon {
         }
     }
 
-    /// The repo choices for the form, cached for [`REPOS_TTL`].
-    fn repos(&mut self) -> Result<Vec<PathBuf>> {
-        if let Some((at, repos)) = &self.repos_cache {
-            if at.elapsed() < REPOS_TTL {
-                return Ok(repos.clone());
-            }
+    /// The repo choices for the form. A cached list is used whatever its
+    /// age: the poll pass refreshes it, so opening the form never spends
+    /// Slack's 3-second trigger budget on a directory walk. Only the very
+    /// first form scans synchronously.
+    pub(super) fn repos(&mut self) -> Result<Vec<PathBuf>> {
+        if let Some((_, repos)) = &self.repos_cache {
+            return Ok(repos.clone());
         }
+        self.refresh_repos()
+    }
+
+    fn refresh_repos(&mut self) -> Result<Vec<PathBuf>> {
         let repos = modal::repo_choices(&self.db, &self.cfg)?;
         self.repos_cache = Some((Instant::now(), repos.clone()));
         Ok(repos)
@@ -555,6 +564,15 @@ impl Daemon {
             store::beat(&self.db, now)?;
             self.last_beat = Some(Instant::now());
         }
+        if self
+            .repos_cache
+            .as_ref()
+            .is_some_and(|(at, _)| at.elapsed() >= REPOS_TTL)
+        {
+            if let Err(e) = self.refresh_repos() {
+                log(&format!("repo scan failed: {e:#}"));
+            }
+        }
         for (task_id, req) in store::requests(&self.db)? {
             let result = match req.action {
                 RequestAction::Start => self.start_link(&task_id),
@@ -601,7 +619,7 @@ impl Daemon {
     // ── Slack helpers ─────────────────────────────────────────────────────
 
     pub(super) fn current_reply(&self, task: &Task) -> Option<transcript::Reply> {
-        let path = crate::quota_watch::session_file_for(task)?;
+        let path = crate::session::files::session_file_for(task)?;
         transcript::last_reply(&path, &task.agent_type)
             .ok()
             .flatten()
@@ -659,25 +677,25 @@ impl Daemon {
     }
 
     fn sessions_api_failed(&mut self, e: &anyhow::Error) {
-        let msg = e.to_string();
-        if [
-            "unknown_method",
-            "not_allowed",
-            "missing_scope",
-            "not_an_agent",
-            "invalid_auth",
-        ]
-        .iter()
-        .any(|code| msg.contains(code))
-        {
+        if sessions_api_unavailable(slack::error_code(e)) {
             self.sessions_api = false;
             log(&format!(
-                "agent sessions unavailable ({msg}); status and titles off"
+                "agent sessions unavailable ({e:#}); status and titles off"
             ));
         } else {
-            log(&format!("agent session update failed: {msg}"));
+            log(&format!("agent session update failed: {e:#}"));
         }
     }
+}
+
+/// Slack error codes meaning the agent-session methods will never work for
+/// this app (not declared as an agent, scope missing), as opposed to a
+/// one-off failure.
+fn sessions_api_unavailable(code: Option<&str>) -> bool {
+    matches!(
+        code,
+        Some("unknown_method" | "not_allowed" | "missing_scope" | "not_an_agent" | "invalid_auth")
+    )
 }
 
 const SLASH_HELP: &str =
@@ -812,6 +830,14 @@ mod tests {
         assert!(classify_message(&msg(json!({"subtype": "message_changed"})), "U1").is_none());
         assert!(classify_message(&msg(json!({"channel_type": "channel"})), "U1").is_none());
         assert!(classify_message(&msg(json!({"text": "  "})), "U1").is_none());
+    }
+
+    #[test]
+    fn only_permanent_errors_turn_agent_sessions_off() {
+        assert!(sessions_api_unavailable(Some("missing_scope")));
+        assert!(sessions_api_unavailable(Some("unknown_method")));
+        assert!(!sessions_api_unavailable(Some("ratelimited")));
+        assert!(!sessions_api_unavailable(None));
     }
 
     #[test]

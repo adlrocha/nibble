@@ -727,6 +727,10 @@ After=default.target network-online.target
 [Service]
 Type=simple
 ExecStart=$BIN_DIR/nibble rc daemon
+# Only the daemon is stopped on stop/restart/upgrade: the zellij session and
+# mux watcher it may start in the background (and every agent in them) live
+# on, as they would had you started them from a terminal.
+KillMode=process
 Restart=on-failure
 RestartSec=30
 Environment=HOME=%h

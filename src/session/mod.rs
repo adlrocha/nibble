@@ -4,6 +4,7 @@
 //! and can read their contents with agent-specific formatting.
 
 pub(crate) mod cli;
+pub(crate) mod files;
 pub(crate) mod pi;
 
 use anyhow::{Context, Result};

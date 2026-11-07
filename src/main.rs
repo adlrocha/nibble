@@ -14,6 +14,7 @@ mod lm;
 mod memory;
 mod models;
 mod mux;
+mod pane_input;
 mod quota_watch;
 mod rc;
 mod sandbox;

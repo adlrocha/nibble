@@ -156,7 +156,7 @@ impl Slack {
             "reactions.add",
             &[("channel", channel), ("timestamp", ts), ("name", emoji)],
         ) {
-            Err(e) if e.to_string().contains("already_reacted") => Ok(()),
+            Err(e) if error_code(&e) == Some("already_reacted") => Ok(()),
             other => other.map(drop),
         }
     }
@@ -212,16 +212,46 @@ impl Slack {
     }
 }
 
+/// A Web API call Slack answered with `"ok": false`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SlackError {
+    pub method: String,
+    /// Slack's error code, e.g. `missing_scope`.
+    pub code: String,
+    /// The scope Slack says is missing, for `missing_scope`.
+    pub needed: Option<String>,
+}
+
+impl std::fmt::Display for SlackError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Slack {} failed: {}", self.method, self.code)?;
+        if let Some(scope) = &self.needed {
+            write!(f, " (missing scope: {scope})")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for SlackError {}
+
+/// Slack's error code, when `e` is a [`SlackError`] (not a network error).
+pub(crate) fn error_code(e: &anyhow::Error) -> Option<&str> {
+    e.downcast_ref::<SlackError>().map(|s| s.code.as_str())
+}
+
 fn check_ok(method: &str, body: Value) -> Result<Value> {
     if body["ok"].as_bool() == Some(true) {
         return Ok(body);
     }
-    let err = body["error"].as_str().unwrap_or("unknown_error");
-    let needed = body["needed"]
-        .as_str()
-        .map(|s| format!(" (missing scope: {s})"))
-        .unwrap_or_default();
-    bail!("Slack {method} failed: {err}{needed}")
+    Err(SlackError {
+        method: method.to_string(),
+        code: body["error"]
+            .as_str()
+            .unwrap_or("unknown_error")
+            .to_string(),
+        needed: body["needed"].as_str().map(str::to_string),
+    }
+    .into())
 }
 
 fn str_of(v: &Value, key: &str) -> String {
@@ -419,6 +449,9 @@ mod tests {
             "Slack chat.postMessage failed: missing_scope (missing scope: chat:write)"
         );
         assert!(check_ok("m", json!({})).is_err());
+        let err = check_ok("m", json!({"ok": false, "error": "not_allowed"})).unwrap_err();
+        assert_eq!(error_code(&err), Some("not_allowed"));
+        assert_eq!(error_code(&anyhow::anyhow!("network down")), None);
     }
 
     #[test]
