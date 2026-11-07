@@ -27,7 +27,8 @@ impl Daemon {
         } else {
             observe(&task)
         };
-        let step = next_step(&link, observed, task.attention_reason.as_deref(), &|| {
+        let prompt = prompt_key(&task);
+        let step = next_step(&link, observed, prompt.as_deref(), &|| {
             self.current_reply(&task)
         });
         // Record the new state (the reply included) before acting on it: a
@@ -41,8 +42,8 @@ impl Daemon {
             }
             link.blocked_reason = step.blocked_reason.clone();
             // Re-read before writing: a reply may have closed the link meanwhile.
-            if store::link(&self.db, &link.task_id)?.is_some_and(|l| !l.closed) {
-                store::put_link(&self.db, &link)?;
+            if store::link(&self.state, &link.task_id)?.is_some_and(|l| !l.closed) {
+                store::put_link(&self.state, &link)?;
             }
         }
         for effect in &step.effects {
@@ -82,6 +83,19 @@ impl Daemon {
         }
         Ok(())
     }
+}
+
+/// Identifies the permission prompt a blocked task waits on. The reason
+/// alone repeats (Claude reports `Permission required: Bash` for every Bash
+/// prompt), but every `blocked` report stamps `completed_at`, so two
+/// prompts never share a key.
+pub(super) fn prompt_key(task: &Task) -> Option<String> {
+    let reason = task.attention_reason.as_deref()?;
+    let at = task
+        .completed_at
+        .map(|t| t.timestamp_millis())
+        .unwrap_or_default();
+    Some(format!("{reason} @{at}"))
 }
 
 /// The task's state as the relay sees it.
@@ -357,6 +371,23 @@ mod tests {
         let working = next_step(&l, Watch::Working, None, &|| None);
         assert_eq!(working.blocked_reason, None);
         assert!(working.changed(&l));
+    }
+
+    #[test]
+    fn repeated_prompts_for_one_tool_get_distinct_keys() {
+        let mut t = task("t", 1, "main", Utc::now(), false);
+        assert_eq!(prompt_key(&t), None);
+        t.attention_reason = Some("Permission required: Bash".into());
+        t.completed_at = Some(Utc::now());
+        let first = prompt_key(&t);
+        t.completed_at = Some(Utc::now() + chrono::Duration::seconds(3));
+        let second = prompt_key(&t);
+        assert_ne!(first, second);
+        // The second prompt is posted although the reason text is the same.
+        let mut l = link(Watch::Blocked, None, 0);
+        l.blocked_reason = first;
+        let s = next_step(&l, Watch::Blocked, second.as_deref(), &|| None);
+        assert_eq!(s.effects[0], Effect::Blocked);
     }
 
     #[test]

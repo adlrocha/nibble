@@ -15,10 +15,11 @@ or start a new one from your phone.
   or pi), repo or directory, and the first message. omp is not offered:
   these sessions open in a `nibble mux` session, and mux does not restore
   omp tabs. A running omp session can still be sent with `/nibble-rc`.
-  The session opens in a
-  new tab of zellij session `main` (created in the background and recorded by
-  `nibble mux` if it isn't running) and gets its own thread. A plain message
-  to the app offers the same form, prefilled with what you wrote.
+  The session opens in a new tab of the zellij session named by
+  `rc.zellij_session` (`main` by default; started in the background and
+  recorded by `nibble mux` if it isn't running) and gets its own thread.
+  A plain message to the app offers the same form, prefilled with what you
+  wrote.
 - **Close** a thread with the button on its session card, or `/nibble-rc
   stop` in the session. Closing only stops relaying: the zellij tab and the
   agent keep running. Tabs are never closed for you.
@@ -49,8 +50,10 @@ zellij pane (claude | pi | omp, host or sandbox)
 - `/nibble-rc` never talks to Slack itself. It leaves a request in nibble's
   database and waits for the daemon's answer. The Slack tokens live in
   `$XDG_CONFIG_HOME/nibble/slack.env` (default `~/.config/nibble/slack.env`,
-  mode 600), outside `~/.nibble`, because every
-  sandbox mounts `~/.nibble`: sandboxed agents cannot read them.
+  mode 600), and which thread drives which pane is kept in
+  `$XDG_STATE_HOME/nibble/rc/rc.db` (default `~/.local/state/nibble/rc`), both
+  outside `~/.nibble`, because every sandbox mounts `~/.nibble`: sandboxed
+  agents can neither read the tokens nor steer what is typed where.
 - In Claude Code, `/nibble-rc` is handled by a `UserPromptSubmit` hook that
   blocks the prompt, so it spends no model turn. In pi/omp it is an extension
   command.

@@ -1,12 +1,18 @@
-//! What `nibble rc` remembers, kept as JSON in nibble's `kv_store`:
+//! What `nibble rc` remembers, kept as JSON in a `kv_store`, in two places:
 //!
-//! - `rc:link:<task_id>`: a session ↔ Slack thread link ([`Link`]).
+//! In nibble's database (`~/.nibble`, which sandboxes mount read-write),
+//! only what agents legitimately exchange with the daemon:
 //! - `rc:req:<task_id>` / `rc:res:<task_id>`: a `/nibble-rc` request from an
 //!   agent (host or sandbox) and the daemon's answer. Requests go through
 //!   the daemon so Slack tokens never have to be readable inside a sandbox.
+//! - `rc:heartbeat`: when the daemon last ran a poll pass.
+//!
+//! In the daemon's private state database ([`open_state`], under
+//! `$XDG_STATE_HOME`, which no sandbox mounts), what decides where text is
+//! typed and posted, so a sandboxed agent cannot forge it:
+//! - `rc:link:<task_id>`: a session ↔ Slack thread link ([`Link`]).
 //! - `rc:spawn:<thread_ts>`: a session started from Slack whose agent has
 //!   not registered yet ([`PendingSpawn`]).
-//! - `rc:heartbeat`: when the daemon last ran a poll pass.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -16,6 +22,33 @@ use serde::{Deserialize, Serialize};
 use crate::db::Database;
 
 const LINK_PREFIX: &str = "rc:link:";
+
+/// `$XDG_STATE_HOME/nibble/rc` (default `~/.local/state/nibble/rc`): the
+/// daemon's private state and lock, out of every sandbox's reach. Its own
+/// directory, so making it private leaves `nibble/` (market history) alone.
+pub(crate) fn state_dir() -> std::path::PathBuf {
+    std::env::var_os("XDG_STATE_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join(".local")
+                .join("state")
+        })
+        .join("nibble")
+        .join("rc")
+}
+
+/// Open (creating, mode 0700) the daemon's private state database.
+pub(crate) fn open_state() -> Result<Database> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = state_dir();
+    std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("failed to restrict {}", dir.display()))?;
+    Database::open(dir.join("rc.db")).context("failed to open the rc state database")
+}
 const REQ_PREFIX: &str = "rc:req:";
 const RES_PREFIX: &str = "rc:res:";
 const SPAWN_PREFIX: &str = "rc:spawn:";

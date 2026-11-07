@@ -647,6 +647,7 @@ src/
 ├── sandbox_instructions/    # AGENTS.md blocks injected into sandboxed repos
 ├── status.rs                # `nibble status` / sidebar / `report status`
 ├── mux.rs                   # `nibble mux`: recoverable zellij sessions
+├── lock.rs                  # Single-instance file locks (mux watcher, rc daemon)
 ├── session/                 # Session discovery, picker, transcript reading
 ├── quota_watch.rs           # Quota auto-continue daemon
 ├── pane_input.rs            # Typing into an agent's zellij pane (quota-watch, rc)

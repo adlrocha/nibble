@@ -221,8 +221,14 @@ if [ "$KEEP_CONFIG" = false ]; then
         rmdir "$(dirname "$RC_SECRETS")" 2>/dev/null || true
         ok "Removed $RC_SECRETS"
     fi
+    # Its private state (which thread drives which pane).
+    RC_STATE="${XDG_STATE_HOME:-$HOME/.local/state}/nibble/rc"
+    if [ -d "$RC_STATE" ]; then
+        rm -rf "$RC_STATE"
+        ok "Removed $RC_STATE/"
+    fi
 else
-    warn "Keeping $HOME/.nibble/ and the Slack credentials (--keep-config)"
+    warn "Keeping $HOME/.nibble/ and the Slack credentials and state (--keep-config)"
 fi
 
 # ── 9b. Remove the one-command install's source checkout ─────────────────────

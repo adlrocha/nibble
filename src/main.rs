@@ -831,7 +831,7 @@ fn main() -> Result<()> {
                     rc::cmd_request(&db, task_id.as_deref(), false)?
                 }
                 cli::RcAction::Stop { task_id } => rc::cmd_request(&db, task_id.as_deref(), true)?,
-                cli::RcAction::List => rc::cmd_list(&db)?,
+                cli::RcAction::List => rc::cmd_list()?,
                 cli::RcAction::ClaudeHook => rc::cmd_claude_hook(&db)?,
             }
         }

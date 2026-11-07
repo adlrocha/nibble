@@ -115,8 +115,9 @@ pub(crate) fn cmd_request(db: &Database, task: Option<&str>, stop: bool) -> Resu
 }
 
 /// `nibble rc list`.
-pub(crate) fn cmd_list(db: &Database) -> Result<()> {
-    let mut links = store::links(db)?;
+pub(crate) fn cmd_list() -> Result<()> {
+    let state = store::open_state()?;
+    let mut links = store::links(&state)?;
     links.sort_by_key(|l| (l.closed, std::cmp::Reverse(l.created_at)));
     if links.is_empty() {
         println!("No sessions have been sent to Slack.");
@@ -132,7 +133,7 @@ pub(crate) fn cmd_list(db: &Database) -> Result<()> {
             l.permalink.map(|p| format!("  {p}")).unwrap_or_default()
         );
     }
-    for s in store::spawns(db)? {
+    for s in store::spawns(&state)? {
         println!(
             "starting {} in {} (tab {})",
             s.agent.as_str(),
@@ -316,19 +317,40 @@ pub(crate) fn cmd_setup() -> Result<()> {
     // Verify everything before writing: the file is what install.sh takes
     // as "set up", and a wrong token in it would fail only in the daemon.
     secrets::validate(&secrets)?;
-    let bot = slack::Slack::new(&secrets.bot_token);
-    let (team, user) = bot.auth_test().context("the bot token was rejected")?;
-    println!("  ✓ bot token: {user} in {team}");
-    bot.open_dm(&secrets.user_id)
-        .context("cannot open a DM with that member ID")?;
-    println!("  ✓ your DM with the app");
-    socket_hello(&slack::Slack::new(&secrets.app_token))
-        .context("the app-level token cannot open Socket Mode (it needs connections:write)")?;
-    println!("  ✓ Socket Mode");
+    for (label, run) in slack_checks(&secrets) {
+        let detail = run().with_context(|| format!("{label} check failed; nothing was saved"))?;
+        println!("  ✓ {label}: {detail}");
+    }
     let path = secrets::save(&secrets)?;
     println!("Saved to {} (mode 600).", path.display());
     println!("Next: systemctl --user enable nibble-rc && systemctl --user restart nibble-rc, then `nibble rc doctor`.");
     Ok(())
+}
+
+/// A named check and how to run it.
+type Check<'a> = (&'static str, Box<dyn Fn() -> Result<String> + 'a>);
+
+/// What a working Slack setup must pass, in order: the bot token, your DM
+/// with the app, and the app-level token (a Socket Mode hello). `nibble rc
+/// setup` stops at the first failure before saving; `doctor` runs them all.
+fn slack_checks(s: &secrets::Secrets) -> Vec<Check<'_>> {
+    vec![
+        (
+            "bot token",
+            Box::new(|| {
+                let (team, user) = slack::Slack::new(&s.bot_token).auth_test()?;
+                Ok(format!("{user} in {team}"))
+            }),
+        ),
+        (
+            "your DM with the app",
+            Box::new(|| slack::Slack::new(&s.bot_token).open_dm(&s.user_id)),
+        ),
+        (
+            "Socket Mode (app-level token, connections:write)",
+            Box::new(|| socket_hello(&slack::Slack::new(&s.app_token))),
+        ),
+    ]
 }
 
 /// Open a Socket Mode connection with the app-level token and wait for
@@ -379,15 +401,9 @@ pub(crate) fn cmd_doctor(db: &Database, cfg: &RcConfig) -> Result<()> {
             .map_err(|e| anyhow::anyhow!("{e:#}")),
     );
     if let Ok(s) = &secrets {
-        let bot = slack::Slack::new(&s.bot_token);
-        ok &= check(
-            "bot token",
-            bot.auth_test()
-                .map(|(team, user)| format!("{user} in {team}")),
-        );
-        ok &= check("your DM with the app", bot.open_dm(&s.user_id));
-        let app = slack::Slack::new(&s.app_token);
-        ok &= check("Socket Mode", socket_hello(&app));
+        for (label, run) in slack_checks(s) {
+            ok &= check(label, run());
+        }
     }
     ok &= check(
         "zellij",

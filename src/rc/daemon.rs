@@ -40,7 +40,7 @@ const SILENCE_LIMIT: Duration = Duration::from_secs(180);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 /// How often the heartbeat is written.
 const BEAT_EVERY: Duration = Duration::from_secs(30);
-/// Lock file (in `~/.nibble`) held by the running daemon.
+/// Lock file (in the private state dir) held by the running daemon.
 const DAEMON_LOCK: &str = "rc-daemon";
 /// Remembered event ids, to drop Slack's redeliveries.
 const SEEN_CAP: usize = 256;
@@ -49,10 +49,10 @@ const SEEN_CAP: usize = 256;
 pub(crate) fn run(cfg: RcConfig, db_path: PathBuf) -> Result<()> {
     // One daemon per machine: a second would relay the same turns and
     // answer the same requests, posting everything twice.
-    let _lock = crate::lock::try_lock_in(&crate::db::ensure_data_dir()?, DAEMON_LOCK)?
-        .with_context(|| {
-            "another nibble rc daemon is already running (systemctl --user status nibble-rc)"
-        })?;
+    let state = store::open_state()?;
+    let _lock = crate::lock::try_lock_in(&store::state_dir(), DAEMON_LOCK)?.with_context(|| {
+        "another nibble rc daemon is already running (systemctl --user status nibble-rc)"
+    })?;
     let secrets = super::secrets::load()?;
     let bot = Slack::new(&secrets.bot_token);
     let app = Slack::new(&secrets.app_token);
@@ -69,6 +69,7 @@ pub(crate) fn run(cfg: RcConfig, db_path: PathBuf) -> Result<()> {
         bot,
         dm,
         db,
+        state,
         sessions_api: true,
         seen: Seen::default(),
         last_beat: None,
@@ -121,6 +122,8 @@ pub(super) struct Daemon {
     pub(super) bot: Slack,
     pub(super) dm: String,
     pub(super) db: Database,
+    /// Links and pending starts: the daemon's private state (see `store`).
+    pub(super) state: Database,
     /// False once Slack rejected the agent-session methods (app not
     /// declared as an agent): they are skipped from then on.
     pub(super) sessions_api: bool,
@@ -319,13 +322,13 @@ impl Daemon {
     }
 
     fn on_reply(&mut self, channel: &str, thread_ts: &str, ts: &str, text: &str) -> Result<()> {
-        if let Some(mut spawn) = store::spawn_for_thread(&self.db, thread_ts)? {
+        if let Some(mut spawn) = store::spawn_for_thread(&self.state, thread_ts)? {
             spawn.queued.push(text.to_string());
-            store::put_spawn(&self.db, &spawn)?;
+            store::put_spawn(&self.state, &spawn)?;
             let _ = self.bot.react(channel, ts, "hourglass_flowing_sand");
             return Ok(());
         }
-        let Some(mut link) = store::link_by_thread(&self.db, channel, thread_ts)? else {
+        let Some(mut link) = store::link_by_thread(&self.state, channel, thread_ts)? else {
             self.note(
                 channel,
                 thread_ts,
@@ -361,13 +364,13 @@ impl Daemon {
         let _ = self.bot.react(channel, ts, "eyes");
         link.watch = relay::after_reply(link.watch);
         link.idle_checks = 0;
-        store::put_link(&self.db, &link)?;
+        store::put_link(&self.state, &link)?;
         self.session_status(channel, thread_ts, SessionStatus::Processing);
         Ok(())
     }
 
     fn on_stop(&mut self, channel: &str, thread_ts: &str) -> Result<()> {
-        let Some(link) = store::link_by_thread(&self.db, channel, thread_ts)? else {
+        let Some(link) = store::link_by_thread(&self.state, channel, thread_ts)? else {
             return Ok(());
         };
         if link.closed {
@@ -487,7 +490,7 @@ impl Daemon {
     }
 
     fn list_text(&self) -> String {
-        let links = store::links(&self.db).unwrap_or_default();
+        let links = store::links(&self.state).unwrap_or_default();
         let open: Vec<String> = links
             .iter()
             .filter(|l| !l.closed)
@@ -516,7 +519,7 @@ impl Daemon {
     // ── Links: /nibble-rc and Close ───────────────────────────────────────
 
     fn start_link(&mut self, task_id: &str) -> Result<String> {
-        if let Some(link) = store::link(&self.db, task_id)?.filter(|l| !l.closed) {
+        if let Some(link) = store::link(&self.state, task_id)?.filter(|l| !l.closed) {
             return Ok(format!(
                 "Already in Slack{}",
                 link.permalink.map(|p| format!(": {p}")).unwrap_or_default()
@@ -547,7 +550,7 @@ impl Daemon {
         // fail, so its thread and Close button always have a session.
         let reply = self.current_reply(&task);
         link.last_reply_id = reply.as_ref().map(|r| r.id.clone());
-        store::put_link(&self.db, &link)?;
+        store::put_link(&self.state, &link)?;
         if let Some(reply) = reply {
             if let Err(e) = self.post_reply(&link, &format!("*Last reply*\n\n{}", reply.text)) {
                 log(&format!("could not post the last reply: {e:#}"));
@@ -567,14 +570,14 @@ impl Daemon {
     }
 
     pub(super) fn close_link(&mut self, task_id: &str, why: &str) -> Result<()> {
-        let Some(mut link) = store::link(&self.db, task_id)? else {
+        let Some(mut link) = store::link(&self.state, task_id)? else {
             return Ok(());
         };
         if link.closed {
             return Ok(());
         }
         link.closed = true;
-        store::put_link(&self.db, &link)?;
+        store::put_link(&self.state, &link)?;
         let card = session_card(&link, None);
         if let Err(e) = self.bot.update(
             &link.channel,
@@ -609,7 +612,7 @@ impl Daemon {
         for (task_id, req) in store::requests(&self.db)? {
             let result = match req.action {
                 RequestAction::Start => self.start_link(&task_id),
-                RequestAction::Stop => match store::link(&self.db, &task_id)? {
+                RequestAction::Stop => match store::link(&self.state, &task_id)? {
                     Some(l) if !l.closed => self
                         .close_link(&task_id, "Closed from the terminal.")
                         .map(|()| {
@@ -627,7 +630,7 @@ impl Daemon {
             };
             store::answer(&self.db, &task_id, &resp)?;
         }
-        for spawn in store::spawns(&self.db)? {
+        for spawn in store::spawns(&self.state)? {
             let thread = spawn.thread_ts.clone();
             let channel = spawn.channel.clone();
             // Errors here are transient (zellij, the database, Slack): keep
@@ -635,13 +638,13 @@ impl Daemon {
             // pane closed, timeout) are handled inside and drop the record.
             if let Err(e) = self.advance_spawn(spawn, now) {
                 log(&format!("spawn {thread} in {channel}: {e:#}; retrying"));
-                if let Some(mut s) = store::spawn_for_thread(&self.db, &thread)? {
+                if let Some(mut s) = store::spawn_for_thread(&self.state, &thread)? {
                     s.last_error = Some(format!("{e:#}"));
-                    store::put_spawn(&self.db, &s)?;
+                    store::put_spawn(&self.state, &s)?;
                 }
             }
         }
-        for link in store::links(&self.db)?.into_iter().filter(|l| !l.closed) {
+        for link in store::links(&self.state)?.into_iter().filter(|l| !l.closed) {
             let task_id = link.task_id.clone();
             if let Err(e) = self.relay(link) {
                 log(&format!("relay {task_id} failed: {e:#}"));

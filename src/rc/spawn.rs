@@ -24,8 +24,8 @@ impl Daemon {
         let channel = new.origin.channel.clone();
         if let Some(ts) = &new.origin.thread_ts {
             if thread_busy(
-                store::spawn_for_thread(&self.db, ts)?.is_some(),
-                store::link_by_thread(&self.db, &channel, ts)?.as_ref(),
+                store::spawn_for_thread(&self.state, ts)?.is_some(),
+                store::link_by_thread(&self.state, &channel, ts)?.as_ref(),
             ) {
                 anyhow::bail!("this thread already has a session; start another from a new message or `/nibble`");
             }
@@ -101,7 +101,7 @@ impl Daemon {
         let timeout =
             chrono::Duration::seconds(i64::try_from(self.cfg.start_timeout_secs).unwrap_or(240));
         if now - spawn.started_at > timeout {
-            store::delete_spawn(&self.db, &spawn.thread_ts)?;
+            store::delete_spawn(&self.state, &spawn.thread_ts)?;
             self.note(
                 &spawn.channel,
                 &spawn.thread_ts,
@@ -124,7 +124,7 @@ impl Daemon {
             spawn.task_id = find_spawned_task(&tasks, &spawn).map(|t| t.task_id.clone());
             if spawn.task_id.is_none() {
                 if !pane_input::pane_alive(&spawn.zellij_session, spawn.pane_id).unwrap_or(true) {
-                    store::delete_spawn(&self.db, &spawn.thread_ts)?;
+                    store::delete_spawn(&self.state, &spawn.thread_ts)?;
                     self.note(
                         &spawn.channel,
                         &spawn.thread_ts,
@@ -132,20 +132,20 @@ impl Daemon {
                     );
                     return Ok(());
                 }
-                return store::put_spawn(&self.db, &spawn);
+                return store::put_spawn(&self.state, &spawn);
             }
         }
         let task_id = spawn.task_id.clone().unwrap_or_default();
         let Some(task) = self.db.get_task_by_id(&task_id)? else {
             spawn.task_id = None;
-            return store::put_spawn(&self.db, &spawn);
+            return store::put_spawn(&self.state, &spawn);
         };
         if spawn.ready_at.is_none() {
             if !session_known(&task) {
-                return store::put_spawn(&self.db, &spawn);
+                return store::put_spawn(&self.state, &spawn);
             }
             spawn.ready_at = Some(now);
-            return store::put_spawn(&self.db, &spawn);
+            return store::put_spawn(&self.state, &spawn);
         }
         if spawn
             .ready_at
@@ -156,7 +156,7 @@ impl Daemon {
         // The agent may have quit during the grace period: then the pane is
         // the user's shell and the message would run as a command.
         if !pane::agent_present(&task, &spawn.zellij_session, spawn.pane_id)? {
-            store::delete_spawn(&self.db, &spawn.thread_ts)?;
+            store::delete_spawn(&self.state, &spawn.thread_ts)?;
             self.note(
                 &spawn.channel,
                 &spawn.thread_ts,
@@ -168,7 +168,7 @@ impl Daemon {
         // replay after the agent answered still relays that answer.
         if spawn.baseline_reply.is_none() {
             spawn.baseline_reply = Some(self.current_reply(&task).map(|r| r.id));
-            store::put_spawn(&self.db, &spawn)?;
+            store::put_spawn(&self.state, &spawn)?;
         }
         // Type the first message and anything queued, recording progress so
         // a retry (after a transient zellij or database error) resumes where
@@ -179,10 +179,10 @@ impl Daemon {
         while spawn.typed < messages.len() {
             pane_input::send_text(&spawn.zellij_session, spawn.pane_id, &messages[spawn.typed])?;
             spawn.typed += 1;
-            store::put_spawn(&self.db, &spawn)?;
+            store::put_spawn(&self.state, &spawn)?;
         }
         // A replay that already linked the thread reuses that link.
-        let existing = reusable_link(store::link(&self.db, &task.task_id)?, &spawn.thread_ts);
+        let existing = reusable_link(store::link(&self.state, &task.task_id)?, &spawn.thread_ts);
         let mut link = match existing {
             Some(link) => link,
             None => {
@@ -196,11 +196,11 @@ impl Daemon {
                 );
                 link.last_reply_id = spawn.baseline_reply.clone().flatten();
                 link.permalink = self.bot.permalink(&spawn.channel, &spawn.thread_ts).ok();
-                store::put_link(&self.db, &link)?;
+                store::put_link(&self.state, &link)?;
                 link
             }
         };
-        store::delete_spawn(&self.db, &spawn.thread_ts)?;
+        store::delete_spawn(&self.state, &spawn.thread_ts)?;
         if link.card_ts.is_some() {
             return Ok(());
         }
@@ -216,7 +216,7 @@ impl Daemon {
         ) {
             Ok(card_ts) => {
                 link.card_ts = Some(card_ts);
-                store::put_link(&self.db, &link)?;
+                store::put_link(&self.state, &link)?;
             }
             Err(e) => log(&format!("could not post the session card: {e:#}")),
         }
