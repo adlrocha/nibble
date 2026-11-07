@@ -123,7 +123,7 @@ pub(super) struct Daemon {
     pub(super) dm: String,
     pub(super) db: Database,
     /// Links and pending starts: the daemon's private state (see `store`).
-    pub(super) state: Database,
+    pub(super) state: store::StateDb,
     /// False once Slack rejected the agent-session methods (app not
     /// declared as an agent): they are skipped from then on.
     pub(super) sessions_api: bool,

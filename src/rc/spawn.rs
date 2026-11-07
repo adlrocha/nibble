@@ -69,7 +69,7 @@ impl Daemon {
         let tab_name = tab_name_for(&new.cwd);
         let pane_id = pane::open_tab(&session, &tab_name, &cwd, &script)?;
         store::put_spawn(
-            &self.db,
+            &self.state,
             &PendingSpawn {
                 channel,
                 thread_ts,

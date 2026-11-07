@@ -40,14 +40,25 @@ pub(crate) fn state_dir() -> std::path::PathBuf {
         .join("rc")
 }
 
+/// The daemon's private state database. A distinct type from nibble's
+/// shared [`Database`], so links and pending starts cannot be read from or
+/// written to the database sandboxes can write.
+pub(crate) struct StateDb(Database);
+
 /// Open (creating, mode 0700) the daemon's private state database.
-pub(crate) fn open_state() -> Result<Database> {
+pub(crate) fn open_state() -> Result<StateDb> {
+    open_state_in(&state_dir())
+}
+
+/// [`open_state`] in `dir`.
+pub(crate) fn open_state_in(dir: &std::path::Path) -> Result<StateDb> {
     use std::os::unix::fs::PermissionsExt;
-    let dir = state_dir();
-    std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+    std::fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
         .with_context(|| format!("failed to restrict {}", dir.display()))?;
-    Database::open(dir.join("rc.db")).context("failed to open the rc state database")
+    Database::open(dir.join("rc.db"))
+        .map(StateDb)
+        .context("failed to open the rc state database")
 }
 const REQ_PREFIX: &str = "rc:req:";
 const RES_PREFIX: &str = "rc:res:";
@@ -260,26 +271,29 @@ fn all<T: DeserializeOwned>(db: &Database, prefix: &str) -> Result<Vec<(String, 
     Ok(out)
 }
 
-pub(crate) fn link(db: &Database, task_id: &str) -> Result<Option<Link>> {
-    get(db, &format!("{LINK_PREFIX}{task_id}"))
+pub(crate) fn link(state: &StateDb, task_id: &str) -> Result<Option<Link>> {
+    get(&state.0, &format!("{LINK_PREFIX}{task_id}"))
 }
 
-pub(crate) fn put_link(db: &Database, link: &Link) -> Result<()> {
-    put(db, &format!("{LINK_PREFIX}{}", link.task_id), link)
+pub(crate) fn put_link(state: &StateDb, link: &Link) -> Result<()> {
+    put(&state.0, &format!("{LINK_PREFIX}{}", link.task_id), link)
 }
 
-pub(crate) fn links(db: &Database) -> Result<Vec<Link>> {
-    Ok(all(db, LINK_PREFIX)?.into_iter().map(|(_, l)| l).collect())
+pub(crate) fn links(state: &StateDb) -> Result<Vec<Link>> {
+    Ok(all(&state.0, LINK_PREFIX)?
+        .into_iter()
+        .map(|(_, l)| l)
+        .collect())
 }
 
 /// The link whose thread is `thread_ts` in `channel`: the open one when a
 /// closed thread later got a new session, else the closed one.
 pub(crate) fn link_by_thread(
-    db: &Database,
+    state: &StateDb,
     channel: &str,
     thread_ts: &str,
 ) -> Result<Option<Link>> {
-    let mut matching: Vec<Link> = links(db)?
+    let mut matching: Vec<Link> = links(state)?
         .into_iter()
         .filter(|l| l.channel == channel && l.thread_ts == thread_ts)
         .collect();
@@ -320,20 +334,27 @@ pub(crate) fn withdraw_request(db: &Database, task_id: &str) -> Result<()> {
     db.kv_delete(&format!("{REQ_PREFIX}{task_id}"))
 }
 
-pub(crate) fn put_spawn(db: &Database, spawn: &PendingSpawn) -> Result<()> {
-    put(db, &format!("{SPAWN_PREFIX}{}", spawn.thread_ts), spawn)
+pub(crate) fn put_spawn(state: &StateDb, spawn: &PendingSpawn) -> Result<()> {
+    put(
+        &state.0,
+        &format!("{SPAWN_PREFIX}{}", spawn.thread_ts),
+        spawn,
+    )
 }
 
-pub(crate) fn spawns(db: &Database) -> Result<Vec<PendingSpawn>> {
-    Ok(all(db, SPAWN_PREFIX)?.into_iter().map(|(_, s)| s).collect())
+pub(crate) fn spawns(state: &StateDb) -> Result<Vec<PendingSpawn>> {
+    Ok(all(&state.0, SPAWN_PREFIX)?
+        .into_iter()
+        .map(|(_, s)| s)
+        .collect())
 }
 
-pub(crate) fn spawn_for_thread(db: &Database, thread_ts: &str) -> Result<Option<PendingSpawn>> {
-    get(db, &format!("{SPAWN_PREFIX}{thread_ts}"))
+pub(crate) fn spawn_for_thread(state: &StateDb, thread_ts: &str) -> Result<Option<PendingSpawn>> {
+    get(&state.0, &format!("{SPAWN_PREFIX}{thread_ts}"))
 }
 
-pub(crate) fn delete_spawn(db: &Database, thread_ts: &str) -> Result<()> {
-    db.kv_delete(&format!("{SPAWN_PREFIX}{thread_ts}"))
+pub(crate) fn delete_spawn(state: &StateDb, thread_ts: &str) -> Result<()> {
+    state.0.kv_delete(&format!("{SPAWN_PREFIX}{thread_ts}"))
 }
 
 pub(crate) fn beat(db: &Database, now: DateTime<Utc>) -> Result<()> {
@@ -357,30 +378,42 @@ mod tests {
         (dir, db)
     }
 
+    fn state() -> (tempfile::TempDir, StateDb) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = open_state_in(&dir.path().join("rc")).unwrap();
+        (dir, state)
+    }
+
     fn sample(task: &str, ts: &str) -> Link {
         crate::rc::test_support::link(task, ts)
     }
 
     #[test]
     fn links_round_trip_and_resolve_by_thread() {
-        let (_d, db) = db();
-        put_link(&db, &sample("a", "1.1")).unwrap();
-        put_link(&db, &sample("b", "2.2")).unwrap();
-        assert_eq!(link(&db, "a").unwrap().unwrap().thread_ts, "1.1");
+        let (_d, state) = state();
+        put_link(&state, &sample("a", "1.1")).unwrap();
+        put_link(&state, &sample("b", "2.2")).unwrap();
+        assert_eq!(link(&state, "a").unwrap().unwrap().thread_ts, "1.1");
         assert_eq!(
-            link_by_thread(&db, "D1", "2.2").unwrap().unwrap().task_id,
+            link_by_thread(&state, "D1", "2.2")
+                .unwrap()
+                .unwrap()
+                .task_id,
             "b"
         );
-        assert!(link_by_thread(&db, "D2", "2.2").unwrap().is_none());
+        assert!(link_by_thread(&state, "D2", "2.2").unwrap().is_none());
         // A closed thread that got a new session resolves to the open one.
         let mut old = sample("old", "2.2");
         old.closed = true;
-        put_link(&db, &old).unwrap();
+        put_link(&state, &old).unwrap();
         assert_eq!(
-            link_by_thread(&db, "D1", "2.2").unwrap().unwrap().task_id,
+            link_by_thread(&state, "D1", "2.2")
+                .unwrap()
+                .unwrap()
+                .task_id,
             "b"
         );
-        assert_eq!(links(&db).unwrap().len(), 3);
+        assert_eq!(links(&state).unwrap().len(), 3);
     }
 
     #[test]
@@ -432,10 +465,10 @@ mod tests {
 
     #[test]
     fn corrupt_records_are_skipped() {
-        let (_d, db) = db();
-        db.kv_set("rc:link:bad", "{not json").unwrap();
-        put_link(&db, &sample("ok", "3.3")).unwrap();
-        assert_eq!(links(&db).unwrap().len(), 1);
+        let (_d, state) = state();
+        state.0.kv_set("rc:link:bad", "{not json").unwrap();
+        put_link(&state, &sample("ok", "3.3")).unwrap();
+        assert_eq!(links(&state).unwrap().len(), 1);
     }
 
     #[test]
@@ -448,6 +481,49 @@ mod tests {
         let mut v = serde_json::to_value(sample("t", "1.1")).unwrap();
         v.as_object_mut().unwrap().remove("card_ts");
         assert_eq!(serde_json::from_value::<Link>(v).unwrap().card_ts, None);
+    }
+
+    #[test]
+    fn pending_starts_live_only_in_the_private_state() {
+        let (_d, state) = state();
+        let (_e, shared) = db();
+        let spawn = PendingSpawn {
+            channel: "D1".into(),
+            thread_ts: "1.1".into(),
+            location: Location::Host,
+            agent: SpawnAgent::Claude,
+            cwd: "/r".into(),
+            prompt: "go".into(),
+            zellij_session: "main".into(),
+            pane_id: 7,
+            tab_name: "r (slack)".into(),
+            started_at: Utc::now(),
+            task_id: None,
+            ready_at: None,
+            queued: vec![],
+            typed: 0,
+            baseline_reply: None,
+            last_error: None,
+        };
+        put_spawn(&state, &spawn).unwrap();
+        // What the poll pass and on_reply read back.
+        assert_eq!(spawns(&state).unwrap(), vec![spawn.clone()]);
+        assert_eq!(spawn_for_thread(&state, "1.1").unwrap(), Some(spawn));
+        // Nothing reached the database sandboxes can write.
+        assert!(shared.kv_keys_with_prefix("rc:").unwrap().is_empty());
+        delete_spawn(&state, "1.1").unwrap();
+        assert!(spawns(&state).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_state_dir_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let (d, _state) = state();
+        let mode = std::fs::metadata(d.path().join("rc"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700);
     }
 
     #[test]
