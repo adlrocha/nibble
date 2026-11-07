@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use std::path::Path;
 
-use super::daemon::{card_for, session_card, Daemon};
+use super::daemon::{card_for, log, session_card, Daemon};
 use super::modal::NewSession;
 use super::pane;
 use super::slack::{self, SessionStatus};
@@ -83,6 +83,8 @@ impl Daemon {
                 task_id: None,
                 ready_at: None,
                 queued: Vec::new(),
+                typed: 0,
+                last_error: None,
             },
         )
     }
@@ -102,8 +104,15 @@ impl Daemon {
                 &spawn.channel,
                 &spawn.thread_ts,
                 &format!(
-                    ":warning: The agent did not come up within {}s. Look at tab `{}` in zellij `{}`.",
-                    self.cfg.start_timeout_secs, spawn.tab_name, spawn.zellij_session
+                    ":warning: The session did not start within {}s{}. Look at tab `{}` in zellij `{}`.",
+                    self.cfg.start_timeout_secs,
+                    spawn
+                        .last_error
+                        .as_deref()
+                        .map(|e| format!(" (last error: {})", slack::escape(e)))
+                        .unwrap_or_default(),
+                    spawn.tab_name,
+                    spawn.zellij_session
                 ),
             );
             return Ok(());
@@ -153,7 +162,17 @@ impl Daemon {
             );
             return Ok(());
         }
-        // Ready: link first, so replies arriving meanwhile find the link.
+        // Type the first message and anything queued, recording progress so
+        // a retry (after a transient zellij or database error) resumes where
+        // it stopped instead of typing a message twice.
+        let messages: Vec<String> = std::iter::once(spawn.prompt.clone())
+            .chain(spawn.queued.iter().cloned())
+            .collect();
+        while spawn.typed < messages.len() {
+            pane::send_text(&spawn.zellij_session, spawn.pane_id, &messages[spawn.typed])?;
+            spawn.typed += 1;
+            store::put_spawn(&self.db, &spawn)?;
+        }
         let card = card_for(&task, &spawn.zellij_session);
         let mut link = Link::new(
             &task.task_id,
@@ -166,20 +185,22 @@ impl Daemon {
         link.permalink = self.bot.permalink(&spawn.channel, &spawn.thread_ts).ok();
         store::put_link(&self.db, &link)?;
         store::delete_spawn(&self.db, &spawn.thread_ts)?;
-        for msg in std::iter::once(&spawn.prompt).chain(spawn.queued.iter()) {
-            pane::send_text(&spawn.zellij_session, spawn.pane_id, msg)?;
-        }
+        // From here on the session is linked; the card is best effort. The
+        // thread root is your message or the prompt, so the card is a reply:
+        // remember it, Close rewrites it.
         let session_card = session_card(&link, Some(&spawn.prompt));
-        // The thread root is your message or the prompt, so the card is a
-        // reply: remember it, Close rewrites it.
-        let card_ts = self.bot.post(
+        match self.bot.post(
             &link.channel,
             Some(&link.thread_ts),
             &slack::session_card_text(&session_card),
             &slack::session_card_blocks(&session_card, true),
-        )?;
-        link.card_ts = Some(card_ts);
-        store::put_link(&self.db, &link)?;
+        ) {
+            Ok(card_ts) => {
+                link.card_ts = Some(card_ts);
+                store::put_link(&self.db, &link)?;
+            }
+            Err(e) => log(&format!("could not post the session card: {e:#}")),
+        }
         self.session_status(&link.channel, &link.thread_ts, SessionStatus::Processing);
         self.session_title(
             &link.channel,
@@ -244,7 +265,7 @@ fn launch_script(
         Location::Host => {
             let args = match agent {
                 SpawnAgent::Claude => " --fresh",
-                SpawnAgent::Pi | SpawnAgent::Omp => "",
+                SpawnAgent::Pi => "",
             };
             format!(
                 "{}{args}",
@@ -255,7 +276,6 @@ fn launch_script(
             let flag = match agent {
                 SpawnAgent::Claude => "",
                 SpawnAgent::Pi => " --pi",
-                SpawnAgent::Omp => " --omp",
             };
             format!(
                 "{} sandbox attach {} --btw{flag}",
@@ -272,7 +292,6 @@ fn wrapper_name(agent: SpawnAgent) -> &'static str {
     match agent {
         SpawnAgent::Claude => "claude-wrapper",
         SpawnAgent::Pi => "pi-wrapper",
-        SpawnAgent::Omp => "omp-wrapper",
     }
 }
 
@@ -306,6 +325,8 @@ mod tests {
             task_id: None,
             ready_at: None,
             queued: vec![],
+            typed: 0,
+            last_error: None,
         }
     }
 
@@ -367,8 +388,8 @@ mod tests {
             "'/w/claude-wrapper' --fresh; exec '/bin/zsh'"
         );
         assert_eq!(
-            launch_script(Location::Host, SpawnAgent::Omp, cwd, bin, wr, "/bin/zsh"),
-            "'/w/omp-wrapper'; exec '/bin/zsh'"
+            launch_script(Location::Host, SpawnAgent::Pi, cwd, bin, wr, "/bin/zsh"),
+            "'/w/pi-wrapper'; exec '/bin/zsh'"
         );
         assert_eq!(
             launch_script(Location::Sandbox, SpawnAgent::Pi, cwd, bin, wr, "/bin/sh"),

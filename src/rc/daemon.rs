@@ -93,7 +93,7 @@ pub(crate) fn run(cfg: RcConfig, db_path: PathBuf) -> Result<()> {
     }
 }
 
-fn log(msg: &str) {
+pub(super) fn log(msg: &str) {
     eprintln!(
         "{} nibble rc: {msg}",
         Utc::now().format("%Y-%m-%dT%H:%M:%SZ")
@@ -618,14 +618,15 @@ impl Daemon {
         for spawn in store::spawns(&self.db)? {
             let thread = spawn.thread_ts.clone();
             let channel = spawn.channel.clone();
+            // Errors here are transient (zellij, the database, Slack): keep
+            // the start and retry next poll. Definitive outcomes (agent quit,
+            // pane closed, timeout) are handled inside and drop the record.
             if let Err(e) = self.advance_spawn(spawn, now) {
-                log(&format!("spawn {thread} failed: {e:#}"));
-                store::delete_spawn(&self.db, &thread)?;
-                self.note(
-                    &channel,
-                    &thread,
-                    &format!(":warning: Could not start the session: {e:#}"),
-                );
+                log(&format!("spawn {thread} in {channel}: {e:#}; retrying"));
+                if let Some(mut s) = store::spawn_for_thread(&self.db, &thread)? {
+                    s.last_error = Some(format!("{e:#}"));
+                    store::put_spawn(&self.db, &s)?;
+                }
             }
         }
         for link in store::links(&self.db)?.into_iter().filter(|l| !l.closed) {

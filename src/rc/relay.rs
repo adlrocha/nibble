@@ -27,7 +27,9 @@ impl Daemon {
         } else {
             observe(&task)
         };
-        let step = next_step(&link, observed, &|| self.current_reply(&task));
+        let step = next_step(&link, observed, task.attention_reason.as_deref(), &|| {
+            self.current_reply(&task)
+        });
         // Record the new state (the reply included) before acting on it: a
         // post that fails or times out after Slack delivered it must not be
         // retried on the next poll and appear twice.
@@ -37,6 +39,7 @@ impl Daemon {
             if let Some(id) = &step.reply_id {
                 link.last_reply_id = Some(id.clone());
             }
+            link.blocked_reason = step.blocked_reason.clone();
             // Re-read before writing: a reply may have closed the link meanwhile.
             if store::link(&self.db, &link.task_id)?.is_some_and(|l| !l.closed) {
                 store::put_link(&self.db, &link)?;
@@ -109,35 +112,45 @@ struct Step {
     watch: Watch,
     idle_checks: u32,
     reply_id: Option<String>,
+    /// The permission prompt the thread shows after this step.
+    blocked_reason: Option<String>,
     effects: Vec<Effect>,
 }
 
 impl Step {
     fn changed(&self, link: &Link) -> bool {
-        link.watch != self.watch || link.idle_checks != self.idle_checks || self.reply_id.is_some()
+        link.watch != self.watch
+            || link.idle_checks != self.idle_checks
+            || self.reply_id.is_some()
+            || link.blocked_reason != self.blocked_reason
     }
 }
 
-/// What to relay for a link whose task is now `observed`. The transcript is
-/// only read when a turn may have just finished.
-fn next_step(link: &Link, observed: Watch, reply: &dyn Fn() -> Option<transcript::Reply>) -> Step {
+/// What to relay for a link whose task is now `observed` (`reason`: the
+/// task's attention reason when blocked). The transcript is only read when
+/// a turn may have just finished.
+fn next_step(
+    link: &Link,
+    observed: Watch,
+    reason: Option<&str>,
+    reply: &dyn Fn() -> Option<transcript::Reply>,
+) -> Step {
     let prev = link.watch;
+    let shown = (observed == Watch::Blocked).then(|| reason.unwrap_or_default().to_string());
     let same = |effects| Step {
         watch: observed,
         idle_checks: 0,
         reply_id: None,
+        blocked_reason: shown.clone(),
         effects,
     };
     match observed {
         Watch::Exited => same(vec![Effect::Close]),
-        Watch::Working if prev == Watch::Working => Step {
-            watch: Watch::Working,
-            idle_checks: 0,
-            reply_id: None,
-            effects: vec![],
-        },
+        Watch::Working if prev == Watch::Working => same(vec![]),
         Watch::Working => same(vec![Effect::Status(status_of(Watch::Working))]),
-        Watch::Blocked if prev == Watch::Blocked => same(vec![]),
+        // Still the prompt the thread shows: nothing new. A different
+        // prompt in the same blocked spell is posted.
+        Watch::Blocked if prev == Watch::Blocked && link.blocked_reason == shown => same(vec![]),
         Watch::Blocked => same(vec![
             Effect::Blocked,
             Effect::Status(status_of(Watch::Blocked)),
@@ -149,6 +162,7 @@ fn next_step(link: &Link, observed: Watch, reply: &dyn Fn() -> Option<transcript
                     watch: Watch::Idle,
                     idle_checks: 0,
                     reply_id: Some(r.id.clone()),
+                    blocked_reason: None,
                     effects: vec![Effect::Reply(r), Effect::Status(status_of(Watch::Idle))],
                 },
                 None if link.idle_checks + 1 >= IDLE_GIVE_UP => same(vec![
@@ -160,6 +174,7 @@ fn next_step(link: &Link, observed: Watch, reply: &dyn Fn() -> Option<transcript
                     watch: prev,
                     idle_checks: link.idle_checks + 1,
                     reply_id: None,
+                    blocked_reason: link.blocked_reason.clone(),
                     effects: vec![],
                 },
             }
@@ -211,7 +226,7 @@ mod tests {
     #[test]
     fn finished_turn_posts_the_new_reply_once() {
         let l = link(Watch::Working, Some("old"), 0);
-        let s = next_step(&l, Watch::Idle, &|| reply("new"));
+        let s = next_step(&l, Watch::Idle, None, &|| reply("new"));
         assert_eq!(s.watch, Watch::Idle);
         assert_eq!(s.reply_id.as_deref(), Some("new"));
         assert_eq!(s.effects[0], Effect::Reply(reply("new").unwrap()));
@@ -219,7 +234,7 @@ mod tests {
 
         // Already idle: nothing, and the transcript is not even read.
         let l = link(Watch::Idle, Some("new"), 0);
-        let s = next_step(&l, Watch::Idle, &|| panic!("must not read"));
+        let s = next_step(&l, Watch::Idle, None, &|| panic!("must not read"));
         assert!(s.effects.is_empty());
         assert!(!s.changed(&l));
     }
@@ -227,11 +242,11 @@ mod tests {
     #[test]
     fn idle_without_a_new_reply_waits_then_gives_up() {
         let l = link(Watch::Working, Some("same"), 0);
-        let s = next_step(&l, Watch::Idle, &|| reply("same"));
+        let s = next_step(&l, Watch::Idle, None, &|| reply("same"));
         assert_eq!((s.watch, s.idle_checks), (Watch::Working, 1));
         assert!(s.effects.is_empty());
         let l = link(Watch::Working, Some("same"), IDLE_GIVE_UP - 1);
-        let s = next_step(&l, Watch::Idle, &|| None);
+        let s = next_step(&l, Watch::Idle, None, &|| None);
         assert_eq!((s.watch, s.idle_checks), (Watch::Idle, 0));
         assert_eq!(
             s.effects,
@@ -262,24 +277,40 @@ mod tests {
 
     #[test]
     fn working_blocked_and_exit_transitions() {
-        let s = next_step(&link(Watch::Idle, None, 0), Watch::Working, &|| None);
+        let s = next_step(&link(Watch::Idle, None, 0), Watch::Working, None, &|| None);
         assert_eq!(s.effects, vec![Effect::Status(SessionStatus::Processing)]);
-        let s = next_step(&link(Watch::Working, None, 3), Watch::Working, &|| None);
+        let s = next_step(
+            &link(Watch::Working, None, 3),
+            Watch::Working,
+            None,
+            &|| None,
+        );
         assert!(s.effects.is_empty());
         assert_eq!(s.idle_checks, 0);
 
-        let s = next_step(&link(Watch::Working, None, 0), Watch::Blocked, &|| None);
+        let s = next_step(
+            &link(Watch::Working, None, 0),
+            Watch::Blocked,
+            None,
+            &|| None,
+        );
         assert_eq!(
             s.effects,
             vec![Effect::Blocked, Effect::Status(SessionStatus::Suspended)]
         );
-        let s = next_step(&link(Watch::Blocked, None, 0), Watch::Blocked, &|| None);
+        let mut shown = link(Watch::Blocked, None, 0);
+        shown.blocked_reason = Some("Needs input".into());
+        let s = next_step(&shown, Watch::Blocked, Some("Needs input"), &|| None);
         assert!(s.effects.is_empty());
         // Approved, then finished: the reply is posted.
-        let s = next_step(&link(Watch::Blocked, None, 0), Watch::Idle, &|| reply("r"));
+        let s = next_step(&link(Watch::Blocked, None, 0), Watch::Idle, None, &|| {
+            reply("r")
+        });
         assert!(matches!(s.effects[0], Effect::Reply(_)));
 
-        let s = next_step(&link(Watch::Working, None, 0), Watch::Exited, &|| None);
+        let s = next_step(&link(Watch::Working, None, 0), Watch::Exited, None, &|| {
+            None
+        });
         assert_eq!(s.effects, vec![Effect::Close]);
     }
 
@@ -287,10 +318,45 @@ mod tests {
     fn answering_a_permission_prompt_does_not_repost_it() {
         let watch = after_reply(Watch::Blocked);
         // The agent has not reported yet: still blocked, nothing to post.
-        let s = next_step(&link(watch, None, 0), Watch::Blocked, &|| None);
+        let mut l = link(watch, None, 0);
+        l.blocked_reason = Some("Permission required: Bash".into());
+        let s = next_step(
+            &l,
+            Watch::Blocked,
+            Some("Permission required: Bash"),
+            &|| None,
+        );
         assert!(s.effects.is_empty());
         // Ordinary replies expect a turn.
         assert_eq!(after_reply(Watch::Idle), Watch::Working);
+    }
+
+    #[test]
+    fn a_new_permission_prompt_while_blocked_is_posted() {
+        let mut l = link(Watch::Blocked, None, 0);
+        l.blocked_reason = Some("Permission required: Bash".into());
+        let same = next_step(
+            &l,
+            Watch::Blocked,
+            Some("Permission required: Bash"),
+            &|| None,
+        );
+        assert!(same.effects.is_empty());
+        let next = next_step(
+            &l,
+            Watch::Blocked,
+            Some("Permission required: Edit"),
+            &|| None,
+        );
+        assert_eq!(next.effects[0], Effect::Blocked);
+        assert_eq!(
+            next.blocked_reason.as_deref(),
+            Some("Permission required: Edit")
+        );
+        // Leaving the blocked state forgets the prompt.
+        let working = next_step(&l, Watch::Working, None, &|| None);
+        assert_eq!(working.blocked_reason, None);
+        assert!(working.changed(&l));
     }
 
     #[test]

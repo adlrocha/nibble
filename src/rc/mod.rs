@@ -308,12 +308,38 @@ pub(crate) fn cmd_setup() -> Result<()> {
         )?,
         user_id: prompt_line("Your Slack member ID (profile → ⋮ → Copy member ID)", false)?,
     };
+    // Verify everything before writing: the file is what install.sh takes
+    // as "set up", and a wrong token in it would fail only in the daemon.
+    secrets::validate(&secrets)?;
+    let bot = slack::Slack::new(&secrets.bot_token);
+    let (team, user) = bot.auth_test().context("the bot token was rejected")?;
+    println!("  ✓ bot token: {user} in {team}");
+    bot.open_dm(&secrets.user_id)
+        .context("cannot open a DM with that member ID")?;
+    println!("  ✓ your DM with the app");
+    socket_hello(&slack::Slack::new(&secrets.app_token))
+        .context("the app-level token cannot open Socket Mode (it needs connections:write)")?;
+    println!("  ✓ Socket Mode");
     let path = secrets::save(&secrets)?;
     println!("Saved to {} (mode 600).", path.display());
-    let (team, user) = slack::Slack::new(&secrets.bot_token).auth_test()?;
-    println!("Bot token works: {user} in {team}.");
     println!("Next: systemctl --user enable nibble-rc && systemctl --user restart nibble-rc, then `nibble rc doctor`.");
     Ok(())
+}
+
+/// Open a Socket Mode connection with the app-level token and wait for
+/// Slack's hello: proves the token and its `connections:write` scope.
+fn socket_hello(app: &slack::Slack) -> Result<String> {
+    let url = app.open_connection()?;
+    let mut conn = socket::connect(&url)?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if let socket::Read::Text(t) = conn.read()? {
+            if socket::parse_envelope(&t)? == socket::Envelope::Hello {
+                return Ok("hello received".to_string());
+            }
+        }
+    }
+    bail!("no hello from Slack within 10s")
 }
 
 fn check(label: &str, result: Result<String>) -> bool {
@@ -356,21 +382,7 @@ pub(crate) fn cmd_doctor(db: &Database, cfg: &RcConfig) -> Result<()> {
         );
         ok &= check("your DM with the app", bot.open_dm(&s.user_id));
         let app = slack::Slack::new(&s.app_token);
-        ok &= check(
-            "Socket Mode",
-            app.open_connection().and_then(|url| {
-                let mut conn = socket::connect(&url)?;
-                let deadline = Instant::now() + Duration::from_secs(10);
-                while Instant::now() < deadline {
-                    if let socket::Read::Text(t) = conn.read()? {
-                        if socket::parse_envelope(&t)? == socket::Envelope::Hello {
-                            return Ok("hello received".to_string());
-                        }
-                    }
-                }
-                bail!("no hello from Slack within 10s")
-            }),
-        );
+        ok &= check("Socket Mode", socket_hello(&app));
     }
     ok &= check(
         "zellij",

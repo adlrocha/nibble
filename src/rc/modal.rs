@@ -68,7 +68,7 @@ pub(crate) fn view(origin: &Origin, repos: &[PathBuf], prompt: &str, home: Optio
             "element": {
                 "type": "static_select", "action_id": "value",
                 "initial_option": option("Claude Code", "claude"),
-                "options": [option("Claude Code", "claude"), option("pi", "pi"), option("omp", "omp")]
+                "options": [option("Claude Code", "claude"), option("pi", "pi")]
             }
         }),
     ];
@@ -162,7 +162,6 @@ pub(crate) fn parse_submission(
     };
     let agent = match selected(values, "agent").as_deref() {
         Some("pi") => SpawnAgent::Pi,
-        Some("omp") => SpawnAgent::Omp,
         _ => SpawnAgent::Claude,
     };
     let dir = typed(values, "path")
@@ -322,6 +321,22 @@ mod tests {
         assert_eq!(v["callback_id"], CALLBACK_ID);
         let origin: Origin = serde_json::from_str(v["private_metadata"].as_str().unwrap()).unwrap();
         assert_eq!(origin.channel, "D1");
+    }
+
+    #[test]
+    fn the_form_offers_only_agents_mux_can_restore() {
+        let v = view(
+            &Origin {
+                channel: "D1".into(),
+                thread_ts: None,
+            },
+            &[],
+            "",
+            None,
+        )
+        .to_string();
+        assert!(v.contains("\"value\":\"claude\"") && v.contains("\"value\":\"pi\""));
+        assert!(!v.contains("\"value\":\"omp\""));
     }
 
     #[test]

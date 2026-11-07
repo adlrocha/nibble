@@ -67,7 +67,7 @@ fn parse_env(text: &str) -> HashMap<String, String> {
 
 /// Check each value's shape so a token pasted into the wrong slot fails at
 /// setup, not as an opaque Slack error later.
-fn validate(s: &Secrets) -> Result<()> {
+pub(crate) fn validate(s: &Secrets) -> Result<()> {
     if !s.bot_token.starts_with("xoxb-") {
         bail!("{BOT_KEY} must be a bot token starting with xoxb-");
     }

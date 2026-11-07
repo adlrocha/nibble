@@ -11,8 +11,11 @@ or start a new one from your phone.
   - a permission prompt is posted as a note (reply with a number to pick a
     menu option, or answer at the terminal);
   - Slack's stop button interrupts the turn (Escape in the pane).
-- **`/nibble`** in Slack opens a form: host or sandbox, agent (Claude Code,
-  pi, omp), repo or directory, and the first message. The session opens in a
+- **`/nibble`** in Slack opens a form: host or sandbox, agent (Claude Code
+  or pi), repo or directory, and the first message. omp is not offered:
+  these sessions open in a `nibble mux` session, and mux does not restore
+  omp tabs. A running omp session can still be sent with `/nibble-rc`.
+  The session opens in a
   new tab of zellij session `main` (created in the background and recorded by
   `nibble mux` if it isn't running) and gets its own thread. A plain message
   to the app offers the same form, prefilled with what you wrote.

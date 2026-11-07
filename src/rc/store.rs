@@ -58,6 +58,10 @@ pub(crate) struct Link {
     /// Transcript id of the last reply posted, so it is never posted twice.
     #[serde(default)]
     pub last_reply_id: Option<String>,
+    /// The permission prompt last posted to the thread, so a different
+    /// prompt in the same blocked spell is posted too.
+    #[serde(default)]
+    pub blocked_reason: Option<String>,
     /// Polls since the task went idle without a new reply in its
     /// transcript (the transcript may lag the idle report briefly).
     #[serde(default)]
@@ -90,6 +94,7 @@ impl Link {
             closed: false,
             watch,
             last_reply_id: None,
+            blocked_reason: None,
             idle_checks: 0,
             permalink: None,
             card_ts: None,
@@ -141,13 +146,14 @@ impl Location {
     }
 }
 
-/// Agents a session can be started with from Slack.
+/// Agents a session can be started with from Slack: the ones `nibble mux`
+/// can restore, since these sessions open in a mux-recorded session (omp
+/// panes are not restored, so omp is offered only through `/nibble-rc`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum SpawnAgent {
     Claude,
     Pi,
-    Omp,
 }
 
 impl SpawnAgent {
@@ -155,7 +161,6 @@ impl SpawnAgent {
         match self {
             SpawnAgent::Claude => "claude",
             SpawnAgent::Pi => "pi",
-            SpawnAgent::Omp => "omp",
         }
     }
 }
@@ -183,6 +188,13 @@ pub(crate) struct PendingSpawn {
     /// Replies sent in the thread before the agent was ready, in order.
     #[serde(default)]
     pub queued: Vec<String>,
+    /// How many of the first message and queued replies were typed, so a
+    /// retried start never types one twice.
+    #[serde(default)]
+    pub typed: usize,
+    /// The last transient failure, reported if the start times out.
+    #[serde(default)]
+    pub last_error: Option<String>,
 }
 
 fn get<T: DeserializeOwned>(db: &Database, key: &str) -> Result<Option<T>> {

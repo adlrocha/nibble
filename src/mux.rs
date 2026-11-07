@@ -280,9 +280,7 @@ fn cmd_open(db: &Database, name: &str) -> Result<()> {
                 .with_context(|| format!("failed to write {}", layout_path.display()))?;
             // Keep the full record (skipped panes included) until the new
             // session's watcher records what actually came back.
-            let mut manifest = manifest.unwrap_or_default();
-            manifest.epoch = Some(Utc::now());
-            save_manifest(db, name, &manifest)?;
+            begin_epoch(db, name, manifest)?;
             spawn_watcher(name)?;
             // Last step before zellij takes over: everything that could still
             // fail (layout, record, watcher) is in place, so a failure above
@@ -308,9 +306,7 @@ fn cmd_open(db: &Database, name: &str) -> Result<()> {
             ]))
         }
         OpenPlan::Resurrect | OpenPlan::Create => {
-            let mut manifest = manifest.unwrap_or_default();
-            manifest.epoch = Some(Utc::now());
-            save_manifest(db, name, &manifest)?;
+            begin_epoch(db, name, manifest)?;
             spawn_watcher(name)?;
             if state == ZellijState::Dead {
                 Err(exec_zellij(&["attach", name]))
@@ -945,9 +941,7 @@ pub(crate) fn ensure_background_session(db: &Database, name: &str) -> Result<()>
         BackgroundPlan::Start => {}
     }
     // Same bookkeeping as `nibble mux NAME` creating or resurrecting it.
-    let mut manifest = manifest.unwrap_or_default();
-    manifest.epoch = Some(Utc::now());
-    save_manifest(db, name, &manifest)?;
+    begin_epoch(db, name, manifest)?;
     let out = Command::new("zellij")
         .args(["attach", "--create-background", name])
         .env_remove("ZELLIJ")
@@ -962,6 +956,15 @@ pub(crate) fn ensure_background_session(db: &Database, name: &str) -> Result<()>
         );
     }
     spawn_watcher(name)
+}
+
+/// Start a new epoch for a session nibble is about to (re)create: zellij
+/// restarts pane ids in a new session, so only tasks registered from now on
+/// can belong to its panes. Shared by every path that starts a session.
+fn begin_epoch(db: &Database, name: &str, manifest: Option<Manifest>) -> Result<()> {
+    let mut manifest = manifest.unwrap_or_default();
+    manifest.epoch = Some(Utc::now());
+    save_manifest(db, name, &manifest)
 }
 
 /// Record a running session (an empty manifest if nibble has none) and make
