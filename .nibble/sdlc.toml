@@ -9,4 +9,4 @@ main_is_staging = false
 # always_human = ["src/auth/**"]  # extra paths that always need a person
 
 [merge]
-method = "squash"  # squash, merge, or rebase; used by `nibble sdlc merge`
+method = "merge"  # squash, merge, or rebase; used by `nibble sdlc merge`. main lands merge commits
