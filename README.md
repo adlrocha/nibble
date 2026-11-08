@@ -269,37 +269,13 @@ nibble sandbox attach . --btw
 
 Detach with `exit` or `Ctrl+C`.
 
-### What gets injected into your repo
+### Sandbox notes
 
-When a sandbox spawns, nibble writes agent instructions into two files inside the repo:
+When a sandbox spawns, nibble writes short notes on the environment (sudo, forwarded ports, the toolchain it detected) to `/etc/nibble/sandbox.md` inside the container. `nibble sandbox attach` passes them to claude, pi and omp with `--append-system-prompt`.
 
-| File | Purpose |
-|------|---------|
-| `AGENTS.md` | Sandbox environment info, toolchain detection, and skills/lessons guidance |
-| `.claude/CLAUDE.md` | Claude Code entry point — first line is `@../AGENTS.md` which imports the file above |
+Nothing is written to your repository or to `~/.claude`, `~/.pi` or `~/.omp`, which are mounted from the host. The repository's own `AGENTS.md` and `CLAUDE.md` still apply as usual. Sandboxes spawned by an older nibble have no notes file and launch without them.
 
-**How it works:**
-
-- If the file doesn't exist, nibble creates it with just the injected block.
-- If the file exists but has no nibble markers, nibble **appends** the block (your content is untouched).
-- If the file exists and has nibble markers (`<!-- nibble-sandbox:begin -->` / `<!-- nibble-sandbox:end -->`), nibble **replaces** the marked block in-place.
-
-Your own content outside the sentinel markers is never modified.
-
-**Git impact:** The repo is bind-mounted from the host, so these injected changes are visible to git. If your repo tracks `AGENTS.md`, you'll see a diff. If it doesn't, you'll see a new untracked file. In both cases, these are sandbox-local artifacts — discard them with:
-
-```bash
-git checkout -- AGENTS.md          # if your repo tracks AGENTS.md
-git clean -fd AGENTS.md .claude/   # if they're untracked
-```
-
-A recommended `.gitignore` addition for repos that use sandboxes:
-
-```
-.claude/
-```
-
-(`AGENTS.md` is not added to `.gitignore` automatically because many projects legitimately track it.)
+Older nibble versions wrote a `<!-- nibble-sandbox:begin -->` block into `AGENTS.md` and an `@../AGENTS.md` line into `.claude/CLAUDE.md`. Delete those by hand if they are still in a repository.
 
 ### Watch container logs
 
@@ -677,7 +653,7 @@ src/
 ├── models/task.rs           # Task, TaskStatus, SandboxType, SandboxConfig
 ├── db/mod.rs                # SQLite operations, schema migrations
 ├── sandbox/                 # Podman sandboxes, Hermes, git worktrees
-├── sandbox_instructions/    # AGENTS.md blocks injected into sandboxed repos
+├── sandbox_instructions/    # sandbox notes appended to the agent's system prompt
 ├── status.rs                # `nibble status` / sidebar / `report status`
 ├── mux.rs                   # `nibble mux`: recoverable zellij sessions
 ├── lock.rs                  # Single-instance file locks (mux watcher, rc daemon)
