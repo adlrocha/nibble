@@ -79,7 +79,7 @@ fi
 step "Stopping services"
 
 for svc in nibble-listener nibble-resume nibble-reset nibble-cleanup nibble-web \
-           nibble-usage; do
+           nibble-usage nibble-rc; do
     if systemctl --user is-active --quiet "$svc.service" 2>/dev/null; then
         systemctl --user stop "$svc.service"
         ok "Stopped $svc.service"
@@ -96,7 +96,7 @@ done
 step "Removing systemd services"
 
 for svc in nibble-listener nibble-resume nibble-reset nibble-cleanup nibble-web \
-           nibble-usage; do
+           nibble-usage nibble-rc; do
     if [ -f "$SYSTEMD_DIR/$svc.service" ]; then
         systemctl --user disable "$svc.service" 2>/dev/null || true
         rm -f "$SYSTEMD_DIR/$svc.service"
@@ -198,6 +198,12 @@ if [ -f "$CLAUDE_SETTINGS" ] && command -v jq >/dev/null 2>&1; then
     fi
 fi
 
+# Slash commands install.sh copied from claude-commands/ (all nibble-*.md).
+for dest in "$HOME"/.claude/commands/nibble-*.md; do
+    [ -f "$dest" ] || continue
+    rm -f "$dest" && ok "Removed Claude command /$(basename "$dest" .md)"
+done
+
 # ── 9. Remove config and data ────────────────────────────────────────────────
 step "Removing config and data"
 
@@ -207,8 +213,22 @@ if [ "$KEEP_CONFIG" = false ]; then
         rm -rf "$NIBBLE_DIR"
         ok "Removed $NIBBLE_DIR/"
     fi
+    # Slack credentials from `nibble rc setup` (kept outside ~/.nibble so
+    # sandboxes cannot read them).
+    RC_SECRETS="${XDG_CONFIG_HOME:-$HOME/.config}/nibble/slack.env"
+    if [ -f "$RC_SECRETS" ]; then
+        rm -f "$RC_SECRETS"
+        rmdir "$(dirname "$RC_SECRETS")" 2>/dev/null || true
+        ok "Removed $RC_SECRETS"
+    fi
+    # Its private state (which thread drives which pane).
+    RC_STATE="${XDG_STATE_HOME:-$HOME/.local/state}/nibble/rc"
+    if [ -d "$RC_STATE" ]; then
+        rm -rf "$RC_STATE"
+        ok "Removed $RC_STATE/"
+    fi
 else
-    warn "Keeping $HOME/.nibble/ (--keep-config)"
+    warn "Keeping $HOME/.nibble/ and the Slack credentials and state (--keep-config)"
 fi
 
 # ── 9b. Remove the one-command install's source checkout ─────────────────────

@@ -361,32 +361,22 @@ fi
 # ── 3. Install binaries ───────────────────────────────────────────────────────
 step "Installing binaries to $BIN_DIR"
 
-# Also stop the web UI so we can overwrite the binary if it's running.
-# (It is restarted unconditionally further down, in 5d.)
-if systemctl --user is-active --quiet nibble-web.service 2>/dev/null; then
+# Stop the long-running services so the binary can be overwritten. The web
+# UI is restarted unconditionally further down (5d); the daemons only if
+# they were running.
+RESTART_AFTER_UPGRADE=()
+for svc in nibble-web nibble-quota-watch nibble-rc; do
+    systemctl --user is-active --quiet "$svc.service" 2>/dev/null || continue
     if command -v timeout >/dev/null 2>&1; then
-        timeout 5 systemctl --user stop nibble-web.service 2>/dev/null || true
+        timeout 5 systemctl --user stop "$svc.service" 2>/dev/null || true
     else
-        systemctl --user stop --no-block nibble-web.service 2>/dev/null || true
-        sleep 1
-        systemctl --user kill --signal=SIGKILL nibble-web.service 2>/dev/null || true
-    fi
-    ok "Stopped nibble-web.service for upgrade"
-fi
-
-# Also stop the quota-watch daemon before overwriting the binary.
-QUOTA_WATCH_WAS_ACTIVE=false
-if systemctl --user is-active --quiet nibble-quota-watch.service 2>/dev/null; then
-    QUOTA_WATCH_WAS_ACTIVE=true
-    if command -v timeout >/dev/null 2>&1; then
-        timeout 5 systemctl --user stop nibble-quota-watch.service 2>/dev/null || true
-    else
-        systemctl --user stop --no-block nibble-quota-watch.service 2>/dev/null || true
+        systemctl --user stop --no-block "$svc.service" 2>/dev/null || true
         sleep 2
-        systemctl --user kill --signal=SIGKILL nibble-quota-watch.service 2>/dev/null || true
+        systemctl --user kill --signal=SIGKILL "$svc.service" 2>/dev/null || true
     fi
-    ok "Stopped nibble-quota-watch.service for upgrade"
-fi
+    ok "Stopped $svc.service for upgrade"
+    [ "$svc" = nibble-web ] || RESTART_AFTER_UPGRADE+=("$svc")
+done
 
 cp "$REPO_DIR/target/release/nibble" "$BIN_DIR/nibble.new"
 chmod +x "$BIN_DIR/nibble.new"
@@ -396,10 +386,13 @@ ok "nibble"
 
 # Restart services that were running before.
 
-if [ "$QUOTA_WATCH_WAS_ACTIVE" = true ]; then
-    systemctl --user start nibble-quota-watch.service 2>/dev/null || warn "Could not restart nibble-quota-watch.service"
-    ok "Restarted nibble-quota-watch.service"
-fi
+for svc in "${RESTART_AFTER_UPGRADE[@]}"; do
+    if systemctl --user start "$svc.service" 2>/dev/null; then
+        ok "Restarted $svc.service"
+    else
+        warn "Could not restart $svc.service"
+    fi
+done
 
 # Warn if BIN_DIR is not on PATH
 if ! echo "$PATH" | tr ':' '\n' | grep -qx "$BIN_DIR"; then
@@ -693,6 +686,53 @@ else
     warn "systemd user session not available. Run manually: nibble quota-watch"
 fi
 
+# ── 5e2. Slack remote control (nibble rc) ─────────────────────────────────────
+# Relays agent sessions to and from Slack (see docs/rc.md). Enabled only once
+# `nibble rc setup` has stored the Slack credentials; until then the unit is
+# installed but left off. PATH and SHELL are taken from this install so
+# sessions it starts find the same agents, podman and shell as your terminal.
+step "Installing Slack remote-control daemon"
+
+RC_SECRETS="${XDG_CONFIG_HOME:-$HOME/.config}/nibble/slack.env"
+cat > "$SYSTEMD_DIR/nibble-rc.service" << UNIT
+[Unit]
+Description=Nibble — remote-control agent sessions from Slack
+After=default.target network-online.target
+
+[Service]
+Type=simple
+ExecStart=$BIN_DIR/nibble rc daemon
+# Only the daemon is stopped on stop/restart/upgrade: the zellij session and
+# mux watcher it may start in the background (and every agent in them) live
+# on, as they would had you started them from a terminal.
+KillMode=process
+Restart=on-failure
+RestartSec=30
+Environment=HOME=%h
+Environment="PATH=$BIN_DIR:$PATH"
+Environment="SHELL=${SHELL:-/bin/sh}"
+$( [ -n "${XDG_CONFIG_HOME:-}" ] && printf 'Environment="XDG_CONFIG_HOME=%s"' "$XDG_CONFIG_HOME" )
+$( [ -n "${XDG_STATE_HOME:-}" ] && printf 'Environment="XDG_STATE_HOME=%s"' "$XDG_STATE_HOME" )
+StandardOutput=append:%h/.nibble/logs/rc.log
+StandardError=append:%h/.nibble/logs/rc.log
+
+[Install]
+WantedBy=default.target
+UNIT
+
+if systemctl --user daemon-reload 2>/dev/null; then
+    if [ -f "$RC_SECRETS" ]; then
+        systemctl --user enable nibble-rc.service 2>/dev/null || true
+        systemctl --user restart nibble-rc.service 2>/dev/null \
+            && ok "Slack remote control enabled (nibble-rc.service)" \
+            || warn "Could not start nibble-rc.service. Check: nibble rc doctor"
+    else
+        ok "nibble-rc.service installed (off until set up: nibble rc setup, then systemctl --user enable --now nibble-rc)"
+    fi
+else
+    warn "systemd user session not available. Run manually: nibble rc daemon"
+fi
+
 # ── 5f. Agent usage records (omarchy agents panel) ────────────────────────────
 # Writes Z.AI / Kimi / Grok subscription quota records into
 # ~/.local/state/omarchy/agents/usage/ every 10 minutes, where Omarchy's
@@ -892,6 +932,14 @@ if [ -f "$CLAUDE_SETTINGS" ] && command -v jq >/dev/null 2>&1 \
 fi
 
 bash "$REPO_DIR/scripts/setup-claude-hooks.sh"
+
+# Slash commands nibble provides inside Claude Code (/nibble-rc).
+mkdir -p "$HOME/.claude/commands"
+for cmd_file in "$REPO_DIR/claude-commands/"*.md; do
+    [ -f "$cmd_file" ] || continue
+    cp "$cmd_file" "$HOME/.claude/commands/$(basename "$cmd_file")"
+    ok "Claude command: /$(basename "$cmd_file" .md)"
+done
 
 # ── 6b. Zellij keybindings ───────────────────────────────────────────────────
 # Alt-a jumps to the agents sidebar; Alt-v splits the pane and opens vert on

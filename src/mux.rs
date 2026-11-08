@@ -24,10 +24,11 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use crate::db::Database;
+use crate::lock::{try_lock_in, InstanceLock};
 use crate::models::{AgentType, SandboxType, Task, TaskStatus};
 use crate::sandbox::podman::PodmanSandbox;
 use crate::sandbox::ContainerStatus;
-use crate::status::{PaneListError, ZellijPane};
+use crate::status::{pane_at_shell, PaneListError, ZellijPane};
 
 /// Session opened by a bare `nibble mux`.
 pub(crate) const DEFAULT_SESSION: &str = "main";
@@ -48,11 +49,6 @@ const LOCK_WAIT: Duration = Duration::from_secs(90);
 const RESUME_FLAG: &str = "--resume";
 /// kv_store key prefix for session snapshots.
 const KV_PREFIX: &str = "mux:";
-/// Shells whose presence as a pane's foreground process means no agent runs
-/// there (the agent exited back to the prompt, or never started).
-const SHELLS: &[&str] = &[
-    "sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu", "elvish", "xonsh",
-];
 
 /// What nibble remembers about a mux session.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -247,10 +243,7 @@ fn cmd_open(db: &Database, name: &str) -> Result<()> {
             );
         }
         // Adopt the session we are in: start recording its agents.
-        if load_manifest(db, name)?.is_none() {
-            save_manifest(db, name, &Manifest::default())?;
-        }
-        spawn_watcher(name)?;
+        record_running_session(db, name, load_manifest(db, name)?.as_ref())?;
         println!("Mux session '{name}' is now recorded. Its agents will come back after a crash: run `nibble mux {name}`.");
         return Ok(());
     }
@@ -268,10 +261,7 @@ fn cmd_open(db: &Database, name: &str) -> Result<()> {
     };
     match plan_open(state, restorable.as_ref()) {
         OpenPlan::Attach => {
-            if manifest.is_none() {
-                save_manifest(db, name, &Manifest::default())?;
-            }
-            spawn_watcher(name)?;
+            record_running_session(db, name, manifest.as_ref())?;
             Err(exec_zellij(&["attach", name]))
         }
         OpenPlan::Restore { discard_dead } => {
@@ -291,9 +281,7 @@ fn cmd_open(db: &Database, name: &str) -> Result<()> {
                 .with_context(|| format!("failed to write {}", layout_path.display()))?;
             // Keep the full record (skipped panes included) until the new
             // session's watcher records what actually came back.
-            let mut manifest = manifest.unwrap_or_default();
-            manifest.epoch = Some(Utc::now());
-            save_manifest(db, name, &manifest)?;
+            begin_epoch(db, name, manifest)?;
             spawn_watcher(name)?;
             // Last step before zellij takes over: everything that could still
             // fail (layout, record, watcher) is in place, so a failure above
@@ -319,9 +307,7 @@ fn cmd_open(db: &Database, name: &str) -> Result<()> {
             ]))
         }
         OpenPlan::Resurrect | OpenPlan::Create => {
-            let mut manifest = manifest.unwrap_or_default();
-            manifest.epoch = Some(Utc::now());
-            save_manifest(db, name, &manifest)?;
+            begin_epoch(db, name, manifest)?;
             spawn_watcher(name)?;
             if state == ZellijState::Dead {
                 Err(exec_zellij(&["attach", name]))
@@ -504,7 +490,7 @@ fn kdl_str(s: &str) -> String {
 }
 
 /// A POSIX shell single-quoted word.
-fn sh_quote(s: &str) -> String {
+pub(crate) fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
@@ -529,8 +515,7 @@ fn snapshot(
         // For a pane started with a command (restored panes), zellij keeps
         // reporting that launch command, so only a pane_command that
         // differs from it is a live reading of the foreground process.
-        let foreground_known = pane.pane_command != pane.terminal_command;
-        if foreground_known && pane.pane_command.as_deref().is_some_and(is_shell) {
+        if pane_at_shell(pane) {
             continue;
         }
         let in_pane = |t: &&Task| {
@@ -595,15 +580,6 @@ fn mux_pane(task: &Task, pane: &ZellijPane) -> MuxPane {
 /// Agents `plan_resume` knows how to bring back.
 fn resumable_agent(agent: &AgentType) -> bool {
     matches!(agent, AgentType::ClaudeCode | AgentType::Pi)
-}
-
-/// Whether a pane's foreground command is a plain shell.
-fn is_shell(command: &str) -> bool {
-    let Some(program) = command.split_whitespace().next() else {
-        return false;
-    };
-    let base = program.rsplit('/').next().unwrap_or(program);
-    SHELLS.contains(&base.trim_start_matches('-'))
 }
 
 /// The task id in a restored pane's command, as written by
@@ -688,13 +664,7 @@ impl Debounce {
     }
 }
 
-/// Holds an exclusive lock on `~/.nibble/mux/<name>.lock` for the watcher's
-/// lifetime; released by the kernel when the process exits.
-struct WatcherLock {
-    _file: std::fs::File,
-}
-
-fn try_lock(name: &str) -> Result<Option<WatcherLock>> {
+fn try_lock(name: &str) -> Result<Option<InstanceLock>> {
     try_lock_in(&mux_dir()?, name)
 }
 
@@ -704,7 +674,7 @@ fn wait_for_lock(
     name: &str,
     timeout: Duration,
     interval: Duration,
-) -> Result<Option<WatcherLock>> {
+) -> Result<Option<InstanceLock>> {
     let deadline = std::time::Instant::now() + timeout;
     loop {
         if let Some(lock) = try_lock_in(dir, name)? {
@@ -715,28 +685,6 @@ fn wait_for_lock(
         }
         std::thread::sleep(interval);
     }
-}
-
-/// `None` when another process (a running watcher) holds the lock.
-fn try_lock_in(dir: &Path, name: &str) -> Result<Option<WatcherLock>> {
-    use std::os::fd::AsRawFd;
-    let path = dir.join(format!("{name}.lock"));
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&path)
-        .with_context(|| format!("failed to open {}", path.display()))?;
-    // SAFETY: flock on a valid, owned file descriptor.
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if rc != 0 {
-        let err = std::io::Error::last_os_error();
-        if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
-            return Ok(None);
-        }
-        return Err(anyhow::Error::new(err).context("failed to lock mux watcher"));
-    }
-    Ok(Some(WatcherLock { _file: file }))
 }
 
 fn log_line(name: &str, msg: &str) {
@@ -913,6 +861,116 @@ fn plan_resume(
     })
 }
 
+/// What `nibble rc` may do so a tab can be opened in a session from
+/// outside it, given the same inputs `nibble mux NAME` decides from.
+#[derive(Debug, PartialEq)]
+enum BackgroundPlan {
+    /// The session is running.
+    Ready,
+    /// Start it (fresh, or zellij's resurrectable copy) in the background.
+    Start,
+    /// It is down with recorded agent tabs. Only `nibble mux NAME` rebuilds
+    /// those (each pane resuming its conversation); starting it here would
+    /// let the watcher record the session without them and forget them.
+    Refuse { tabs: usize },
+}
+
+fn plan_background(state: ZellijState, manifest: Option<&Manifest>) -> BackgroundPlan {
+    match plan_open(state, manifest) {
+        OpenPlan::Attach => BackgroundPlan::Ready,
+        OpenPlan::Create | OpenPlan::Resurrect => BackgroundPlan::Start,
+        OpenPlan::Restore { .. } => BackgroundPlan::Refuse {
+            tabs: manifest.map_or(0, |m| m.tabs.len()),
+        },
+    }
+}
+
+/// Make sure zellij session `name` is running so tabs can be opened in it
+/// from outside (`nibble rc`). A live session is used as it is; a missing
+/// or dead one without recorded agents is started in the background and
+/// recorded like `nibble mux NAME`. A session that is down with recorded
+/// agent tabs is refused: `nibble mux NAME` must restore it first.
+pub(crate) fn ensure_background_session(db: &Database, name: &str) -> Result<()> {
+    validate_session_name(name)?;
+    let state = zellij_session_state(name)?;
+    let manifest = load_manifest(db, name)?;
+    // Judge a down session by what `nibble mux NAME` would actually
+    // restore (the same filter cmd_open applies), not the raw record.
+    let restorable = match (&manifest, state) {
+        (Some(m), ZellijState::Dead | ZellijState::Missing) => Some(filter_restorable(m, &|id| {
+            resume_plan_for(db, id).map(drop)
+        })?),
+        (m, _) => m.clone(),
+    };
+    match plan_background(state, restorable.as_ref()) {
+        // Same as `nibble mux NAME` attaching: the tab opened next comes
+        // back after a crash.
+        BackgroundPlan::Ready => return record_running_session(db, name, manifest.as_ref()),
+        BackgroundPlan::Refuse { tabs } => bail!(
+            "zellij session '{name}' is not running and nibble mux has {tabs} recorded agent tab(s) \
+             for it. Run `nibble mux {name}` to bring them back, then start the session again"
+        ),
+        BackgroundPlan::Start => {}
+    }
+    // Same bookkeeping as `nibble mux NAME` creating or resurrecting it.
+    begin_epoch(db, name, manifest)?;
+    let out = Command::new("zellij")
+        .args(["attach", "--create-background", name])
+        .env_remove("ZELLIJ")
+        .env_remove("ZELLIJ_SESSION_NAME")
+        .env_remove("ZELLIJ_PANE_ID")
+        .output()
+        .context("zellij is not installed or not on PATH")?;
+    if !out.status.success() {
+        bail!(
+            "could not start zellij session '{name}': {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    spawn_watcher(name)
+}
+
+/// Start a new epoch for a session nibble is about to (re)create: zellij
+/// restarts pane ids in a new session, so only tasks registered from now on
+/// can belong to its panes. Shared by every path that starts a session.
+fn begin_epoch(db: &Database, name: &str, manifest: Option<Manifest>) -> Result<()> {
+    let mut manifest = manifest.unwrap_or_default();
+    manifest.epoch = Some(Utc::now());
+    save_manifest(db, name, &manifest)
+}
+
+/// Record a running session (an empty manifest if nibble has none) and make
+/// sure a watcher keeps its snapshot. Shared by `nibble mux NAME` (adopting
+/// the session it runs in, or attaching to it) and `nibble rc` opening a tab
+/// in it.
+fn record_running_session(db: &Database, name: &str, manifest: Option<&Manifest>) -> Result<()> {
+    if manifest.is_none() {
+        save_manifest(db, name, &Manifest::default())?;
+    }
+    ensure_watcher(name)
+}
+
+/// Start the session's watcher unless one is running (it holds the lock).
+fn ensure_watcher(name: &str) -> Result<()> {
+    match try_lock(name)? {
+        // Nobody holds it: release it for the watcher we start.
+        Some(lock) => {
+            drop(lock);
+            spawn_watcher(name)
+        }
+        None => Ok(()),
+    }
+}
+
+/// Fail as a restore does when a nibble agent wrapper is not installed.
+pub(crate) fn require_wrapper(path: &Path) -> Result<()> {
+    if path.exists() {
+        Ok(())
+    } else {
+        Err(MissingWrapper(path.to_path_buf()).into())
+    }
+}
+
 /// A nibble agent wrapper is not installed: fixable by re-running
 /// install.sh, so restores stop instead of skipping the agent.
 #[derive(Debug)]
@@ -931,7 +989,7 @@ impl std::fmt::Display for MissingWrapper {
 impl std::error::Error for MissingWrapper {}
 
 /// Where install.sh puts the agent wrappers (`~/.nibble/wrappers`).
-fn wrappers_dir() -> Result<PathBuf> {
+pub(crate) fn wrappers_dir() -> Result<PathBuf> {
     Ok(crate::db::ensure_data_dir()?.join("wrappers"))
 }
 
@@ -1161,6 +1219,7 @@ mod tests {
 
     #[test]
     fn is_shell_matches_shell_basenames_only() {
+        use crate::status::is_shell;
         assert!(is_shell("zsh"));
         assert!(is_shell("/usr/bin/bash --login"));
         assert!(is_shell("-zsh"));
@@ -1235,6 +1294,35 @@ mod tests {
         assert_eq!(parse_session_state(listing, "mainly"), ZellijState::Live);
         assert_eq!(parse_session_state(listing, "nope"), ZellijState::Missing);
         assert_eq!(parse_session_state("", "main"), ZellijState::Missing);
+    }
+
+    #[test]
+    fn background_start_never_bypasses_a_restore() {
+        let recorded = Manifest {
+            tabs: one_tab(&[("t1", Some("/r"))]),
+            ..Manifest::default()
+        };
+        let empty = Manifest::default();
+        assert_eq!(
+            plan_background(ZellijState::Live, Some(&recorded)),
+            BackgroundPlan::Ready
+        );
+        for state in [ZellijState::Dead, ZellijState::Missing] {
+            assert_eq!(
+                plan_background(state, Some(&recorded)),
+                BackgroundPlan::Refuse { tabs: 1 },
+                "{state:?} with recorded agents must be left to `nibble mux`"
+            );
+            assert_eq!(plan_background(state, Some(&empty)), BackgroundPlan::Start);
+            assert_eq!(plan_background(state, None), BackgroundPlan::Start);
+            // Tabs `nibble mux` could not restore (their tasks are gone) do
+            // not block a start: the filtered record is what is judged.
+            let unrestorable = filter_restorable(&recorded, &|_| bail!("task gone")).unwrap();
+            assert_eq!(
+                plan_background(state, Some(&unrestorable)),
+                BackgroundPlan::Start
+            );
+        }
     }
 
     #[test]
