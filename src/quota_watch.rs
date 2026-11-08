@@ -832,6 +832,8 @@ fn podman_exec_base(task: &Task, cwd: &str, bin: &str) -> Command {
     if let Some(cid) = task.container_id.as_deref() {
         cmd.arg(cid);
     }
+    // Headless turns get the sandbox notes like attached sessions do.
+    cmd.args(crate::sandbox::context::exec_with_sandbox_prompt());
     cmd.arg(bin);
     cmd
 }
@@ -944,6 +946,20 @@ pub fn run_once(cfg: QuotaWatchConfig, db_path: PathBuf) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn headless_sandbox_turns_carry_the_sandbox_notes() {
+        let mut task = Task::new("t1".to_string(), AgentType::Pi, "x".to_string(), None, None);
+        task.container_id = Some("cid".to_string());
+        let cmd = podman_exec_base(&task, "/repo", "pi");
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let cid = args.iter().position(|a| a == "cid").unwrap();
+        let [shell, flag, script] = crate::sandbox::context::exec_with_sandbox_prompt();
+        assert_eq!(&args[cid + 1..], [shell, flag, script, "pi".to_string()]);
+    }
 
     fn now() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 9, 25, 12, 0, 0).unwrap()

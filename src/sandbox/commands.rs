@@ -152,6 +152,11 @@ pub(crate) fn cmd_sandbox_spawn(db: &Database, opts: SpawnOptions) -> Result<Str
                     &existing_task_id[..existing_task_id.len().min(8)]
                 );
                 eprintln!("   Attaching to the existing sandbox instead of spawning a new one.");
+                // Spawning again is how notes get refreshed (toolchain changes,
+                // an upgraded nibble), and where a stale repo block is flagged.
+                if task.agent_type != AgentType::Hermes {
+                    inject_sandbox_context(std::path::Path::new(&abs_repo_path_early), cid);
+                }
                 eprintln!();
                 if no_attach {
                     eprintln!("Attach with:");
@@ -317,12 +322,12 @@ pub(crate) fn cmd_sandbox_spawn(db: &Database, opts: SpawnOptions) -> Result<Str
         .unwrap_or_else(|| repo_path.clone());
 
     // Post-spawn setup (skip for Hermes)
-    // Pi-family setup: install the agent, run setup.sh, inject AGENTS.md
+    // Pi-family setup: install the agent, run setup.sh, write the sandbox notes
     if !hermes {
         install_spawn_agent(&info.id, pi_impl);
         restore_claude_credentials(&info.id);
         run_repo_setup_script(&repo, &info.id)?;
-        inject_sandbox_context(&repo, &repo_name, &info.id);
+        inject_sandbox_context(&repo, &info.id);
     }
 
     let title = task_desc.unwrap_or_else(|| format!("[{}:sandbox]", repo_name));
@@ -722,28 +727,41 @@ fn run_repo_setup_script(repo: &std::path::Path, container_id: &str) -> Result<(
     Ok(())
 }
 
-/// Detect project toolchains and write AGENTS.md + CLAUDE.md into the container.
-fn inject_sandbox_context(repo: &std::path::Path, repo_name: &str, container_id: &str) {
-    let toolchains = crate::sandbox::context::detect_toolchains(repo);
-    let agents_md = crate::sandbox::context::build_sandbox_agents_md(repo_name, &toolchains);
-    let container_cwd = container_working_dir(repo);
-    match crate::sandbox::context::inject_sandbox_claude_md(
-        container_id,
-        &container_cwd,
-        &agents_md,
-    ) {
+/// Detect project toolchains and write the sandbox notes into the container.
+///
+/// The notes reach the agent as an appended system prompt (see
+/// [`crate::sandbox::context::SANDBOX_PROMPT_PATH`]); the repository is never
+/// written to.
+fn inject_sandbox_context(repo: &std::path::Path, container_id: &str) {
+    use crate::sandbox::context::{build_sandbox_prompt, detect_toolchains, write_sandbox_prompt};
+
+    if crate::sandbox::context::has_legacy_sandbox_block(repo) {
+        eprintln!(
+            "  Warning:   AGENTS.md still has the <!-- nibble-sandbox:begin --> block an older"
+        );
+        eprintln!(
+            "             nibble wrote. It is no longer updated; delete it (and an @../AGENTS.md"
+        );
+        eprintln!("             line in .claude/CLAUDE.md if nibble added it).");
+    }
+    let repo_name = repo
+        .canonicalize()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+        .unwrap_or_else(|| repo.display().to_string());
+    let toolchains = detect_toolchains(repo);
+    let notes = build_sandbox_prompt(&repo_name, &toolchains);
+    match write_sandbox_prompt(container_id, &notes) {
         Ok(()) => {
-            if toolchains.is_empty() {
-                println!("  Context:   AGENTS.md + CLAUDE.md updated (no toolchain detected)");
+            let detected = if toolchains.is_empty() {
+                "no toolchain detected".to_string()
             } else {
                 let names: Vec<&str> = toolchains.iter().map(|(e, _, _)| *e).collect();
-                println!(
-                    "  Context:   AGENTS.md + CLAUDE.md updated (detected: {})",
-                    names.join(", ")
-                );
-            }
+                format!("detected: {}", names.join(", "))
+            };
+            println!("  Context:   sandbox notes passed as a system prompt ({detected})");
         }
-        Err(e) => eprintln!("  Warning:   Could not write AGENTS.md/CLAUDE.md: {e:#}"),
+        Err(e) => eprintln!("  Warning:   Could not write the sandbox notes: {e:#}"),
     }
 }
 
@@ -944,6 +962,12 @@ pub(crate) fn cmd_sandbox_bash(db: &Database, task_id: String) -> Result<()> {
         task.title, container_id
     );
     eprintln!("(Type 'exit' or press Ctrl+D to detach — the container keeps running)");
+    if task.agent_type != AgentType::Hermes {
+        eprintln!(
+            "(Agents started here skip the sandbox notes: pass --append-system-prompt \"$(cat {})\")",
+            crate::sandbox::context::SANDBOX_PROMPT_PATH
+        );
+    }
 
     let repo_path = task
         .context
@@ -1582,11 +1606,18 @@ pub(crate) fn cmd_sandbox_attach(
         SelectedAgent::Pi | SelectedAgent::Omp => {
             let is_omp = agent == SelectedAgent::Omp;
             let bin = if is_omp { "omp" } else { "pi" };
-            let install = if is_omp {
+            let install_step = if is_omp {
                 "command -v omp >/dev/null 2>&1 || curl -fsSL https://omp.sh/install | sh"
             } else {
                 "command -v pi >/dev/null 2>&1 || sudo npm install -g @earendil-works/pi-coding-agent"
             };
+            // After installing, shadow the binary so every launch below carries
+            // the sandbox notes as an appended system prompt.
+            let install = format!(
+                "{install_step}; {}",
+                crate::sandbox::context::pi_prompt_wrapper(bin)
+            );
+            let install = install.as_str();
             // omp is a fork of pi with an identical session format. `omp --resume`
             // accepts a session ID or file path, so ~/.pi sessions (also mounted)
             // stay resumable for continuity after migrating from pi to omp.
@@ -1744,7 +1775,13 @@ pub(crate) fn cmd_sandbox_attach(
             }
         }
         SelectedAgent::Claude => {
-            let claude = "/home/node/.local/bin/claude --dangerously-skip-permissions";
+            // `nibble_prompt` is loaded once at the start of the command (below),
+            // so both halves of the resume fallback carry the sandbox notes.
+            let claude = format!(
+                "/home/node/.local/bin/claude --dangerously-skip-permissions {}",
+                crate::sandbox::context::SANDBOX_PROMPT_ARGS
+            );
+            let setup = crate::sandbox::context::sandbox_prompt_setup();
             if fresh && !btw {
                 if let Some(sid) = claude_session_id.as_deref() {
                     backup_session_file(sid);
@@ -1759,13 +1796,13 @@ pub(crate) fn cmd_sandbox_attach(
 
             if btw {
                 let side_id = uuid::Uuid::new_v4();
-                format!("cd {container_dir} && {claude} --session-id {side_id}")
+                format!("{setup}; cd {container_dir} && {claude} --session-id {side_id}")
             } else if let Some(sid) = claude_session_id.as_deref() {
                 format!(
-                    "cd {container_dir} && {claude} --resume {sid} 2>&1 || {claude} --session-id {sid}"
+                    "{setup}; cd {container_dir} && {{ {claude} --resume {sid} 2>&1 || {claude} --session-id {sid}; }}"
                 )
             } else {
-                format!("cd {container_dir} && {claude}")
+                format!("{setup}; cd {container_dir} && {claude}")
             }
         }
     };
