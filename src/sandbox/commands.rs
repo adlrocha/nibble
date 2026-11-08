@@ -155,12 +155,7 @@ pub(crate) fn cmd_sandbox_spawn(db: &Database, opts: SpawnOptions) -> Result<Str
                 // Spawning again is how notes get refreshed (toolchain changes,
                 // an upgraded nibble), and where a stale repo block is flagged.
                 if task.agent_type != AgentType::Hermes {
-                    let repo = std::path::Path::new(&abs_repo_path_early);
-                    let repo_name = repo
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| abs_repo_path_early.clone());
-                    inject_sandbox_context(repo, &repo_name, cid);
+                    inject_sandbox_context(std::path::Path::new(&abs_repo_path_early), cid);
                 }
                 eprintln!();
                 if no_attach {
@@ -332,7 +327,7 @@ pub(crate) fn cmd_sandbox_spawn(db: &Database, opts: SpawnOptions) -> Result<Str
         install_spawn_agent(&info.id, pi_impl);
         restore_claude_credentials(&info.id);
         run_repo_setup_script(&repo, &info.id)?;
-        inject_sandbox_context(&repo, &repo_name, &info.id);
+        inject_sandbox_context(&repo, &info.id);
     }
 
     let title = task_desc.unwrap_or_else(|| format!("[{}:sandbox]", repo_name));
@@ -737,7 +732,7 @@ fn run_repo_setup_script(repo: &std::path::Path, container_id: &str) -> Result<(
 /// The notes reach the agent as an appended system prompt (see
 /// [`crate::sandbox::context::SANDBOX_PROMPT_PATH`]); the repository is never
 /// written to.
-fn inject_sandbox_context(repo: &std::path::Path, repo_name: &str, container_id: &str) {
+fn inject_sandbox_context(repo: &std::path::Path, container_id: &str) {
     use crate::sandbox::context::{build_sandbox_prompt, detect_toolchains, write_sandbox_prompt};
 
     if crate::sandbox::context::has_legacy_sandbox_block(repo) {
@@ -749,8 +744,13 @@ fn inject_sandbox_context(repo: &std::path::Path, repo_name: &str, container_id:
         );
         eprintln!("             line in .claude/CLAUDE.md if nibble added it).");
     }
+    let repo_name = repo
+        .canonicalize()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+        .unwrap_or_else(|| repo.display().to_string());
     let toolchains = detect_toolchains(repo);
-    let notes = build_sandbox_prompt(repo_name, &toolchains);
+    let notes = build_sandbox_prompt(&repo_name, &toolchains);
     match write_sandbox_prompt(container_id, &notes) {
         Ok(()) => {
             let detected = if toolchains.is_empty() {
@@ -962,7 +962,12 @@ pub(crate) fn cmd_sandbox_bash(db: &Database, task_id: String) -> Result<()> {
         task.title, container_id
     );
     eprintln!("(Type 'exit' or press Ctrl+D to detach — the container keeps running)");
-    eprintln!("(Agents started here skip the sandbox notes: pass --append-system-prompt \"$(cat /etc/nibble/sandbox.md)\")");
+    if task.agent_type != AgentType::Hermes {
+        eprintln!(
+            "(Agents started here skip the sandbox notes: pass --append-system-prompt \"$(cat {})\")",
+            crate::sandbox::context::SANDBOX_PROMPT_PATH
+        );
+    }
 
     let repo_path = task
         .context

@@ -275,8 +275,8 @@ When a sandbox spawns, nibble writes short notes on the environment (sudo, forwa
 
 The notes are never written to your repository, or to `~/.claude`, `~/.pi` or `~/.omp`, which are mounted from the host. The repository's own `AGENTS.md` and `CLAUDE.md` still apply as usual.
 
-- **Written once per container.** The notes are created when the container is, so a sandbox spawned by an older nibble, or one whose toolchain changed since, needs `nibble sandbox kill <repo> && nibble sandbox spawn <repo>` to get current notes.
-- **Only `attach` passes them.** An agent you start by hand, from `nibble sandbox bash` or nested inside another session, doesn't get them; add `--append-system-prompt "$(cat /etc/nibble/sandbox.md)"` if you want them there.
+- **Refreshed on respawn.** `nibble sandbox spawn <repo>` rewrites the notes when it reuses a running sandbox, so re-run it after a toolchain change or an upgrade; no kill needed.
+- **Headless turns get them too.** `nibble inject`, `nibble cron run` and quota-watch continue turns pass the notes like `attach` does. An agent you start by hand from `nibble sandbox bash` or nested inside another session doesn't get them; add `--append-system-prompt "$(cat /etc/nibble/sandbox.md)"` if you want them there.
 - **Older repo files.** Older nibble versions wrote a `<!-- nibble-sandbox:begin -->` block into `AGENTS.md` and an `@../AGENTS.md` line into `.claude/CLAUDE.md`. Spawn warns while the block is still there; delete them by hand.
 
 ### Watch container logs
