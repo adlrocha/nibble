@@ -12,6 +12,8 @@ pub struct Cli {
 pub enum SdlcAction {
     /// Open a PR that installs nibble-review with land in shadow mode
     Install {
+        /// Repositories as owner/name (default: the one in the current directory)
+        repos: Vec<String>,
         /// Show what would change without opening a PR
         #[arg(long)]
         dry_run: bool,
@@ -27,6 +29,8 @@ pub enum SdlcAction {
     },
     /// Open a PR that removes the flow, keeping the reviewer unless told otherwise
     Uninstall {
+        /// Repositories as owner/name (default: the one in the current directory)
+        repos: Vec<String>,
         /// Show what would change without opening a PR
         #[arg(long)]
         dry_run: bool,
@@ -38,9 +42,15 @@ pub enum SdlcAction {
         remove_reviewer: bool,
     },
     /// Report drift between the default branch and the expected setup
-    Check,
+    Check {
+        /// Repositories as owner/name (default: the one in the current directory)
+        repos: Vec<String>,
+    },
     /// List open PRs with their land result
-    Status,
+    Status {
+        /// Repositories as owner/name (default: the one in the current directory)
+        repos: Vec<String>,
+    },
     /// Merge a PR's current head, showing land's result first
     Merge {
         /// Pull request number

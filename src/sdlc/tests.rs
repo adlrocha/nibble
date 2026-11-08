@@ -220,20 +220,6 @@ fn removing_land_reverses_the_workflow_edits() {
     assert_eq!(remove_land_lines(&installed), WORKFLOW);
 }
 
-#[test]
-fn the_block_is_appended_replaced_and_removed_without_touching_the_rest() {
-    let original = "# Title\n\nKeep me.\n";
-    let installed = upsert_block(original, "first");
-    assert!(installed.starts_with("# Title\n\nKeep me.\n\n<!-- nibble-sdlc:begin -->\nfirst\n"));
-    assert_eq!(upsert_block(&installed, "first"), installed);
-
-    let updated = upsert_block(&installed, "second");
-    assert!(updated.contains("second") && !updated.contains("first"));
-    assert_eq!(remove_block(&updated), original);
-    assert_eq!(remove_block(original), original);
-    assert!(upsert_block("", "only").starts_with(BLOCK_BEGIN));
-}
-
 /// A repository whose default branch holds only the named files.
 fn tree(files: &[(&'static str, &'static str)]) -> FakeShell {
     let mut answers: Vec<(&'static str, &str)> = Vec::new();
@@ -248,10 +234,10 @@ fn tree(files: &[(&'static str, &'static str)]) -> FakeShell {
 }
 
 #[test]
-fn install_writes_all_three_files_into_an_empty_repo() {
+fn install_writes_the_workflow_and_config_into_an_empty_repo() {
     let changes = install_changes(&tree(&[]), &repo(), &pin(), true).unwrap();
     let paths: Vec<&str> = changes.iter().map(|change| change.path.as_str()).collect();
-    assert_eq!(paths, [WORKFLOW_PATH, CONFIG_PATH, "AGENTS.md"]);
+    assert_eq!(paths, [WORKFLOW_PATH, CONFIG_PATH]);
     let workflow = changes[0].content.as_deref().unwrap();
     assert!(workflow.contains(&format!("nibble-review@{} # v1.1.0", "a".repeat(40))));
     assert!(!workflow.contains("__PIN__"));
@@ -261,15 +247,17 @@ fn install_writes_all_three_files_into_an_empty_repo() {
 }
 
 #[test]
-fn install_keeps_customisations_and_targets_only_agents_md() {
+fn install_keeps_customisations_and_never_touches_agent_instructions() {
     let shell = tree(&[
         (WORKFLOW_PATH, WORKFLOW),
         (CONFIG_PATH, "[land]\nmax_lines = 50\n"),
-        ("CLAUDE.md", "@../AGENTS.md\n"),
+        ("AGENTS.md", "# Own\n"),
+        ("CLAUDE.md", "@AGENTS.md\n"),
     ]);
     let changes = install_changes(&shell, &repo(), &pin(), false).unwrap();
     let paths: Vec<&str> = changes.iter().map(|change| change.path.as_str()).collect();
-    assert_eq!(paths, [WORKFLOW_PATH, "AGENTS.md"]);
+    assert_eq!(paths, [WORKFLOW_PATH]);
+    assert!(!shell.called("AGENTS.md") && !shell.called("CLAUDE.md"));
     assert!(changes[0]
         .content
         .as_deref()
@@ -283,11 +271,7 @@ fn rerunning_install_changes_nothing() {
     let text = |index: usize| -> &'static str {
         Box::leak(first[index].content.clone().unwrap().into_boxed_str())
     };
-    let shell = tree(&[
-        (WORKFLOW_PATH, text(0)),
-        (CONFIG_PATH, text(1)),
-        ("AGENTS.md", text(2)),
-    ]);
+    let shell = tree(&[(WORKFLOW_PATH, text(0)), (CONFIG_PATH, text(1))]);
     assert_eq!(install_changes(&shell, &repo(), &pin(), false).unwrap(), []);
 }
 
@@ -298,18 +282,17 @@ fn uninstall_keeps_the_reviewer_unless_asked() {
             .unwrap()
             .into_boxed_str(),
     );
-    let agents: &'static str = Box::leak(upsert_block("# Own\n", "block").into_boxed_str());
     let shell = tree(&[
         (WORKFLOW_PATH, installed),
         (CONFIG_PATH, "[land]\n"),
-        ("AGENTS.md", agents),
+        ("AGENTS.md", "# Own\n"),
     ]);
 
     let changes = uninstall_changes(&shell, &repo(), false).unwrap();
+    assert_eq!(changes.len(), 2, "AGENTS.md is never part of the flow");
     assert_eq!(changes[0].content.as_deref(), Some(WORKFLOW));
     assert_eq!(changes[1].path, CONFIG_PATH);
     assert_eq!(changes[1].content, None);
-    assert_eq!(changes[2].content.as_deref(), Some("# Own\n"));
 
     let removed = uninstall_changes(&shell, &repo(), true).unwrap();
     assert_eq!(removed[0].content, None);
@@ -500,11 +483,9 @@ fn check_reports_each_piece() {
             .unwrap()
             .into_boxed_str(),
     );
-    let agents: &'static str = Box::leak(upsert_block("", AGENTS_BLOCK).into_boxed_str());
     let mut shell = tree(&[
         (WORKFLOW_PATH, installed),
         (CONFIG_PATH, "[land]\nmain_is_staging = true\n"),
-        ("AGENTS.md", agents),
     ]);
     shell
         .answers
@@ -516,14 +497,8 @@ fn check_reports_each_piece() {
     assert!(checks.iter().all(|(ok, _)| *ok), "{checks:?}");
     assert!(checks.last().unwrap().1.contains("staging step: yes"));
 
-    // An old pin and an old block are the drift install would fix.
-    let mut stale = tree(&[
-        (WORKFLOW_PATH, installed),
-        (
-            "AGENTS.md",
-            "<!-- nibble-sdlc:begin -->\nold\n<!-- nibble-sdlc:end -->\n",
-        ),
-    ]);
+    // An old pin is reported, but it isn't drift: it can be deliberate.
+    let mut stale = tree(&[(WORKFLOW_PATH, installed)]);
     stale
         .answers
         .push(("releases/latest", Ok("v9".to_string())));
@@ -532,9 +507,7 @@ fn check_reports_each_piece() {
     assert!(checks
         .iter()
         .any(|(ok, line)| *ok && line.contains("not pinned to the latest release (v9)")));
-    assert!(checks
-        .iter()
-        .any(|(ok, line)| !ok && line.contains("current delivery flow block")));
+    assert!(!checks.iter().any(|(_, line)| line.contains("AGENTS.md")));
 
     // A permission in the wrong block is drift, even though the line exists.
     let misplaced = "permissions:
@@ -691,4 +664,126 @@ fn load_repo_reads_the_default_branch_and_fetches_it() {
     assert!(shell.called("fetch -q origin trunk"));
     let outside = FakeShell::new(&[]).failing("rev-parse");
     assert!(load_repo(&outside).is_err());
+}
+
+#[test]
+fn repository_names_must_be_owner_and_name() {
+    for good in ["adlrocha/nibble", "a-b/c_d.e", "Org/Repo.js"] {
+        assert_eq!(validate_repo_name(good).unwrap(), good);
+    }
+    for bad in [
+        "nibble",
+        "a/b/c",
+        "/nibble",
+        "adlrocha/",
+        "--repo/x",
+        "a/-x",
+        "../x",
+        "a/b c",
+        "a/b;rm",
+    ] {
+        assert!(validate_repo_name(bad).is_err(), "{bad} should be rejected");
+    }
+}
+
+/// Opens every repository with the same fake shell, recording the names.
+fn open_with<'a>(
+    shell: &'a FakeShell,
+    opened: &'a RefCell<Vec<String>>,
+) -> impl Fn(&str) -> Result<Workspace> + 'a {
+    move |name: &str| {
+        opened.borrow_mut().push(name.to_string());
+        if name.starts_with("broken/") {
+            bail!("clone of {name} failed");
+        }
+        let answers = shell
+            .answers
+            .iter()
+            .map(|(key, value)| (*key, value.clone()))
+            .collect();
+        Ok(Workspace {
+            shell: Box::new(FakeShell {
+                answers,
+                calls: RefCell::new(Vec::new()),
+            }),
+            _clone: None,
+        })
+    }
+}
+
+#[test]
+fn without_repositories_the_current_one_is_used_once() {
+    let opened = RefCell::new(Vec::new());
+    let shell = FakeShell::new(&[]);
+    let open = open_with(&shell, &opened);
+    let mut out = Vec::new();
+    let mut runs = 0;
+    let code = for_each_repo(&[], &mut out, &open, &mut |_, _| {
+        runs += 1;
+        Ok(0)
+    })
+    .unwrap();
+    assert_eq!((code, runs), (0, 1));
+    assert!(opened.borrow().is_empty(), "nothing is cloned");
+    assert!(out.is_empty(), "no heading for the current repository");
+}
+
+#[test]
+fn each_repository_runs_under_a_heading_and_failures_do_not_stop_the_rest() {
+    let opened = RefCell::new(Vec::new());
+    let shell = FakeShell::new(&[]);
+    let open = open_with(&shell, &opened);
+    let repos: Vec<String> = ["a/one", "bad name", "broken/two", "a/three"]
+        .map(String::from)
+        .to_vec();
+    let mut out = Vec::new();
+    let code = for_each_repo(&repos, &mut out, &open, &mut |_, out| {
+        writeln!(out, "ran")?;
+        Ok(0)
+    })
+    .unwrap();
+    let text = String::from_utf8(out).unwrap();
+    assert_eq!(code, 1);
+    assert_eq!(*opened.borrow(), ["a/one", "broken/two", "a/three"]);
+    assert!(text.starts_with("== a/one\nran\n\n== bad name\n✗ expected a repository"));
+    assert!(text.contains("== broken/two\n✗ clone of broken/two failed"));
+    assert!(text.ends_with("== a/three\nran\n"));
+}
+
+#[test]
+fn the_exit_code_is_the_worst_result() {
+    let opened = RefCell::new(Vec::new());
+    let shell = FakeShell::new(&[]);
+    let open = open_with(&shell, &opened);
+    let repos: Vec<String> = ["a/clean", "a/drift"].map(String::from).to_vec();
+    let mut out = Vec::new();
+    let mut codes = [0, 1].into_iter();
+    let code = for_each_repo(&repos, &mut out, &open, &mut |_, _| {
+        Ok(codes.next().unwrap())
+    })
+    .unwrap();
+    assert_eq!(code, 1);
+}
+
+#[test]
+fn the_real_shell_runs_in_its_directory_with_the_named_repository() {
+    let dir = tempfile::tempdir().unwrap();
+    let shell = RealShell {
+        dir: Some(dir.path().to_path_buf()),
+        gh_repo: Some("a/b".to_string()),
+    };
+    let seen = shell
+        .run("sh", &["-c", "printf '%s %s' \"$PWD\" \"$GH_REPO\""], None)
+        .unwrap();
+    let real = dir.path().canonicalize().unwrap();
+    assert!(
+        seen == format!("{} a/b", dir.path().display())
+            || seen == format!("{} a/b", real.display()),
+        "{seen}"
+    );
+    // An explicit directory still wins, as publishing from a worktree needs.
+    let other = tempfile::tempdir().unwrap();
+    let seen = shell.run("pwd", &[], Some(other.path())).unwrap();
+    assert!(seen.ends_with(other.path().file_name().unwrap().to_str().unwrap()));
+    assert!(shell.run("false", &[], None).is_err());
 }

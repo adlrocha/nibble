@@ -1,14 +1,21 @@
 //! `nibble sdlc`: install and run the delivery flow in a repository.
 //!
-//! The flow is committed to the repository through a pull request rather than
-//! injected into a sandbox, so it is reviewable and easy to back out:
-//! `install` and `uninstall` both open a PR and never touch the checkout you
-//! are in. Everything is read from the default branch on `origin`.
+//! The flow is committed to the repository through a pull request, so it is
+//! reviewable and easy to back out: `install` and `uninstall` both open a PR and
+//! never touch the checkout you are in. Everything is read from the default
+//! branch on `origin`.
+//!
+//! The repository gets two files: the reviewer workflow and `.nibble/sdlc.toml`.
+//! Its `AGENTS.md` is left alone; the config file marks the repository as using
+//! the flow, and the global `nibble-sdlc` skill carries the agent's rules.
+//!
+//! `install`, `uninstall`, `check` and `status` take `owner/name` arguments to
+//! act on other repositories, and default to the one in the current directory.
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
 use std::io::{BufRead, IsTerminal, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::cli::SdlcAction;
@@ -16,7 +23,6 @@ use crate::cli::SdlcAction;
 const ACTION_REPO: &str = "adlrocha/nibble-review";
 const WORKFLOW_PATH: &str = ".github/workflows/nibble-review.yml";
 const CONFIG_PATH: &str = ".nibble/sdlc.toml";
-const AGENTS_PATH: &str = "AGENTS.md";
 const INSTALL_BRANCH: &str = "chore/nibble-sdlc";
 const UNINSTALL_BRANCH: &str = "chore/nibble-sdlc-remove";
 const LAND_CONTEXT: &str = "nibble-review/land";
@@ -25,12 +31,9 @@ const LAND_CONTEXT: &str = "nibble-review/land";
 const LAND_CLEARED: &str = "shadow: would merge";
 const SECRET_NAME: &str = "OPENCODE_API_KEY";
 const SECRET_UNKNOWN: &str = "Could not check the secret: listing secrets needs admin access.";
-const BLOCK_BEGIN: &str = "<!-- nibble-sdlc:begin -->";
-const BLOCK_END: &str = "<!-- nibble-sdlc:end -->";
 const LAND_INPUT: &str = "land: \"true\"";
 const STATUSES_PERMISSION: &str = "statuses: write";
 const WORKFLOW_TEMPLATE: &str = include_str!("nibble-review.yml");
-const AGENTS_BLOCK: &str = include_str!("agents-block.md");
 
 /// Runs external programs, so tests can stand in for `git` and `gh`.
 trait Shell {
@@ -38,14 +41,23 @@ trait Shell {
     fn run(&self, program: &str, args: &[&str], dir: Option<&Path>) -> Result<String>;
 }
 
-struct RealShell;
+/// Runs commands for real, optionally inside another checkout (`dir`) or
+/// against another GitHub repository (`gh_repo`, passed to `gh` as `GH_REPO`).
+#[derive(Default)]
+struct RealShell {
+    dir: Option<PathBuf>,
+    gh_repo: Option<String>,
+}
 
 impl Shell for RealShell {
     fn run(&self, program: &str, args: &[&str], dir: Option<&Path>) -> Result<String> {
         let mut command = Command::new(program);
         command.args(args);
-        if let Some(dir) = dir {
+        if let Some(dir) = dir.or(self.dir.as_deref()) {
             command.current_dir(dir);
+        }
+        if let Some(name) = &self.gh_repo {
+            command.env("GH_REPO", name);
         }
         let output = command
             .output()
@@ -117,62 +129,78 @@ fn default_merge_method() -> String {
 
 /// Entry point for `nibble sdlc`; returns the process exit code.
 pub(crate) fn cmd_sdlc(action: SdlcAction) -> Result<i32> {
-    let shell = RealShell;
     let stdin = std::io::stdin();
     let interactive = stdin.is_terminal();
     let mut input = stdin.lock();
     let mut out = std::io::stdout();
     match action {
         SdlcAction::Install {
+            repos,
             dry_run,
             yes,
             action_ref,
             main_is_staging,
-        } => {
-            let repo = load_repo(&shell)?;
-            let pin = resolve_pin(&shell, action_ref.as_deref())?;
-            let changes = install_changes(&shell, &repo, &pin, main_is_staging)?;
+        } => for_each_repo(&repos, &mut out, &clone_repo, &mut |shell, out| {
+            let repo = load_repo(shell)?;
+            let pin = resolve_pin(shell, action_ref.as_deref())?;
+            let changes = install_changes(shell, &repo, &pin, main_is_staging)?;
             let publish = Publish {
                 branch: INSTALL_BRANCH,
                 title: "ci: install the nibble sdlc flow",
-                body: "Installs nibble-review with `land` in shadow mode: each PR gets a `## Risk` comment and a `nibble-review/land` status. Nothing merges or blocks. Remove it with `nibble sdlc uninstall`.",
+                body: "Installs nibble-review with `land` in shadow mode: each PR gets a `## Risk` comment and a `nibble-review/land` status. Nothing merges or blocks. Agents follow the global `nibble-sdlc` skill, which applies wherever `.nibble/sdlc.toml` exists. Remove it with `nibble sdlc uninstall`.",
             };
             apply(
-                &shell, &repo, &changes, &publish, dry_run, yes, &mut input, &mut out,
+                shell, &repo, &changes, &publish, dry_run, yes, &mut input, out,
             )?;
-            warn_missing_secret(&shell, &mut out)?;
+            warn_missing_secret(shell, out)?;
             Ok(0)
-        }
+        }),
         SdlcAction::Uninstall {
+            repos,
             dry_run,
             yes,
             remove_reviewer,
-        } => {
-            let repo = load_repo(&shell)?;
-            let changes = uninstall_changes(&shell, &repo, remove_reviewer)?;
+        } => for_each_repo(&repos, &mut out, &clone_repo, &mut |shell, out| {
+            let repo = load_repo(shell)?;
+            let changes = uninstall_changes(shell, &repo, remove_reviewer)?;
             let publish = Publish {
                 branch: UNINSTALL_BRANCH,
                 title: "ci: remove the nibble sdlc flow",
                 body: "Removes the flow installed by `nibble sdlc install`.",
             };
             apply(
-                &shell, &repo, &changes, &publish, dry_run, yes, &mut input, &mut out,
+                shell, &repo, &changes, &publish, dry_run, yes, &mut input, out,
             )?;
             Ok(0)
+        }),
+        SdlcAction::Check { repos } => {
+            for_each_repo(&repos, &mut out, &clone_repo, &mut |shell, out| {
+                let repo = load_repo(shell)?;
+                let checks = check_repo(shell, &repo)?;
+                for (ok, line) in &checks {
+                    writeln!(out, "{} {line}", if *ok { "✓" } else { "✗" })?;
+                }
+                Ok(i32::from(checks.iter().any(|(ok, _)| !ok)))
+            })
         }
-        SdlcAction::Check => {
-            let repo = load_repo(&shell)?;
-            let checks = check_repo(&shell, &repo)?;
-            for (ok, line) in &checks {
-                writeln!(out, "{} {line}", if *ok { "✓" } else { "✗" })?;
-            }
-            Ok(i32::from(checks.iter().any(|(ok, _)| !ok)))
-        }
-        SdlcAction::Status => {
-            write!(out, "{}", render_status(&shell)?)?;
-            Ok(0)
+        SdlcAction::Status { repos } => {
+            // Status only talks to GitHub, so it needs no clone.
+            let open = |name: &str| -> Result<Workspace> {
+                Ok(Workspace {
+                    shell: Box::new(RealShell {
+                        gh_repo: Some(name.to_string()),
+                        ..RealShell::default()
+                    }),
+                    _clone: None,
+                })
+            };
+            for_each_repo(&repos, &mut out, &open, &mut |shell, out| {
+                write!(out, "{}", render_status(shell)?)?;
+                Ok(0)
+            })
         }
         SdlcAction::Merge { pr, auto, yes } => {
+            let shell = RealShell::default();
             let repo = load_repo(&shell)?;
             let method = merge_method(&shell, &repo)?;
             merge(
@@ -190,6 +218,93 @@ pub(crate) fn cmd_sdlc(action: SdlcAction) -> Result<i32> {
             Ok(0)
         }
     }
+}
+
+/// A shell set up for one repository, holding any temporary clone it needs.
+struct Workspace {
+    shell: Box<dyn Shell>,
+    /// Deleted when the workspace is dropped.
+    _clone: Option<tempfile::TempDir>,
+}
+
+/// Opens a repository named as an argument.
+type OpenRepo<'a> = &'a dyn Fn(&str) -> Result<Workspace>;
+
+/// Accepts `owner/name`, and nothing `gh` could read as a flag or a path.
+fn validate_repo_name(name: &str) -> Result<&str> {
+    let part_ok = |part: &str| {
+        !part.is_empty()
+            && !part.starts_with(['-', '.'])
+            && part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    match name.split_once('/') {
+        Some((owner, repo)) if part_ok(owner) && part_ok(repo) => Ok(name),
+        _ => bail!("expected a repository as owner/name, got `{name}`"),
+    }
+}
+
+/// Clones `name` into a temporary directory without a checkout: the flow only
+/// reads the default branch and publishes from its own worktree.
+fn clone_repo(name: &str) -> Result<Workspace> {
+    let clone = tempfile::tempdir().context("failed to create a temporary clone path")?;
+    let path = clone.path().to_string_lossy().to_string();
+    RealShell::default()
+        .run(
+            "gh",
+            &[
+                "repo",
+                "clone",
+                name,
+                &path,
+                "--",
+                "-q",
+                "--no-checkout",
+                "--filter=blob:none",
+            ],
+            None,
+        )
+        .with_context(|| format!("failed to clone {name}"))?;
+    Ok(Workspace {
+        shell: Box::new(RealShell {
+            dir: Some(clone.path().to_path_buf()),
+            ..RealShell::default()
+        }),
+        _clone: Some(clone),
+    })
+}
+
+/// Runs `body` for the current repository, or for each named one under a
+/// heading. A failure is reported and the rest still run; the exit code is the
+/// highest any repository returned, and 1 for a failure.
+fn for_each_repo(
+    repos: &[String],
+    out: &mut dyn Write,
+    open: OpenRepo<'_>,
+    body: &mut dyn FnMut(&dyn Shell, &mut dyn Write) -> Result<i32>,
+) -> Result<i32> {
+    if repos.is_empty() {
+        return body(&RealShell::default(), out);
+    }
+    let mut code = 0;
+    for (index, name) in repos.iter().enumerate() {
+        if index > 0 {
+            writeln!(out)?;
+        }
+        writeln!(out, "== {name}")?;
+        let result = validate_repo_name(name)
+            .and_then(open)
+            .and_then(|workspace| body(workspace.shell.as_ref(), out));
+        match result {
+            Ok(status) => code = code.max(status),
+            Err(error) => {
+                writeln!(out, "✗ {error:#}")?;
+                code = code.max(1);
+            }
+        }
+    }
+    Ok(code)
 }
 
 fn load_repo(shell: &dyn Shell) -> Result<Repo> {
@@ -281,10 +396,6 @@ fn install_changes(
             content: Some(render_config(main_is_staging)),
         });
     }
-
-    let text = read_default(shell, repo, AGENTS_PATH)?;
-    let updated = upsert_block(text.as_deref().unwrap_or(""), AGENTS_BLOCK);
-    push_if_changed(&mut changes, AGENTS_PATH, text.as_deref(), updated);
     Ok(changes)
 }
 
@@ -310,10 +421,6 @@ fn uninstall_changes(shell: &dyn Shell, repo: &Repo, remove_reviewer: bool) -> R
             path: CONFIG_PATH.to_string(),
             content: None,
         });
-    }
-    if let Some(text) = read_default(shell, repo, AGENTS_PATH)? {
-        let updated = remove_block(&text);
-        push_if_changed(&mut changes, AGENTS_PATH, Some(&text), updated);
     }
     Ok(changes)
 }
@@ -490,32 +597,6 @@ fn remove_land_lines(text: &str) -> String {
         .map(str::to_string)
         .collect();
     join_lines(&kept)
-}
-
-/// Replaces the marked block, or appends one, leaving everything else untouched.
-fn upsert_block(text: &str, block: &str) -> String {
-    let wrapped = format!("{BLOCK_BEGIN}\n{}\n{BLOCK_END}", block.trim());
-    match block_range(text) {
-        Some((start, end)) => format!("{}{wrapped}{}", &text[..start], &text[end..]),
-        None if text.trim().is_empty() => format!("{wrapped}\n"),
-        None => format!("{}\n\n{wrapped}\n", text.trim_end()),
-    }
-}
-
-fn remove_block(text: &str) -> String {
-    match block_range(text) {
-        Some((start, end)) => {
-            let joined = format!("{}{}", text[..start].trim_end(), &text[end..]);
-            format!("{}\n", joined.trim_end())
-        }
-        None => text.to_string(),
-    }
-}
-
-fn block_range(text: &str) -> Option<(usize, usize)> {
-    let start = text.find(BLOCK_BEGIN)?;
-    let end = text[start..].find(BLOCK_END)? + start + BLOCK_END.len();
-    Some((start, end))
 }
 
 /// What a set of changes is published as.
@@ -724,7 +805,6 @@ fn check_repo(shell: &dyn Shell, repo: &Repo) -> Result<Vec<(bool, String)>> {
     let unchanged = |edit: fn(&str) -> Result<String>| edit(text).is_ok_and(|after| after == text);
     let config = read_default(shell, repo, CONFIG_PATH)?;
     let parsed = config.as_deref().map(parse_config).transpose();
-    let instructions = read_default(shell, repo, AGENTS_PATH)?;
     let secret = match has_secret(shell) {
         Some(true) => (true, format!("secret {SECRET_NAME} is set")),
         Some(false) => (false, format!("secret {SECRET_NAME} is missing")),
@@ -742,12 +822,6 @@ fn check_repo(shell: &dyn Shell, repo: &Repo) -> Result<Vec<(bool, String)>> {
             "the workflow grants statuses: write".to_string(),
         ),
         (config.is_some(), format!("{CONFIG_PATH} exists")),
-        (
-            instructions
-                .as_deref()
-                .is_some_and(|text| upsert_block(text, AGENTS_BLOCK) == text),
-            format!("{AGENTS_PATH} has the current delivery flow block"),
-        ),
         secret,
     ];
     // A failed lookup says nothing about the repository, so it isn't drift.

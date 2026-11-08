@@ -22,12 +22,26 @@ Scripts and agents need `--yes`, because without a terminal the prompt counts as
 Install works in a throwaway worktree, so your checkout is untouched. A local `chore/nibble-sdlc` branch with unmerged work stops the run rather than being deleted. It opens one PR on `chore/nibble-sdlc` that:
 
 - creates or updates `.github/workflows/nibble-review.yml`, pinning the action to a commit and enabling `land`. Your other inputs are kept;
-- adds `.nibble/sdlc.toml`, unless the repository already has one;
-- adds a marked block to `AGENTS.md`. Everything outside the markers is left alone.
+- adds `.nibble/sdlc.toml`, unless the repository already has one.
+
+`AGENTS.md` and `CLAUDE.md` are not touched. `.nibble/sdlc.toml` marks the repository as using the flow, and the global `nibble-sdlc` skill, which applies wherever that file exists, carries the agent's rules.
 
 Pin to anything other than the latest release with `--ref <tag, branch, or commit>`. Pass `--main-is-staging` when `main` deploys to dev and a release deploys to production. It only applies when install creates the config; after that, edit the file. Rerunning install moves the pin to the latest release, or to `--ref`, and changes nothing else if the repository is already set up. `check` reports an older pin without failing, since it may be deliberate.
 
 The agent's side is the `nibble-sdlc` skill, which `install.sh` installs globally.
+
+## Several repositories
+
+`install`, `uninstall`, `check` and `status` take repositories as `owner/name`. With none, they act on the repository in the current directory.
+
+```bash
+nibble sdlc install --dry-run adlrocha/nibble adlrocha/nibble-review
+nibble sdlc install --yes adlrocha/nibble adlrocha/nibble-review
+nibble sdlc check adlrocha/nibble adlrocha/nibble-review
+nibble sdlc status adlrocha/nibble adlrocha/nibble-review
+```
+
+Each repository gets a heading. `install`, `uninstall` and `check` work from a temporary clone without a checkout, which is deleted afterwards; `status` only talks to GitHub. A failing repository is reported and the rest still run, and the exit code is non-zero if any failed or, for `check`, drifted. `merge` acts on the current directory only.
 
 ## Use it
 
@@ -48,7 +62,7 @@ nibble sdlc uninstall --remove-reviewer  # deletes the workflow too
 
 It also takes `--dry-run`, and `--yes` for scripts.
 
-Uninstall opens the reverse PR. It removes the `land` input, `statuses: write`, `.nibble/sdlc.toml`, and the `AGENTS.md` block, including any of these you added by hand. The plan lists each file before you confirm.
+Uninstall opens the reverse PR. It removes the `land` input, `statuses: write` and `.nibble/sdlc.toml`, including any of these you added by hand. The plan lists each file before you confirm.
 
 ## Settings
 

@@ -1,11 +1,13 @@
 ---
 name: nibble-sdlc
-description: Deliver a spec as a reviewed pull request. Use when asked to build a feature, fix, or spec in a repository that has the nibble sdlc flow installed, or when asked to drive a PR to LGTM with nibble-review. Covers checking the spec, building, a fresh review before pushing, and looping on review findings.
+description: How code changes ship in any repository that contains `.nibble/sdlc.toml`. Use for every feature, fix, refactor, or spec in such a repository, and whenever asked to drive a PR to LGTM with nibble-review. Covers checking the spec, building, a fresh review before pushing, looping on review findings, and handing off with land's result.
 ---
 
 # Nibble SDLC
 
 Take a spec to a pull request that nibble-review has approved, without a person in the middle. Stop only where this skill says to. Where the repository's `AGENTS.md` is stricter, it wins.
+
+A repository uses this flow when `.nibble/sdlc.toml` is on its default branch; `nibble sdlc install` puts it there, and nothing is added to `AGENTS.md`. Read the file: `[land] mode` says whether land reports (`shadow`) or is off, and `[merge] method` is how PRs merge.
 
 ## 1. Check the spec
 
