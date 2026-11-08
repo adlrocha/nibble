@@ -11,10 +11,13 @@ mod format;
 mod hermes;
 mod keybinds;
 mod lm;
+mod lock;
 mod memory;
 mod models;
 mod mux;
+mod pane_input;
 mod quota_watch;
+mod rc;
 mod sandbox;
 mod sdlc;
 mod session;
@@ -823,6 +826,21 @@ fn main() -> Result<()> {
                 db_path,
             };
             web::serve(cfg)?;
+        }
+        Commands::Rc { action } => {
+            let cfg = config::load().unwrap_or_default().rc;
+            match action {
+                cli::RcAction::Setup => rc::cmd_setup()?,
+                cli::RcAction::Doctor => rc::cmd_doctor(&db, &cfg)?,
+                cli::RcAction::Manifest => rc::cmd_manifest(),
+                cli::RcAction::Daemon => rc::cmd_daemon(cfg, db_path)?,
+                cli::RcAction::Start { task_id } => {
+                    rc::cmd_request(&db, task_id.as_deref(), false)?
+                }
+                cli::RcAction::Stop { task_id } => rc::cmd_request(&db, task_id.as_deref(), true)?,
+                cli::RcAction::List => rc::cmd_list()?,
+                cli::RcAction::ClaudeHook => rc::cmd_claude_hook(&db)?,
+            }
         }
     }
 

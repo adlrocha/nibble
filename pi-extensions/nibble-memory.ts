@@ -21,13 +21,15 @@
  *                      pane-id reports)
  *   - agent_settled:   status → completed (only when the session is idle,
  *                      so subagent/workflow activity doesn't flap the state)
+ *   - /nibble-rc [stop]: sends this session to Slack through the nibble rc
+ *                      daemon (or takes it back); no model turn is spent
  *
  * Events are written to ~/.nibble/memory/capture/<project>/<task-id>.jsonl
  * and later processed by `nibble memory summarize <task-id>`.
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { execSync, spawn } from "child_process";
+import { execFile, execSync, spawn } from "child_process";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -210,6 +212,30 @@ const reportTopic = (taskId: string, text: string): void => {
 
 	runNibble(["report", "topic", taskId, text]);
 };
+
+// `/nibble-rc [start|stop]` argument → `nibble rc` verb (null: bad usage).
+const rcAction = (args: unknown): "start" | "stop" | null => {
+	const arg = (typeof args === "string" ? args : "").trim();
+	if (arg === "" || arg === "start" || arg === "on") return "start";
+	if (arg === "stop" || arg === "off") return "stop";
+	return null;
+};
+
+// Ask the nibble rc daemon to relay (or stop relaying) this session. Runs
+// off the event loop and reports the daemon's answer in the TUI.
+const runRc = (action: "start" | "stop", taskId: string): Promise<string> =>
+	new Promise((resolve) => {
+		execFile(
+			"nibble",
+			["rc", action, taskId],
+			{ timeout: 30000, env: { ...process.env, NIBBLE_AGENT_TYPE: agentType() } },
+			(err, stdout, stderr) => {
+				const out = String(stdout || "").trim();
+				const msg = String(stderr || "").trim() || (err ? err.message : "");
+				resolve(err ? `nibble-rc failed: ${msg}` : `nibble-rc: ${out}`);
+			},
+		);
+	});
 
 // ─── Extension ───────────────────────────────────────────────────────────────
 
@@ -397,6 +423,25 @@ export default function (pi: ExtensionAPI) {
 
 		// Summarize in background so the agent exits cleanly
 		setTimeout(() => summarize(taskId), 500);
+	});
+
+	// ── /nibble-rc: continue this session from Slack ─────────────────────
+	pi.registerCommand("nibble-rc", {
+		description: "Send this session to Slack (nibble rc); `/nibble-rc stop` takes it back",
+		handler: async (args, ctx) => {
+			const action = rcAction(args);
+			if (!action) {
+				ctx.ui.notify("usage: /nibble-rc [stop]", "error");
+				return;
+			}
+			const taskId = getTaskId();
+			if (!taskId) {
+				ctx.ui.notify("nibble-rc: this session has no nibble task yet", "error");
+				return;
+			}
+			const msg = await runRc(action, taskId);
+			ctx.ui.notify(msg, msg.startsWith("nibble-rc failed") ? "error" : "info");
+		},
 	});
 
 	// Log that the extension loaded
