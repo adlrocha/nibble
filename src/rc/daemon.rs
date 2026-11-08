@@ -600,6 +600,15 @@ impl Daemon {
                 );
                 return Ok(());
             }
+            EndCheck::InSandbox => {
+                self.note(
+                    &link.channel,
+                    &link.thread_ts,
+                    "Sandbox sessions cannot be ended from Slack yet: closing the tab would \
+                     leave the agent running in its container. This one is left running.",
+                );
+                return Ok(());
+            }
         }
         let target = self
             .db
@@ -902,6 +911,9 @@ enum EndCheck {
     /// Sent with `/nibble-rc` from a session you opened: never closed from
     /// Slack, whatever the button press claims.
     NotStartedFromSlack,
+    /// Closing a sandbox session's tab ends only its `podman exec` client;
+    /// the agent keeps running in the container.
+    InSandbox,
 }
 
 fn may_end(link: &Link) -> EndCheck {
@@ -909,9 +921,16 @@ fn may_end(link: &Link) -> EndCheck {
         EndCheck::AlreadyClosed
     } else if !link.from_slack {
         EndCheck::NotStartedFromSlack
+    } else if !endable_location(link) {
+        EndCheck::InSandbox
     } else {
         EndCheck::Allowed
     }
+}
+
+/// Whether ending the session's tab stops its agent: true on the host.
+pub(super) fn endable_location(link: &Link) -> bool {
+    link.card.location == "host"
 }
 
 pub(super) fn card_for(task: &Task, zellij: &str) -> CardInfo {
@@ -951,7 +970,11 @@ mod tests {
         let mut l = super::super::test_support::link("t1", "1.1");
         assert_eq!(may_end(&l), EndCheck::NotStartedFromSlack);
         l.from_slack = true;
+        assert_eq!(l.card.location, "host");
         assert_eq!(may_end(&l), EndCheck::Allowed);
+        l.card.location = "sandbox".into();
+        assert_eq!(may_end(&l), EndCheck::InSandbox);
+        l.card.location = "host".into();
         l.closed = true;
         assert_eq!(may_end(&l), EndCheck::AlreadyClosed);
     }

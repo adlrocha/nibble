@@ -8,8 +8,10 @@
 //! - `/nibble` in Slack (or any new DM to the app) starts a new session in a
 //!   new tab of the `rc.zellij_session` zellij session, on the host or in a
 //!   sandbox, in a repo you pick; its thread works the same way.
-//! - Close a session's thread with its Close button or `/nibble-rc stop`;
-//!   the zellij tab is never touched.
+//! - Disconnect a session's thread with its Disconnect button or
+//!   `/nibble-rc stop`: relaying stops, the session keeps running. Host
+//!   sessions started from Slack also have End session, which closes the
+//!   tab the daemon opened for them and so stops the agent.
 //!
 //! The Slack connection lives in one host daemon (`nibble rc daemon`,
 //! `nibble-rc.service`). Agents talk to it through nibble's database, so

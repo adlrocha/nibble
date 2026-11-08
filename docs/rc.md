@@ -24,7 +24,9 @@ or start a new one from your phone.
   `/nibble-rc stop` in the session. This only stops relaying: the zellij tab
   and the agent keep running.
 - **End session** (on the card, after a confirmation) is offered only for
-  sessions started from Slack. It closes the tab the daemon opened, which
+  host sessions started from Slack. (Not for sandbox sessions yet: closing
+  their tab would end only the `podman exec` client and leave the agent
+  running in the container.) It closes the tab the daemon opened, which
   stops the agent; if you added panes of your own to that tab, only the
   agent's pane is closed. The conversation stays in the agent's history
   (`claude --resume`, or pi's session list). Sessions you sent with

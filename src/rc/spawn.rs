@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use std::path::Path;
 
-use super::daemon::{card_for, log, session_card, Daemon};
+use super::daemon::{card_for, endable_location, log, session_card, Daemon};
 use super::modal::NewSession;
 use super::pane;
 use super::slack::{self, CardState, SessionStatus};
@@ -213,7 +213,12 @@ impl Daemon {
             &link.channel,
             Some(&link.thread_ts),
             &slack::session_card_text(&session_card),
-            &slack::session_card_blocks(&session_card, CardState::Open { endable: true }),
+            &slack::session_card_blocks(
+                &session_card,
+                CardState::Open {
+                    endable: endable_location(&link),
+                },
+            ),
         ) {
             Ok(card_ts) => {
                 link.card_ts = Some(card_ts);
