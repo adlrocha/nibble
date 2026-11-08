@@ -151,9 +151,8 @@ pub(crate) fn cmd_sdlc(action: SdlcAction) -> Result<i32> {
                 title: "ci: install the nibble sdlc flow",
                 body: "Installs nibble-review with `land` in shadow mode: each PR gets a `## Risk` comment and a `nibble-review/land` status. Nothing merges or blocks. Agents follow the global `nibble-sdlc` skill, which applies wherever `.nibble/sdlc.toml` exists. Remove it with `nibble sdlc uninstall`.",
             };
-            apply(
-                shell, &repo, &changes, &publish, dry_run, yes, &mut input, out,
-            )?;
+            let mode = Mode { dry_run, yes };
+            apply(shell, &repo, &changes, &publish, mode, &mut input, out)?;
             warn_missing_secret(shell, out)?;
             Ok(0)
         }),
@@ -170,9 +169,8 @@ pub(crate) fn cmd_sdlc(action: SdlcAction) -> Result<i32> {
                 title: "ci: remove the nibble sdlc flow",
                 body: "Removes the flow installed by `nibble sdlc install`.",
             };
-            apply(
-                shell, &repo, &changes, &publish, dry_run, yes, &mut input, out,
-            )?;
+            let mode = Mode { dry_run, yes };
+            apply(shell, &repo, &changes, &publish, mode, &mut input, out)?;
             Ok(0)
         }),
         SdlcAction::Check { repos } => {
@@ -457,14 +455,29 @@ fn pin_text(pin: &Pin) -> String {
     format!("{} # {}", pin.sha, pin.label)
 }
 
-/// Finds the step that uses the reviewer action (not its `/fix` sub-action).
-fn find_uses(lines: &[&str]) -> Option<usize> {
+/// Splits a workflow into lines and finds the step that uses the reviewer
+/// action (not its `/fix` sub-action).
+fn reviewer_step(text: &str) -> Result<(Vec<&str>, usize)> {
+    let lines: Vec<&str> = text.lines().collect();
     let prefix = format!("uses: {ACTION_REPO}@");
-    lines.iter().position(|line| {
-        line.trim_start()
-            .trim_start_matches("- ")
-            .starts_with(&prefix)
-    })
+    let uses = lines
+        .iter()
+        .position(|line| {
+            line.trim_start()
+                .trim_start_matches("- ")
+                .starts_with(&prefix)
+        })
+        .ok_or_else(|| anyhow!("{WORKFLOW_PATH} has no step using {ACTION_REPO}"))?;
+    Ok((lines, uses))
+}
+
+/// Indentation of the first non-blank line in `block`, or `fallback` when it
+/// has none: hand-written workflows don't always indent by two.
+fn entry_indent(lines: &[&str], block: std::ops::Range<usize>, fallback: usize) -> usize {
+    lines[block]
+        .iter()
+        .find(|line| !line.trim().is_empty())
+        .map_or(fallback, |line| indent_of(line))
 }
 
 fn indent_of(line: &str) -> usize {
@@ -477,22 +490,28 @@ fn join_lines(lines: &[String]) -> String {
 }
 
 fn set_pin(text: &str, pin: &Pin) -> Result<String> {
-    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
-    let borrowed: Vec<&str> = text.lines().collect();
-    let index = find_uses(&borrowed)
-        .ok_or_else(|| anyhow!("{WORKFLOW_PATH} has no step using {ACTION_REPO}"))?;
-    let (head, _) = lines[index]
+    let (borrowed, index) = reviewer_step(text)?;
+    let (head, _) = borrowed[index]
         .split_once('@')
         .ok_or_else(|| anyhow!("unexpected uses line in {WORKFLOW_PATH}"))?;
-    lines[index] = format!("{head}@{}", pin_text(pin));
+    let pinned = format!("{head}@{}", pin_text(pin));
+    let lines: Vec<String> = borrowed
+        .iter()
+        .enumerate()
+        .map(|(i, line)| {
+            if i == index {
+                pinned.clone()
+            } else {
+                (*line).to_string()
+            }
+        })
+        .collect();
     Ok(join_lines(&lines))
 }
 
 /// Adds `land: "true"` as the first input of the reviewer step.
 fn ensure_land_input(text: &str) -> Result<String> {
-    let borrowed: Vec<&str> = text.lines().collect();
-    let uses = find_uses(&borrowed)
-        .ok_or_else(|| anyhow!("{WORKFLOW_PATH} has no step using {ACTION_REPO}"))?;
+    let (borrowed, uses) = reviewer_step(text)?;
     let line = borrowed[uses];
     let key_indent = indent_of(line)
         + if line.trim_start().starts_with("- ") {
@@ -511,7 +530,8 @@ fn ensure_land_input(text: &str) -> Result<String> {
         .take_while(|candidate| candidate.trim().is_empty() || indent_of(candidate) > key_indent)
         .count();
     let block = with + 1..with + 1 + block_len;
-    let line = format!("{}{LAND_INPUT}", " ".repeat(key_indent + 2));
+    let indent = entry_indent(&borrowed, block.clone(), key_indent + 2);
+    let line = format!("{}{LAND_INPUT}", " ".repeat(indent));
     Ok(set_key(text, block, "land:", with + 1, &line))
 }
 
@@ -564,9 +584,7 @@ fn governing_permissions(lines: &[&str], uses: usize) -> Option<usize> {
 
 /// Grants `statuses: write` in the permissions block that governs the reviewer step.
 fn ensure_statuses_write(text: &str) -> Result<String> {
-    let borrowed: Vec<&str> = text.lines().collect();
-    let uses = find_uses(&borrowed)
-        .ok_or_else(|| anyhow!("{WORKFLOW_PATH} has no step using {ACTION_REPO}"))?;
+    let (borrowed, uses) = reviewer_step(text)?;
     let block = governing_permissions(&borrowed, uses).ok_or_else(|| {
         anyhow!("{WORKFLOW_PATH} has no `permissions:` block; add one with `{STATUSES_PERMISSION}`")
     })?;
@@ -582,10 +600,7 @@ fn ensure_statuses_write(text: &str) -> Result<String> {
         .map_or(0, |last| last + 1);
     let range = block + 1..block + 1 + count;
     // Match the block's own indentation, which isn't always two spaces.
-    let child_indent = borrowed[range.clone()]
-        .iter()
-        .find(|line| !line.trim().is_empty())
-        .map_or(parent_indent + 2, |line| indent_of(line));
+    let child_indent = entry_indent(&borrowed, range.clone(), parent_indent + 2);
     let line = format!("{}{STATUSES_PERMISSION}", " ".repeat(child_indent));
     Ok(set_key(text, range.clone(), "statuses:", range.end, &line))
 }
@@ -609,15 +624,20 @@ struct Publish {
     body: &'static str,
 }
 
+/// How far `apply` goes: show the plan only, or publish with or without asking.
+#[derive(Clone, Copy)]
+struct Mode {
+    dry_run: bool,
+    yes: bool,
+}
+
 /// Shows the plan, asks, and publishes it as a PR from a throwaway worktree.
-#[allow(clippy::too_many_arguments)]
 fn apply(
     shell: &dyn Shell,
     repo: &Repo,
     changes: &[Change],
     publish: &Publish,
-    dry_run: bool,
-    yes: bool,
+    mode: Mode,
     input: &mut dyn BufRead,
     out: &mut dyn Write,
 ) -> Result<()> {
@@ -634,10 +654,10 @@ fn apply(
         };
         writeln!(out, "  {verb} {}", change.path)?;
     }
-    if dry_run {
+    if mode.dry_run {
         return Ok(());
     }
-    if !yes && !confirm("Open this PR?", input, out)? {
+    if !mode.yes && !confirm("Open this PR?", input, out)? {
         writeln!(out, "Cancelled.")?;
         return Ok(());
     }

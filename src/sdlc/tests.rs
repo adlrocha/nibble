@@ -349,8 +349,7 @@ fn apply_with(
         &repo(),
         changes,
         &PUBLISH,
-        dry,
-        yes,
+        Mode { dry_run: dry, yes },
         &mut Cursor::new(answer.to_string()),
         &mut out,
     );
@@ -812,4 +811,23 @@ jobs:
         once,
         "rerun converges"
     );
+}
+
+#[test]
+fn land_matches_a_four_space_with_block() {
+    let workflow = "permissions:
+  contents: read
+jobs:
+  review:
+    steps:
+      - uses: adlrocha/nibble-review@v1
+        with:
+            api-key: ${{ secrets.KEY }}
+";
+    let once = ensure_land_input(workflow).unwrap();
+    assert!(
+        once.contains("        with:\n            land: \"true\"\n            api-key:"),
+        "{once}"
+    );
+    assert_eq!(ensure_land_input(&once).unwrap(), once, "rerun converges");
 }
