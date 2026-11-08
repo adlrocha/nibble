@@ -119,8 +119,10 @@ fn spawn_inject(
             "-w",
             cwd,
             container_id,
-            claude,
         ])
+        // Headless turns get the sandbox notes like attached sessions do.
+        .args(crate::sandbox::context::exec_with_sandbox_prompt())
+        .arg(claude)
         .args(&resume_args)
         .arg("--dangerously-skip-permissions")
         .stdin(std::process::Stdio::piped())

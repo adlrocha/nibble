@@ -152,6 +152,16 @@ pub(crate) fn cmd_sandbox_spawn(db: &Database, opts: SpawnOptions) -> Result<Str
                     &existing_task_id[..existing_task_id.len().min(8)]
                 );
                 eprintln!("   Attaching to the existing sandbox instead of spawning a new one.");
+                // Spawning again is how notes get refreshed (toolchain changes,
+                // an upgraded nibble), and where a stale repo block is flagged.
+                if task.agent_type != AgentType::Hermes {
+                    let repo = std::path::Path::new(&abs_repo_path_early);
+                    let repo_name = repo
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| abs_repo_path_early.clone());
+                    inject_sandbox_context(repo, &repo_name, cid);
+                }
                 eprintln!();
                 if no_attach {
                     eprintln!("Attach with:");

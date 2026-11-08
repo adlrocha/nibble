@@ -224,7 +224,7 @@ pub fn write_sandbox_prompt(container_id: &str, content: &str) -> Result<()> {
 /// `nibble_prompt`, as `--append-system-prompt <notes>`, or leaves it empty when
 /// the file is missing (a sandbox spawned by an older nibble).
 ///
-/// Expand it in a launch command as `"${nibble_prompt[@]}"`.
+/// Expand it in a launch command with [`SANDBOX_PROMPT_ARGS`].
 pub fn sandbox_prompt_setup() -> String {
     format!(
         r#"nibble_prompt=(); if [ -r {SANDBOX_PROMPT_PATH} ]; then nibble_prompt=(--append-system-prompt "$(cat {SANDBOX_PROMPT_PATH})"); fi"#
@@ -234,6 +234,27 @@ pub fn sandbox_prompt_setup() -> String {
 /// Expands `nibble_prompt` (loaded by [`sandbox_prompt_setup`]) as agent
 /// arguments. Owned here so the array's name lives in one module.
 pub const SANDBOX_PROMPT_ARGS: &str = r#""${nibble_prompt[@]}""#;
+
+/// `podman exec` arguments that run the program given after them with the
+/// sandbox notes added, for launches without a shell of their own (headless
+/// turns from cron, inject and quota-watch).
+///
+/// The program and its arguments are passed to bash as positional parameters,
+/// so nothing is re-quoted:
+///
+/// ```ignore
+/// cmd.args(exec_with_sandbox_prompt()).arg("pi").args(["--session", s, "-p", msg]);
+/// ```
+pub fn exec_with_sandbox_prompt() -> [String; 3] {
+    [
+        "/bin/bash".to_string(),
+        "-c".to_string(),
+        format!(
+            r#"{}; exec "$0" {SANDBOX_PROMPT_ARGS} "$@""#,
+            sandbox_prompt_setup()
+        ),
+    ]
+}
 
 /// Marker older nibble versions wrote into a repository's `AGENTS.md`.
 const LEGACY_SANDBOX_BLOCK: &str = "<!-- nibble-sandbox:begin -->";
@@ -366,6 +387,41 @@ mod sandbox_prompt_tests {
             "<x><--append-system-prompt><a 'b'\n$c><y>"
         );
         assert_eq!(run("/nonexistent"), "<x><y>");
+    }
+
+    /// Headless launches pass the program and its arguments through bash
+    /// untouched, with the notes inserted right after the program.
+    #[test]
+    fn test_exec_with_sandbox_prompt_keeps_arguments_intact() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let notes = tmp.path().join("sandbox.md");
+        std::fs::write(&notes, "notes").unwrap();
+        let bin = tmp.path().join("showargs");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\nfor a in \"$@\"; do printf '<%s>' \"$a\"; done\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let run = |path: &str| {
+            let [shell, flag, script] = exec_with_sandbox_prompt();
+            let out = std::process::Command::new(shell)
+                .args([flag, script.replace(SANDBOX_PROMPT_PATH, path)])
+                .arg(&bin)
+                .args(["-p", "it's \"$HOME\"; rm -rf /"])
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+            String::from_utf8(out.stdout).unwrap()
+        };
+        assert_eq!(
+            run(notes.to_str().unwrap()),
+            "<--append-system-prompt><notes><-p><it's \"$HOME\"; rm -rf />"
+        );
+        assert_eq!(run("/nonexistent"), "<-p><it's \"$HOME\"; rm -rf />");
     }
 
     #[test]
