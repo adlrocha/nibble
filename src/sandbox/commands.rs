@@ -730,6 +730,15 @@ fn run_repo_setup_script(repo: &std::path::Path, container_id: &str) -> Result<(
 fn inject_sandbox_context(repo: &std::path::Path, repo_name: &str, container_id: &str) {
     use crate::sandbox::context::{build_sandbox_prompt, detect_toolchains, write_sandbox_prompt};
 
+    if crate::sandbox::context::has_legacy_sandbox_block(repo) {
+        eprintln!(
+            "  Warning:   AGENTS.md still has the <!-- nibble-sandbox:begin --> block an older"
+        );
+        eprintln!(
+            "             nibble wrote. It is no longer updated; delete it (and an @../AGENTS.md"
+        );
+        eprintln!("             line in .claude/CLAUDE.md if nibble added it).");
+    }
     let toolchains = detect_toolchains(repo);
     let notes = build_sandbox_prompt(repo_name, &toolchains);
     match write_sandbox_prompt(container_id, &notes) {
@@ -943,6 +952,7 @@ pub(crate) fn cmd_sandbox_bash(db: &Database, task_id: String) -> Result<()> {
         task.title, container_id
     );
     eprintln!("(Type 'exit' or press Ctrl+D to detach — the container keeps running)");
+    eprintln!("(Agents started here skip the sandbox notes: pass --append-system-prompt \"$(cat /etc/nibble/sandbox.md)\")");
 
     let repo_path = task
         .context
@@ -1588,11 +1598,11 @@ pub(crate) fn cmd_sandbox_attach(
             };
             // After installing, shadow the binary so every launch below carries
             // the sandbox notes as an appended system prompt.
-            let install_with_prompt = format!(
+            let install = format!(
                 "{install_step}; {}",
                 crate::sandbox::context::pi_prompt_wrapper(bin)
             );
-            let install = install_with_prompt.as_str();
+            let install = install.as_str();
             // omp is a fork of pi with an identical session format. `omp --resume`
             // accepts a session ID or file path, so ~/.pi sessions (also mounted)
             // stay resumable for continuity after migrating from pi to omp.
@@ -1752,8 +1762,10 @@ pub(crate) fn cmd_sandbox_attach(
         SelectedAgent::Claude => {
             // `nibble_prompt` is loaded once at the start of the command (below),
             // so both halves of the resume fallback carry the sandbox notes.
-            let claude =
-                "/home/node/.local/bin/claude --dangerously-skip-permissions \"${nibble_prompt[@]}\"";
+            let claude = format!(
+                "/home/node/.local/bin/claude --dangerously-skip-permissions {}",
+                crate::sandbox::context::SANDBOX_PROMPT_ARGS
+            );
             let setup = crate::sandbox::context::sandbox_prompt_setup();
             if fresh && !btw {
                 if let Some(sid) = claude_session_id.as_deref() {

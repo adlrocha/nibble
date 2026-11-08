@@ -114,6 +114,7 @@ mod sandbox_instructions {
     pub const BASE: &str = include_str!("../sandbox_instructions/base.md");
     pub const GENERAL_PRINCIPLES: &str =
         include_str!("../sandbox_instructions/general_principles.md");
+    pub const SKILLS: &str = include_str!("../sandbox_instructions/skills.md");
 }
 
 /// Container-local file holding the sandbox notes. `/etc` is not mounted from
@@ -168,6 +169,8 @@ pub fn build_sandbox_prompt(repo_name: &str, toolchains: &[(&str, &str, &str)]) 
     // Static: general working principles
     out.push('\n');
     out.push_str(sandbox_instructions::GENERAL_PRINCIPLES);
+    out.push('\n');
+    out.push_str(sandbox_instructions::SKILLS);
 
     out
 }
@@ -228,6 +231,20 @@ pub fn sandbox_prompt_setup() -> String {
     )
 }
 
+/// Expands `nibble_prompt` (loaded by [`sandbox_prompt_setup`]) as agent
+/// arguments. Owned here so the array's name lives in one module.
+pub const SANDBOX_PROMPT_ARGS: &str = r#""${nibble_prompt[@]}""#;
+
+/// Marker older nibble versions wrote into a repository's `AGENTS.md`.
+const LEGACY_SANDBOX_BLOCK: &str = "<!-- nibble-sandbox:begin -->";
+
+/// Whether the repository still carries the sandbox block an older nibble wrote
+/// into `AGENTS.md`. Nothing refreshes it any more, so it goes stale.
+pub fn has_legacy_sandbox_block(repo: &std::path::Path) -> bool {
+    std::fs::read_to_string(repo.join("AGENTS.md"))
+        .is_ok_and(|text| text.contains(LEGACY_SANDBOX_BLOCK))
+}
+
 /// Shell prefix for a pi-family launch: load the notes, then shadow `bin` with a
 /// function that adds them, so every later `bin …` in the command (fresh or
 /// resumed) carries the notes without rewriting each invocation.
@@ -236,8 +253,9 @@ pub fn sandbox_prompt_setup() -> String {
 /// real binary rather than this function.
 pub fn pi_prompt_wrapper(bin: &str) -> String {
     format!(
-        r#"{setup}; {bin}() {{ command {bin} "${{nibble_prompt[@]}}" "$@"; }}"#,
-        setup = sandbox_prompt_setup()
+        r#"{setup}; {bin}() {{ command {bin} {args} "$@"; }}"#,
+        setup = sandbox_prompt_setup(),
+        args = SANDBOX_PROMPT_ARGS
     )
 }
 
@@ -302,6 +320,52 @@ mod sandbox_prompt_tests {
             "a sandbox without the file must still launch"
         );
         assert!(SANDBOX_PROMPT_PATH.starts_with("/etc/"));
+    }
+
+    #[test]
+    fn test_prompt_includes_skills_guidance() {
+        let out = build_sandbox_prompt("proj", &[]);
+        assert!(out.contains("## Skills"));
+        assert!(out.contains("/home/node/.claude/skills/"));
+    }
+
+    #[test]
+    fn test_legacy_sandbox_block_is_detected() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        assert!(!has_legacy_sandbox_block(tmp.path()), "no AGENTS.md");
+        std::fs::write(tmp.path().join("AGENTS.md"), "# Own rules\n").unwrap();
+        assert!(!has_legacy_sandbox_block(tmp.path()));
+        std::fs::write(
+            tmp.path().join("AGENTS.md"),
+            "# Own\n<!-- nibble-sandbox:begin -->\nold\n<!-- nibble-sandbox:end -->\n",
+        )
+        .unwrap();
+        assert!(has_legacy_sandbox_block(tmp.path()));
+    }
+
+    /// The Claude launch expands the same array the setup fills, so the notes
+    /// arrive as one argument there too, and nothing when the file is missing.
+    #[test]
+    fn test_claude_prompt_args_expand_the_setup_array() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let notes = tmp.path().join("sandbox.md");
+        std::fs::write(&notes, "a 'b'\n$c").unwrap();
+        let run = |path: &str| {
+            let script = format!(
+                "{}; printf '<%s>' x {SANDBOX_PROMPT_ARGS} y",
+                sandbox_prompt_setup().replace(SANDBOX_PROMPT_PATH, path)
+            );
+            let out = std::process::Command::new("bash")
+                .args(["-c", &script])
+                .output()
+                .unwrap();
+            String::from_utf8(out.stdout).unwrap()
+        };
+        assert_eq!(
+            run(notes.to_str().unwrap()),
+            "<x><--append-system-prompt><a 'b'\n$c><y>"
+        );
+        assert_eq!(run("/nonexistent"), "<x><y>");
     }
 
     #[test]

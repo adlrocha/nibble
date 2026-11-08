@@ -271,11 +271,13 @@ Detach with `exit` or `Ctrl+C`.
 
 ### Sandbox notes
 
-When a sandbox spawns, nibble writes short notes on the environment (sudo, forwarded ports, the toolchain it detected) to `/etc/nibble/sandbox.md` inside the container. `nibble sandbox attach` passes them to claude, pi and omp with `--append-system-prompt`.
+When a sandbox spawns, nibble writes short notes on the environment (sudo, forwarded ports, the toolchain it detected, where skills live) to `/etc/nibble/sandbox.md` inside the container. `nibble sandbox attach` passes them to claude, pi and omp with `--append-system-prompt`.
 
-Nothing is written to your repository or to `~/.claude`, `~/.pi` or `~/.omp`, which are mounted from the host. The repository's own `AGENTS.md` and `CLAUDE.md` still apply as usual. Sandboxes spawned by an older nibble have no notes file and launch without them.
+The notes are never written to your repository, or to `~/.claude`, `~/.pi` or `~/.omp`, which are mounted from the host. The repository's own `AGENTS.md` and `CLAUDE.md` still apply as usual.
 
-Older nibble versions wrote a `<!-- nibble-sandbox:begin -->` block into `AGENTS.md` and an `@../AGENTS.md` line into `.claude/CLAUDE.md`. Delete those by hand if they are still in a repository.
+- **Written once per container.** The notes are created when the container is, so a sandbox spawned by an older nibble, or one whose toolchain changed since, needs `nibble sandbox kill <repo> && nibble sandbox spawn <repo>` to get current notes.
+- **Only `attach` passes them.** An agent you start by hand, from `nibble sandbox bash` or nested inside another session, doesn't get them; add `--append-system-prompt "$(cat /etc/nibble/sandbox.md)"` if you want them there.
+- **Older repo files.** Older nibble versions wrote a `<!-- nibble-sandbox:begin -->` block into `AGENTS.md` and an `@../AGENTS.md` line into `.claude/CLAUDE.md`. Spawn warns while the block is still there; delete them by hand.
 
 ### Watch container logs
 
