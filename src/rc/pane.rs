@@ -89,6 +89,65 @@ pub(crate) fn open_tab(session: &str, tab_name: &str, cwd: &str, script: &str) -
     Ok(pane)
 }
 
+/// What ending a session closes.
+#[derive(Debug, PartialEq, Eq)]
+enum EndTarget {
+    /// The whole tab: it holds only the agent and command panes such as the
+    /// nibble sidebar.
+    Tab(u32),
+    /// Only the agent's pane: the tab also holds shells or other panes the
+    /// user opened, which must survive.
+    Pane(u32),
+}
+
+/// How to end the agent in `pane`, or `None` when the pane is gone.
+fn end_target(panes: &[ZellijPane], pane: u32) -> Option<EndTarget> {
+    let agent = panes.iter().find(|p| p.id == pane && !p.is_plugin)?;
+    let others_are_fixtures = panes
+        .iter()
+        .filter(|p| p.tab_id == agent.tab_id && !p.is_plugin && p.id != pane)
+        .all(|p| p.terminal_command.is_some());
+    Some(if others_are_fixtures {
+        EndTarget::Tab(agent.tab_id)
+    } else {
+        EndTarget::Pane(pane)
+    })
+}
+
+/// Stop the agent in `pane` by closing its tab (or only its pane, when the
+/// tab holds other panes). Closing hangs up the agent; agents write their
+/// transcript as they go, so the conversation can be resumed. Returns
+/// whether anything was closed (`false`: the pane or session is gone).
+pub(crate) fn end_session(session: &str, pane: u32) -> Result<bool> {
+    let panes = match list_zellij_panes(Some(session)) {
+        Ok(panes) => panes,
+        Err(PaneListError::Gone(_)) => return Ok(false),
+        Err(PaneListError::Failed(e)) => bail!("cannot list zellij panes: {e}"),
+    };
+    match end_target(&panes, pane) {
+        None => Ok(false),
+        Some(EndTarget::Tab(tab)) => {
+            zellij(
+                session,
+                &["action", "close-tab", "--tab-id", &tab.to_string()],
+            )?;
+            Ok(true)
+        }
+        Some(EndTarget::Pane(id)) => {
+            zellij(
+                session,
+                &[
+                    "action",
+                    "close-pane",
+                    "--pane-id",
+                    &format!("terminal_{id}"),
+                ],
+            )?;
+            Ok(true)
+        }
+    }
+}
+
 /// Plain shell panes in `tab` other than `keep` (command panes such as the
 /// nibble sidebar and plugins are left alone).
 fn stray_shells(panes: &[ZellijPane], tab: u32, keep: u32) -> Vec<u32> {
@@ -163,6 +222,23 @@ mod tests {
     }
 
     #[test]
+    fn ending_closes_the_tab_unless_it_holds_other_panes() {
+        let mut panes = vec![
+            zpane(6, 4, false, Some("sh -c claude")),  // the agent
+            zpane(7, 4, false, Some("nibble status")), // sidebar command pane
+            zpane(0, 4, true, None),                   // tab bar plugin
+            zpane(2, 0, false, None),                  // shell in another tab
+        ];
+        assert_eq!(end_target(&panes, 6), Some(EndTarget::Tab(4)));
+        // A shell the user opened next to the agent survives.
+        panes.push(zpane(8, 4, false, None));
+        assert_eq!(end_target(&panes, 6), Some(EndTarget::Pane(6)));
+        // Gone already, or a plugin id: nothing to close.
+        assert_eq!(end_target(&panes, 9), None);
+        assert_eq!(end_target(&panes, 0), None);
+    }
+
+    #[test]
     fn parses_zellij_run_output() {
         assert_eq!(parse_terminal_pane("terminal_6\n"), Some(6));
         assert_eq!(parse_terminal_pane("plugin_2"), None);
@@ -200,6 +276,11 @@ mod tests {
             assert!(typed.contains("hello from slack"), "typed: {typed:?}");
             assert!(typed.contains("- a bullet"), "typed: {typed:?}");
             assert!(!pane_alive(&session, 9999).unwrap());
+            // End session closes the tab and with it the pane.
+            assert!(end_session(&session, pane).unwrap());
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            assert!(!pane_alive(&session, pane).unwrap());
+            assert!(!end_session(&session, pane).unwrap());
         });
         let _ = Command::new("zellij")
             .args(["kill-session", &session])

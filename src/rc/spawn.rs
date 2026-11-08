@@ -9,7 +9,7 @@ use std::path::Path;
 use super::daemon::{card_for, log, session_card, Daemon};
 use super::modal::NewSession;
 use super::pane;
-use super::slack::{self, SessionStatus};
+use super::slack::{self, CardState, SessionStatus};
 use super::store::{self, Link, Location, PendingSpawn, SpawnAgent, Watch};
 use crate::models::{AgentType, Task, TaskStatus};
 use crate::mux::sh_quote;
@@ -195,6 +195,7 @@ impl Daemon {
                     Watch::Working,
                 );
                 link.last_reply_id = spawn.baseline_reply.clone().flatten();
+                link.from_slack = true;
                 link.permalink = self.bot.permalink(&spawn.channel, &spawn.thread_ts).ok();
                 store::put_link(&self.state, &link)?;
                 link
@@ -212,7 +213,7 @@ impl Daemon {
             &link.channel,
             Some(&link.thread_ts),
             &slack::session_card_text(&session_card),
-            &slack::session_card_blocks(&session_card, true),
+            &slack::session_card_blocks(&session_card, CardState::Open { endable: true }),
         ) {
             Ok(card_ts) => {
                 link.card_ts = Some(card_ts);

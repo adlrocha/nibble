@@ -118,6 +118,10 @@ pub(crate) struct Link {
     #[serde(default)]
     pub card_ts: Option<String>,
     pub card: CardInfo,
+    /// Started from Slack (`/nibble` or a DM) in a tab the daemon opened:
+    /// only these can be ended from Slack, which closes that tab.
+    #[serde(default)]
+    pub from_slack: bool,
 }
 
 impl Link {
@@ -143,6 +147,7 @@ impl Link {
             permalink: None,
             card_ts: None,
             card,
+            from_slack: false,
         }
     }
 
@@ -386,6 +391,14 @@ mod tests {
 
     fn sample(task: &str, ts: &str) -> Link {
         crate::rc::test_support::link(task, ts)
+    }
+
+    #[test]
+    fn links_saved_before_end_session_existed_cannot_be_ended() {
+        let mut v = serde_json::to_value(sample("a", "1.1")).unwrap();
+        v.as_object_mut().unwrap().remove("from_slack");
+        let l: Link = serde_json::from_value(v).unwrap();
+        assert!(!l.from_slack);
     }
 
     #[test]

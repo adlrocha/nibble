@@ -320,15 +320,57 @@ pub(crate) struct SessionCard {
     pub topic: Option<String>,
 }
 
-/// Action id of the session card's Close button.
+/// Action id of the session card's Disconnect button (stop relaying; the
+/// session keeps running).
 pub(crate) const CLOSE_ACTION: &str = "rc_close";
+/// Action id of the End session button: stop the agent and close its tab.
+pub(crate) const END_ACTION: &str = "rc_end";
+
+/// What a session card offers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CardState {
+    /// Relaying. `endable`: started from Slack, so it can be ended here.
+    Open { endable: bool },
+    /// No longer relayed; the session runs on in zellij.
+    Disconnected,
+    /// The agent was stopped and its zellij tab closed.
+    Ended,
+}
+
+/// A button behind a confirmation dialog.
+fn confirmed_button(
+    action_id: &str,
+    label: &str,
+    task_id: &str,
+    danger: bool,
+    (title, text, yes): (&str, &str, &str),
+) -> Value {
+    let mut button = json!({
+        "type": "button",
+        "action_id": action_id,
+        "text": { "type": "plain_text", "text": label },
+        "value": task_id,
+        "confirm": {
+            "title": { "type": "plain_text", "text": title },
+            "text": { "type": "mrkdwn", "text": text },
+            "confirm": { "type": "plain_text", "text": yes },
+            "deny": { "type": "plain_text", "text": "Cancel" }
+        }
+    });
+    if danger {
+        button["style"] = json!("danger");
+        button["confirm"]["style"] = json!("danger");
+    }
+    button
+}
 /// Action id of the "Start a session" button offered on a top-level DM.
 pub(crate) const NEW_ACTION: &str = "rc_new";
 
 /// A session card: the thread root for `/nibble-rc`, a reply in threads
-/// started from Slack. `open` shows the Close button; a closed session gets
-/// a closed footer instead.
-pub(crate) fn session_card_blocks(card: &SessionCard, open: bool) -> Value {
+/// started from Slack. An open card has a Disconnect button, plus End
+/// session when the session was started from Slack; a finished one says
+/// how it finished instead.
+pub(crate) fn session_card_blocks(card: &SessionCard, state: CardState) -> Value {
     let mut facts = format!(
         "*{}* · {} · {} · zellij `{}`",
         escape(&card.title),
@@ -349,31 +391,44 @@ pub(crate) fn session_card_blocks(card: &SessionCard, open: bool) -> Value {
             "elements": [{ "type": "mrkdwn", "text": escape(topic) }]
         }));
     }
-    if open {
-        blocks.push(json!({
-            "type": "context",
-            "elements": [{ "type": "mrkdwn", "text": "Reply in this thread to talk to the session." }]
-        }));
-        blocks.push(json!({
-            "type": "actions",
-            "elements": [{
-                "type": "button",
-                "action_id": CLOSE_ACTION,
-                "text": { "type": "plain_text", "text": "Close session" },
-                "value": card.task_id,
-                "confirm": {
-                    "title": { "type": "plain_text", "text": "Close this session?" },
-                    "text": { "type": "mrkdwn", "text": "Slack stops relaying it. The zellij tab stays open." },
-                    "confirm": { "type": "plain_text", "text": "Close" },
-                    "deny": { "type": "plain_text", "text": "Keep" }
-                }
-            }]
-        }));
-    } else {
-        blocks.push(json!({
-            "type": "context",
-            "elements": [{ "type": "mrkdwn", "text": "Closed. The zellij tab is untouched." }]
-        }));
+    let footer =
+        |text: &str| json!({ "type": "context", "elements": [{ "type": "mrkdwn", "text": text }] });
+    match state {
+        CardState::Open { endable } => {
+            blocks.push(footer("Reply in this thread to talk to the session."));
+            let mut buttons = vec![confirmed_button(
+                CLOSE_ACTION,
+                "Disconnect",
+                &card.task_id,
+                false,
+                (
+                    "Disconnect from Slack?",
+                    "Slack stops relaying this session. It keeps running in zellij.",
+                    "Disconnect",
+                ),
+            )];
+            if endable {
+                buttons.push(confirmed_button(
+                    END_ACTION,
+                    "End session",
+                    &card.task_id,
+                    true,
+                    (
+                        "End this session?",
+                        "This stops the agent and closes its zellij tab. The \
+                         conversation stays in the agent's history.",
+                        "End session",
+                    ),
+                ));
+            }
+            blocks.push(json!({ "type": "actions", "elements": buttons }));
+        }
+        CardState::Disconnected => {
+            blocks.push(footer("Disconnected. The session keeps running in zellij."))
+        }
+        CardState::Ended => blocks.push(footer(
+            "Ended. The agent stopped and its zellij tab was closed.",
+        )),
     }
     json!(blocks)
 }
@@ -491,11 +546,14 @@ mod tests {
     }
 
     #[test]
-    fn open_card_has_close_button_with_task_id() {
-        let blocks = session_card_blocks(&card(), true);
+    fn open_card_has_disconnect_button_with_task_id() {
+        let blocks = session_card_blocks(&card(), CardState::Open { endable: false });
         let actions = blocks.as_array().unwrap().last().unwrap();
         assert_eq!(actions["elements"][0]["action_id"], CLOSE_ACTION);
         assert_eq!(actions["elements"][0]["value"], "t1");
+        // Sessions sent with /nibble-rc cannot be ended from Slack.
+        assert_eq!(actions["elements"].as_array().unwrap().len(), 1);
+        assert!(!blocks.to_string().contains(END_ACTION));
         // mrkdwn control characters are escaped.
         assert!(blocks.to_string().contains("fix &lt;the&gt; build"));
     }
@@ -514,9 +572,25 @@ mod tests {
     }
 
     #[test]
-    fn closed_card_has_no_buttons() {
-        let blocks = session_card_blocks(&card(), false);
-        assert!(!blocks.to_string().contains(CLOSE_ACTION));
-        assert!(blocks.to_string().contains("Closed."));
+    fn sessions_started_from_slack_can_be_ended_after_a_confirmation() {
+        let blocks = session_card_blocks(&card(), CardState::Open { endable: true });
+        let actions = blocks.as_array().unwrap().last().unwrap();
+        let end = &actions["elements"][1];
+        assert_eq!(end["action_id"], END_ACTION);
+        assert_eq!(end["value"], "t1");
+        assert_eq!(end["style"], "danger");
+        assert_eq!(end["confirm"]["confirm"]["text"], "End session");
+    }
+
+    #[test]
+    fn finished_cards_have_no_buttons_and_say_how_they_finished() {
+        for (state, says) in [
+            (CardState::Disconnected, "keeps running"),
+            (CardState::Ended, "tab was closed"),
+        ] {
+            let text = session_card_blocks(&card(), state).to_string();
+            assert!(!text.contains(CLOSE_ACTION) && !text.contains(END_ACTION));
+            assert!(text.contains(says), "{text}");
+        }
     }
 }

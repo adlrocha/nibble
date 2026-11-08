@@ -237,10 +237,29 @@ fn prompt_line(label: &str, secret: bool) -> Result<String> {
         .lock()
         .read_line(&mut line)
         .context("failed to read input")?;
+    let value = line.trim().to_string();
     if secret {
         println!();
+        println!("  got {}", mask(&value));
     }
-    Ok(line.trim().to_string())
+    Ok(value)
+}
+
+/// A token as shown back after a hidden paste: its first 9 and last 4
+/// characters and its length, enough to tell which token it is and whether
+/// the paste was cut short without putting it in the scrollback.
+fn mask(token: &str) -> String {
+    let chars: Vec<char> = token.chars().collect();
+    let n = chars.len();
+    if n == 0 {
+        return "nothing (empty input)".to_string();
+    }
+    if n <= 16 {
+        return format!("{} ({n} chars)", "*".repeat(n.min(8)));
+    }
+    let head: String = chars[..9].iter().collect();
+    let tail: String = chars[n - 4..].iter().collect();
+    format!("{head}…{tail} ({n} chars)")
 }
 
 /// The terminal state to restore if `nibble rc setup` is interrupted while
@@ -338,7 +357,16 @@ fn slack_checks(s: &secrets::Secrets) -> Vec<Check<'_>> {
         (
             "bot token",
             Box::new(|| {
-                let (team, user) = slack::Slack::new(&s.bot_token).auth_test()?;
+                let (team, user) = slack::Slack::new(&s.bot_token).auth_test().map_err(|e| {
+                    match slack::error_code(&e).map(str::to_owned).as_deref() {
+                        Some("invalid_auth" | "token_revoked" | "account_inactive") => e.context(
+                            "Slack does not accept this bot token: copy the Bot User OAuth \
+                             Token again from OAuth & Permissions (reinstalling the app \
+                             can replace it)",
+                        ),
+                        _ => e,
+                    }
+                })?;
                 Ok(format!("{user} in {team}"))
             }),
         ),
@@ -488,6 +516,25 @@ mod test_support {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hidden_tokens_are_echoed_masked() {
+        // Assembled at runtime so no token-shaped literal sits in the source
+        // (GitHub's push protection blocks those, fake or not).
+        let bot = [
+            "xoxb",
+            "1234567890",
+            "0987654321",
+            "AbCdEfGhIjKlMnOpQrStUvWx",
+        ]
+        .join("-");
+        let shown = super::mask(&bot);
+        assert_eq!(shown, format!("xoxb-1234…UvWx ({} chars)", bot.len()));
+        assert!(!shown.contains("0987654321"));
+        // Short or empty input reveals nothing but its length.
+        assert_eq!(super::mask("xoxb-short"), "******** (10 chars)");
+        assert_eq!(super::mask(""), "nothing (empty input)");
+    }
+
     use super::*;
 
     #[test]

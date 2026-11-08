@@ -47,7 +47,7 @@ What it aims for:
 | 27 | **Local LLM models** | experimental | `nibble lm` lists and manages local model files |
 | 28 | **Kimi backend** | experimental | `claude --kimi` (via the installed claude wrapper) points Claude Code at `KIMI_BASE_URL` / `KIMI_API_KEY` for that session |
 | 29 | **Recoverable zellij sessions** | core | `nibble mux [name]` opens a named zellij session whose Claude Code and pi agents (host and sandbox) come back after a killed session, crash or reboot: a watcher records which agent is in which tab, and a gone session is rebuilt with each pane resuming its own conversation. See [docs/mux.md](docs/mux.md) |
-| 30 | **Slack remote control** | experimental | `/nibble-rc` in a Claude Code, pi or omp session (host or sandbox) continues it from a Slack thread while it stays live in zellij: thread replies are typed into the pane, finished turns post their reply, Slack's stop button interrupts. `/nibble` in Slack starts a new session (host or sandbox, any repo) in a new tab of the `nibble mux` session (`rc.zellij_session`, default `main`). `nibble-rc.service` holds the Socket Mode connection; tokens stay outside sandbox reach. Unit- and zellij-tested; not yet run end to end against Slack. See [docs/rc.md](docs/rc.md) |
+| 30 | **Slack remote control** | experimental | `/nibble-rc` in a Claude Code, pi or omp session (host or sandbox) continues it from a Slack thread while it stays live in zellij: thread replies are typed into the pane, finished turns post their reply, Slack's stop button interrupts. `/nibble` in Slack starts a new session (host or sandbox, any repo) in a new tab of the `nibble mux` session (`rc.zellij_session`, default `main`). Disconnect leaves a session running; End session stops one started from Slack and closes its tab. `nibble-rc.service` holds the Socket Mode connection; tokens stay outside sandbox reach. Needs a Slack app you create once ([setup](#slack-remote-control-nibble-rc)). See [docs/rc.md](docs/rc.md) |
 
 ---
 
@@ -490,6 +490,39 @@ discarded when nibble rebuilds it. Rebuilt tabs keep the nibble sidebar if
 it is your default layout (`default.kdl` or zellij's `default_layout`), but
 not other custom layouts. Details, including
 what `--forget` does: [docs/mux.md](docs/mux.md).
+
+### Slack remote control (`nibble rc`)
+
+Carry on with your agents from Slack, on your phone or anywhere else, while
+they keep running in zellij:
+
+- **`/nibble-rc`** in a Claude Code, pi or omp session (host or sandbox)
+  posts it to your DM with the nibble Slack app as a thread. Replies in the
+  thread are typed into the session; each finished turn's reply comes back.
+- **`/nibble`** in Slack (or any message to the app) starts a new session:
+  pick host or sandbox, Claude Code or pi, and a repo. It opens in a new tab
+  of the `main` zellij session and gets its own thread.
+- **Disconnect** (on the session card, or `/nibble-rc stop`) stops the Slack
+  side; the session keeps running. **End session**, only on sessions
+  started from Slack, stops the agent and closes its tab.
+
+It is off until you set it up. Slack connects to nothing on your machine:
+the daemon opens an outbound Socket Mode connection, and only your Slack
+user can drive it. One-time setup (about five minutes, on a workspace where
+you can install apps):
+
+1. `./install.sh` (installs `/nibble-rc`, the hook, and `nibble-rc.service`).
+2. <https://api.slack.com/apps> → *Create New App* → *From a manifest* →
+   your workspace → paste the output of `nibble rc manifest`.
+3. *Install App* → *Install to Workspace*; copy the *Bot User OAuth Token*
+   (`xoxb-…`).
+4. *Basic Information* → *App-Level Tokens* → generate one with scope
+   `connections:write`; copy it (`xapp-…`).
+5. In Slack: your profile → ⋮ → *Copy member ID*.
+6. `nibble rc setup` (checks all three with Slack before saving), then
+   `systemctl --user enable --now nibble-rc` and `nibble rc doctor`.
+
+Full guide, privacy notes and troubleshooting: [docs/rc.md](docs/rc.md).
 
 ---
 

@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use super::modal::{self, NewSession, Origin};
 use super::secrets::Secrets;
-use super::slack::{self, SessionCard, SessionStatus, Slack};
+use super::slack::{self, CardState, SessionCard, SessionStatus, Slack};
 use super::socket::{self, Envelope, Read};
 use super::store::{self, CardInfo, Link, RequestAction, Response};
 use super::{pane, relay, transcript};
@@ -417,9 +417,15 @@ impl Daemon {
     fn on_action(&mut self, payload: &Value) -> Result<()> {
         let action = &payload["actions"][0];
         match action["action_id"].as_str() {
-            Some(slack::CLOSE_ACTION) => action["value"]
+            Some(slack::CLOSE_ACTION) => action["value"].as_str().map_or(Ok(()), |task| {
+                self.close_link(
+                    task,
+                    "Disconnected from Slack. The session keeps running in zellij.",
+                )
+            }),
+            Some(slack::END_ACTION) => action["value"]
                 .as_str()
-                .map_or(Ok(()), |task| self.close_link(task, "Closed from Slack.")),
+                .map_or(Ok(()), |task| self.end_link(task)),
             Some(slack::NEW_ACTION) => {
                 let trigger = payload["trigger_id"].as_str().context("no trigger_id")?;
                 let offer: Value = action["value"]
@@ -543,7 +549,7 @@ impl Daemon {
             &self.dm,
             None,
             &slack::session_card_text(&session_card),
-            &slack::session_card_blocks(&session_card, true),
+            &slack::session_card_blocks(&session_card, CardState::Open { endable: false }),
         )?;
         link.permalink = self.bot.permalink(&self.dm, &link.thread_ts).ok();
         // The card exists now: record the link before anything else can
@@ -569,13 +575,57 @@ impl Daemon {
         ))
     }
 
+    /// Stop relaying a session; it keeps running in zellij.
     pub(super) fn close_link(&mut self, task_id: &str, why: &str) -> Result<()> {
-        let Some(mut link) = store::link(&self.state, task_id)? else {
+        match store::link(&self.state, task_id)? {
+            Some(link) if !link.closed => self.finish_link(link, why, CardState::Disconnected),
+            _ => Ok(()),
+        }
+    }
+
+    /// End a session started from Slack: close the zellij tab the daemon
+    /// opened for it (which stops the agent), then the thread.
+    fn end_link(&mut self, task_id: &str) -> Result<()> {
+        let Some(link) = store::link(&self.state, task_id)? else {
             return Ok(());
         };
-        if link.closed {
-            return Ok(());
+        match may_end(&link) {
+            EndCheck::AlreadyClosed => return Ok(()),
+            EndCheck::Allowed => {}
+            EndCheck::NotStartedFromSlack => {
+                self.note(
+                    &link.channel,
+                    &link.thread_ts,
+                    "Only sessions started from Slack can be ended here; this one is left running.",
+                );
+                return Ok(());
+            }
         }
+        let target = self
+            .db
+            .get_task_by_id(task_id)?
+            .as_ref()
+            .and_then(pane_input::target);
+        if let Some((session, pane)) = target {
+            if let Err(e) = pane::end_session(&session, pane) {
+                self.note(
+                    &link.channel,
+                    &link.thread_ts,
+                    &format!("Could not close the session's zellij tab: {e:#}"),
+                );
+                return Ok(());
+            }
+        }
+        self.finish_link(
+            link,
+            "Ended from Slack: the agent stopped and its zellij tab was closed. \
+             Its conversation stays in the agent's history (`claude --resume`, or \
+             pi's session list).",
+            CardState::Ended,
+        )
+    }
+
+    fn finish_link(&mut self, mut link: Link, why: &str, state: CardState) -> Result<()> {
         link.closed = true;
         store::put_link(&self.state, &link)?;
         let card = session_card(&link, None);
@@ -583,7 +633,7 @@ impl Daemon {
             &link.channel,
             link.card_message(),
             &slack::session_card_text(&card),
-            &slack::session_card_blocks(&card, false),
+            &slack::session_card_blocks(&card, state),
         ) {
             log(&format!("could not update the session card: {e:#}"));
         }
@@ -614,9 +664,13 @@ impl Daemon {
                 RequestAction::Start => self.start_link(&task_id),
                 RequestAction::Stop => match store::link(&self.state, &task_id)? {
                     Some(l) if !l.closed => self
-                        .close_link(&task_id, "Closed from the terminal.")
+                        .close_link(
+                            &task_id,
+                            "Disconnected from the terminal. The session keeps running in zellij.",
+                        )
                         .map(|()| {
-                            "Closed the Slack thread; the session stays open here.".to_string()
+                            "Disconnected the Slack thread; the session stays open here."
+                                .to_string()
                         }),
                     _ => Ok("This session is not in Slack.".to_string()),
                 },
@@ -840,6 +894,26 @@ fn unescape(s: &str) -> String {
         .replace("&amp;", "&")
 }
 
+/// Whether End session may act on a link.
+#[derive(Debug, PartialEq, Eq)]
+enum EndCheck {
+    Allowed,
+    AlreadyClosed,
+    /// Sent with `/nibble-rc` from a session you opened: never closed from
+    /// Slack, whatever the button press claims.
+    NotStartedFromSlack,
+}
+
+fn may_end(link: &Link) -> EndCheck {
+    if link.closed {
+        EndCheck::AlreadyClosed
+    } else if !link.from_slack {
+        EndCheck::NotStartedFromSlack
+    } else {
+        EndCheck::Allowed
+    }
+}
+
 pub(super) fn card_for(task: &Task, zellij: &str) -> CardInfo {
     let sandboxed = task.sandbox_type == SandboxType::Podman
         || task
@@ -871,6 +945,16 @@ pub(super) fn session_card(link: &Link, topic: Option<&str>) -> SessionCard {
 mod tests {
     use super::super::test_support::task;
     use super::*;
+
+    #[test]
+    fn only_open_sessions_started_from_slack_can_be_ended() {
+        let mut l = super::super::test_support::link("t1", "1.1");
+        assert_eq!(may_end(&l), EndCheck::NotStartedFromSlack);
+        l.from_slack = true;
+        assert_eq!(may_end(&l), EndCheck::Allowed);
+        l.closed = true;
+        assert_eq!(may_end(&l), EndCheck::AlreadyClosed);
+    }
 
     fn msg(extra: Value) -> Value {
         let mut v = json!({

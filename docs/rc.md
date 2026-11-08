@@ -20,9 +20,15 @@ or start a new one from your phone.
   recorded by `nibble mux` if it isn't running) and gets its own thread.
   A plain message to the app offers the same form, prefilled with what you
   wrote.
-- **Close** a thread with the button on its session card, or `/nibble-rc
-  stop` in the session. Closing only stops relaying: the zellij tab and the
-  agent keep running. Tabs are never closed for you.
+- **Disconnect** a thread with the button on its session card, or
+  `/nibble-rc stop` in the session. This only stops relaying: the zellij tab
+  and the agent keep running.
+- **End session** (on the card, after a confirmation) is offered only for
+  sessions started from Slack. It closes the tab the daemon opened, which
+  stops the agent; if you added panes of your own to that tab, only the
+  agent's pane is closed. The conversation stays in the agent's history
+  (`claude --resume`, or pi's session list). Sessions you sent with
+  `/nibble-rc` are never closed from Slack.
 - **`/nibble list`** in Slack, or `nibble rc list`, shows the sessions in
   Slack.
 
@@ -65,14 +71,20 @@ zellij pane (claude | pi | omp, host or sandbox)
 1. **Create the Slack app.** At <https://api.slack.com/apps>: *Create New
    App* → *From a manifest* → pick your workspace → paste the output of
    `nibble rc manifest` (the file is `docs/rc-slack-manifest.yml`) → *Create*.
+   Leave *OAuth & Permissions* alone otherwise: no redirect URLs, PKCE or
+   token rotation (the daemon needs a token that does not expire).
 2. **Install it.** *Install App* → *Install to Workspace*. Copy the *Bot User
-   OAuth Token* (`xoxb-…`).
+   OAuth Token* (`xoxb-…`). If you change the manifest later and Slack asks
+   to reinstall, copy the token again afterwards.
 3. **App-level token.** *Basic Information* → *App-Level Tokens* → *Generate
    Token and Scopes*, add scope `connections:write`, generate, copy the
    `xapp-…` token.
 4. **Your member ID.** In Slack: your profile → ⋮ → *Copy member ID*
    (`U…`).
-5. **Store them:** `nibble rc setup` (tokens are read without echo).
+5. **Store them:** `nibble rc setup`. Tokens are read without echo, like a
+   password: paste and press Enter. Each is shown back masked (first and
+   last characters and its length) so you can tell a wrong or cut-short
+   paste. Nothing is saved until Slack accepts all three.
 6. **Start the daemon:** `systemctl --user enable --now nibble-rc` (or re-run
    `./install.sh`, which enables it once the credentials exist).
 7. **Check:** `nibble rc doctor` verifies the credentials, your DM with the
@@ -80,6 +92,29 @@ zellij pane (claude | pi | omp, host or sandbox)
 
 Then open the app in Slack (it is under *Apps*, or the agent entry in the
 top bar), and send `/nibble-rc` from any agent running in zellij.
+
+## Privacy
+
+- The app is private to the workspace you create it in. Do not turn on
+  *Manage Distribution* or submit it to the Slack Marketplace.
+- No public URL or open port: Socket Mode is an outbound connection from
+  your machine.
+- The daemon acts only for the member ID you gave `nibble rc setup`.
+  Messages, buttons and forms from anyone else are ignored, and `/nibble`
+  from anyone else answers only "This nibble belongs to someone else."
+  Other members of the workspace can still see the app.
+- Agent replies (which can include your code) are stored in Slack like any
+  DM. Set the workspace's message retention if that matters.
+- If a token leaks, regenerate it on the app's page and run `nibble rc
+  setup` again.
+
+## More than one machine
+
+Create one Slack app per machine (for example *nibble-laptop* and
+*nibble-desktop*, each from `nibble rc manifest` with a different
+`display_information.name`), and run `nibble rc setup` with that app's
+tokens on each. Two daemons sharing one app's tokens would split Slack's
+events between them at random.
 
 ## Configuration
 
@@ -121,3 +156,6 @@ directory can be typed in.
   logs it once and carries on without them; replies still flow.
 - `/nibble-rc` spends a model turn in Claude Code: the hook is missing; re-run
   `./install.sh`.
+- *"bot token check failed … invalid_auth"* in setup: copy the *Bot User OAuth
+  Token* again from *OAuth & Permissions* (reinstalling the app can replace
+  it) and check the masked echo.
