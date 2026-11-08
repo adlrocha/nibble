@@ -19,6 +19,7 @@ mod pane_input;
 mod quota_watch;
 mod rc;
 mod sandbox;
+mod sdlc;
 mod session;
 mod status;
 mod usage;
@@ -95,6 +96,12 @@ fn main() -> Result<()> {
             resume,
         } => {
             mux::cmd_mux(&db, &name, show, forget, watch, resume.as_deref())?;
+        }
+        Commands::Sdlc { action } => {
+            let code = sdlc::cmd_sdlc(action)?;
+            if code != 0 {
+                std::process::exit(code);
+            }
         }
         Commands::Vert => {
             let code = vert::cmd_vert()?;

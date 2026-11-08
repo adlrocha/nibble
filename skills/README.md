@@ -33,6 +33,7 @@ skill for the commit/PR workflow.
 |-------|---------|
 | `nibble-memory` | Cross-session memory capture/search (pairs with the nibble-memory extension). |
 | `nibble-pr-review` | Track and review GitHub PRs where you're a reviewer. |
+| `nibble-sdlc` | Take a spec to a reviewed PR with nibble-review. |
 | `omarchy-migration` | Arch/Omarchy migration guidance. |
 
 ## Installation
@@ -46,3 +47,4 @@ the host skill dirs above, which Claude Code and Pi scan automatically.
 2. Add on-demand depth under `references/` if needed.
 3. Add a provenance entry to `PROVENANCE` in `scripts/skills-lock.sh`.
 4. Run `scripts/skills-lock.sh` to update `skills-lock.json`.
+5. Add it to `NIBBLE_SKILLS` in `uninstall.sh` so uninstalling removes it.

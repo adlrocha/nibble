@@ -9,6 +9,62 @@ pub struct Cli {
 }
 
 #[derive(Subcommand)]
+pub enum SdlcAction {
+    /// Open a PR that installs nibble-review with land in shadow mode
+    Install {
+        /// Repositories as owner/name (default: the one in the current directory)
+        repos: Vec<String>,
+        /// Show what would change without opening a PR
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip the confirmation prompt
+        #[arg(short, long)]
+        yes: bool,
+        /// nibble-review tag, branch, or commit to pin (default: latest release)
+        #[arg(long = "ref")]
+        action_ref: Option<String>,
+        /// Record that main deploys to dev and a release deploys to production
+        #[arg(long)]
+        main_is_staging: bool,
+    },
+    /// Open a PR that removes the flow, keeping the reviewer unless told otherwise
+    Uninstall {
+        /// Repositories as owner/name (default: the one in the current directory)
+        repos: Vec<String>,
+        /// Show what would change without opening a PR
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip the confirmation prompt
+        #[arg(short, long)]
+        yes: bool,
+        /// Also delete the nibble-review workflow
+        #[arg(long)]
+        remove_reviewer: bool,
+    },
+    /// Report drift between the default branch and the expected setup
+    Check {
+        /// Repositories as owner/name (default: the one in the current directory)
+        repos: Vec<String>,
+    },
+    /// List open PRs with their land result
+    Status {
+        /// Repositories as owner/name (default: the one in the current directory)
+        repos: Vec<String>,
+    },
+    /// Merge a PR's current head, showing land's result first
+    Merge {
+        /// Pull request number
+        pr: u64,
+        /// Let GitHub merge once its required checks pass
+        #[arg(long)]
+        auto: bool,
+        /// Skip the prompt, only when land cleared this commit
+        #[arg(short, long)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum Commands {
     // ── Sandbox subcommands ────────────────────────────────────────────────────
     /// Manage sandboxed agent containers
@@ -77,6 +133,12 @@ pub enum Commands {
 
     /// Open vert on the repo in the current directory (the Alt v pane)
     Vert,
+
+    /// Install and run the delivery flow in one or more repositories
+    Sdlc {
+        #[command(subcommand)]
+        action: SdlcAction,
+    },
 
     /// Open a named zellij session whose agents come back after a crash
     ///

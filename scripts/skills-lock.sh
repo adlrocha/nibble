@@ -27,6 +27,7 @@ declare -A PROVENANCE=(
   ["git-commit-pr"]="we-are-singular/skills|github|vendored-2026-07|MIT"
   ["nibble-memory"]="vendored:local|local|unpinned|proprietary"
   ["nibble-pr-review"]="vendored:local|local|unpinned|proprietary"
+  ["nibble-sdlc"]="vendored:local|local|unpinned|proprietary"
   ["omarchy-migration"]="vendored:local|local|unpinned|proprietary"
 )
 
