@@ -1,0 +1,12 @@
+# Read by nibble-review from the default branch, and by `nibble sdlc`.
+[land]
+mode = "shadow"  # or "off"; shadow only reports and never merges or blocks
+# true when main deploys to dev and a release deploys to production
+main_is_staging = false
+# Optional, with nibble-review's defaults when left out:
+# max_lines = 400
+# max_review_rounds = 5
+# always_human = ["src/auth/**"]  # extra paths that always need a person
+
+[merge]
+method = "merge"  # squash, merge, or rebase; used by `nibble sdlc merge`. main lands merge commits
