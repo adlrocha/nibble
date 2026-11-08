@@ -626,10 +626,10 @@ Network is host-mode, so services started inside the container (e.g. `npm run de
 | `nibble keybinds --install` | Add zellij keybindings (Alt a: sidebar, Alt v: vert) to `config.kdl` (or `$ZELLIJ_CONFIG_FILE`); run by `install.sh` |
 | `nibble keybinds --uninstall` | Remove nibble's section from the zellij config (bindings outside it are untouched) |
 | `nibble vert` | Open vert on the current repo, or show how to install it (the Alt v pane) |
-| `nibble sdlc install` | Open a PR that installs nibble-review with `land` in shadow mode (`--dry-run`, `--yes`, `--ref`, `--main-is-staging`) |
-| `nibble sdlc uninstall` | Open a PR that removes the flow and keeps the reviewer (`--dry-run`, `--yes`, `--remove-reviewer`) |
-| `nibble sdlc check` | Report drift between the default branch and the expected setup |
-| `nibble sdlc status` | List open PRs with their land result |
+| `nibble sdlc install [owner/name…]` | Open a PR that installs nibble-review with `land` in shadow mode (`--dry-run`, `--yes`, `--ref`, `--main-is-staging`) |
+| `nibble sdlc uninstall [owner/name…]` | Open a PR that removes the flow and keeps the reviewer (`--dry-run`, `--yes`, `--remove-reviewer`) |
+| `nibble sdlc check [owner/name…]` | Report drift between the default branch and the expected setup |
+| `nibble sdlc status [owner/name…]` | List open PRs (up to 500) with their land result |
 | `nibble sdlc merge <pr>` | Merge a PR's current head after showing land's result (`--auto`, `--yes`); only a person at a terminal can override land |
 | `nibble prune` | Mark stale processes as exited |
 | `nibble sandbox spawn <repo>` | Start a sandboxed agent |

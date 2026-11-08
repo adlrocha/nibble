@@ -29,6 +29,8 @@ const LAND_CONTEXT: &str = "nibble-review/land";
 /// Land's description when it clears a commit, set by `statusDescription` in
 /// nibble-review. Matched exactly: other descriptions quote file names.
 const LAND_CLEARED: &str = "shadow: would merge";
+/// Most open PRs `status` lists; gh's own default of 30 would cut silently.
+const STATUS_LIMIT: &str = "500";
 const SECRET_NAME: &str = "OPENCODE_API_KEY";
 const SECRET_UNKNOWN: &str = "Could not check the secret: listing secrets needs admin access.";
 const LAND_INPUT: &str = "land: \"true\"";
@@ -581,7 +583,8 @@ fn ensure_statuses_write(text: &str) -> Result<String> {
     let range = block + 1..block + 1 + count;
     // Match the block's own indentation, which isn't always two spaces.
     let child_indent = borrowed[range.clone()]
-        .first()
+        .iter()
+        .find(|line| !line.trim().is_empty())
         .map_or(parent_indent + 2, |line| indent_of(line));
     let line = format!("{}{STATUSES_PERMISSION}", " ".repeat(child_indent));
     Ok(set_key(text, range.clone(), "statuses:", range.end, &line))
@@ -891,6 +894,8 @@ fn render_status(shell: &dyn Shell) -> Result<String> {
             "list",
             "--state",
             "open",
+            "--limit",
+            STATUS_LIMIT,
             "--json",
             "number,title,headRefOid",
         ],

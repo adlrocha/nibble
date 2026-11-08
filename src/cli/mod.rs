@@ -134,7 +134,7 @@ pub enum Commands {
     /// Open vert on the repo in the current directory (the Alt v pane)
     Vert,
 
-    /// Install and run the delivery flow in the current repository
+    /// Install and run the delivery flow in one or more repositories
     Sdlc {
         #[command(subcommand)]
         action: SdlcAction,

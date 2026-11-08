@@ -4,23 +4,24 @@ use std::io::Cursor;
 
 /// Answers commands by the first matching substring and records every call.
 struct FakeShell {
-    answers: Vec<(&'static str, Result<String, String>)>,
+    answers: Vec<(String, Result<String, String>)>,
     calls: RefCell<Vec<String>>,
 }
 
 impl FakeShell {
-    fn new(answers: &[(&'static str, &str)]) -> Self {
+    fn new(answers: &[(&str, &str)]) -> Self {
         Self {
             answers: answers
                 .iter()
-                .map(|(key, value)| (*key, Ok((*value).to_string())))
+                .map(|(key, value)| ((*key).to_string(), Ok((*value).to_string())))
                 .collect(),
             calls: RefCell::new(Vec::new()),
         }
     }
 
-    fn failing(mut self, key: &'static str) -> Self {
-        self.answers.insert(0, (key, Err(format!("{key} failed"))));
+    fn failing(mut self, key: &str) -> Self {
+        self.answers
+            .insert(0, (key.to_string(), Err(format!("{key} failed"))));
         self
     }
 
@@ -33,7 +34,11 @@ impl Shell for FakeShell {
     fn run(&self, program: &str, args: &[&str], _dir: Option<&Path>) -> Result<String> {
         let call = format!("{program} {}", args.join(" "));
         self.calls.borrow_mut().push(call.clone());
-        match self.answers.iter().find(|(key, _)| call.contains(key)) {
+        match self
+            .answers
+            .iter()
+            .find(|(key, _)| call.contains(key.as_str()))
+        {
             Some((_, Ok(value))) => Ok(value.trim_end().to_string()),
             Some((_, Err(message))) => Err(anyhow!("{message}")),
             None => Ok(String::new()),
@@ -221,16 +226,20 @@ fn removing_land_reverses_the_workflow_edits() {
 }
 
 /// A repository whose default branch holds only the named files.
-fn tree(files: &[(&'static str, &'static str)]) -> FakeShell {
-    let mut answers: Vec<(&'static str, &str)> = Vec::new();
-    for (path, text) in files {
-        answers.push((
-            Box::leak(format!("origin/main:{path}").into_boxed_str()),
-            text,
-        ));
-        answers.push((Box::leak(format!("-- {path}").into_boxed_str()), path));
+fn tree(files: &[(&str, &str)]) -> FakeShell {
+    let answers = files
+        .iter()
+        .flat_map(|(path, text)| {
+            [
+                (format!("origin/main:{path}"), Ok((*text).to_string())),
+                (format!("-- {path}"), Ok((*path).to_string())),
+            ]
+        })
+        .collect();
+    FakeShell {
+        answers,
+        calls: RefCell::new(Vec::new()),
     }
-    FakeShell::new(&answers)
 }
 
 #[test]
@@ -268,22 +277,16 @@ fn install_keeps_customisations_and_never_touches_agent_instructions() {
 #[test]
 fn rerunning_install_changes_nothing() {
     let first = install_changes(&tree(&[]), &repo(), &pin(), false).unwrap();
-    let text = |index: usize| -> &'static str {
-        Box::leak(first[index].content.clone().unwrap().into_boxed_str())
-    };
-    let shell = tree(&[(WORKFLOW_PATH, text(0)), (CONFIG_PATH, text(1))]);
+    let text = |index: usize| first[index].content.clone().unwrap();
+    let shell = tree(&[(WORKFLOW_PATH, &text(0)), (CONFIG_PATH, &text(1))]);
     assert_eq!(install_changes(&shell, &repo(), &pin(), false).unwrap(), []);
 }
 
 #[test]
 fn uninstall_keeps_the_reviewer_unless_asked() {
-    let installed: &'static str = Box::leak(
-        ensure_statuses_write(&ensure_land_input(WORKFLOW).unwrap())
-            .unwrap()
-            .into_boxed_str(),
-    );
+    let installed = ensure_statuses_write(&ensure_land_input(WORKFLOW).unwrap()).unwrap();
     let shell = tree(&[
-        (WORKFLOW_PATH, installed),
+        (WORKFLOW_PATH, &installed),
         (CONFIG_PATH, "[land]\n"),
         ("AGENTS.md", "# Own\n"),
     ]);
@@ -478,31 +481,29 @@ fn check_reports_each_piece() {
     let empty = check_repo(&bare, &repo()).unwrap();
     assert!(empty.iter().all(|(ok, _)| !ok));
 
-    let installed: &'static str = Box::leak(
-        ensure_statuses_write(&ensure_land_input(WORKFLOW).unwrap())
-            .unwrap()
-            .into_boxed_str(),
-    );
+    let installed = ensure_statuses_write(&ensure_land_input(WORKFLOW).unwrap()).unwrap();
     let mut shell = tree(&[
-        (WORKFLOW_PATH, installed),
+        (WORKFLOW_PATH, &installed),
         (CONFIG_PATH, "[land]\nmain_is_staging = true\n"),
     ]);
     shell
         .answers
-        .push(("secret list", Ok(SECRET_NAME.to_string())));
+        .push(("secret list".to_string(), Ok(SECRET_NAME.to_string())));
     shell
         .answers
-        .push(("releases/latest", Err("no release".to_string())));
+        .push(("releases/latest".to_string(), Err("no release".to_string())));
     let checks = check_repo(&shell, &repo()).unwrap();
     assert!(checks.iter().all(|(ok, _)| *ok), "{checks:?}");
     assert!(checks.last().unwrap().1.contains("staging step: yes"));
 
     // An old pin is reported, but it isn't drift: it can be deliberate.
-    let mut stale = tree(&[(WORKFLOW_PATH, installed)]);
+    let mut stale = tree(&[(WORKFLOW_PATH, &installed)]);
     stale
         .answers
-        .push(("releases/latest", Ok("v9".to_string())));
-    stale.answers.push(("commits/v9", Ok("f".repeat(40))));
+        .push(("releases/latest".to_string(), Ok("v9".to_string())));
+    stale
+        .answers
+        .push(("commits/v9".to_string(), Ok("f".repeat(40))));
     let checks = check_repo(&stale, &repo()).unwrap();
     assert!(checks
         .iter()
@@ -699,7 +700,7 @@ fn open_with<'a>(
         let answers = shell
             .answers
             .iter()
-            .map(|(key, value)| (*key, value.clone()))
+            .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
         Ok(Workspace {
             shell: Box::new(FakeShell {
@@ -786,4 +787,29 @@ fn the_real_shell_runs_in_its_directory_with_the_named_repository() {
     let seen = shell.run("pwd", &[], Some(other.path())).unwrap();
     assert!(seen.ends_with(other.path().file_name().unwrap().to_str().unwrap()));
     assert!(shell.run("false", &[], None).is_err());
+}
+
+#[test]
+fn a_permissions_block_opening_with_a_blank_line_keeps_its_indentation() {
+    let workflow = "permissions:
+
+  contents: read
+jobs:
+  review:
+    steps:
+      - uses: adlrocha/nibble-review@v1
+        with:
+          a: b
+";
+    let once = ensure_statuses_write(workflow).unwrap();
+    assert!(
+        once.contains("  contents: read\n  statuses: write\n"),
+        "{once}"
+    );
+    assert!(!once.lines().any(|line| line == "statuses: write"));
+    assert_eq!(
+        ensure_statuses_write(&once).unwrap(),
+        once,
+        "rerun converges"
+    );
 }

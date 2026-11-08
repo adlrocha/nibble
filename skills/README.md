@@ -47,3 +47,4 @@ the host skill dirs above, which Claude Code and Pi scan automatically.
 2. Add on-demand depth under `references/` if needed.
 3. Add a provenance entry to `PROVENANCE` in `scripts/skills-lock.sh`.
 4. Run `scripts/skills-lock.sh` to update `skills-lock.json`.
+5. Add it to `NIBBLE_SKILLS` in `uninstall.sh` so uninstalling removes it.

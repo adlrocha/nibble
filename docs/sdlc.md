@@ -47,7 +47,7 @@ Each repository gets a heading. `install`, `uninstall` and `check` work from a t
 
 ```bash
 nibble sdlc check        # compare the default branch with the expected setup
-nibble sdlc status       # list open PRs with their land result
+nibble sdlc status       # list open PRs (up to 500) with their land result
 nibble sdlc merge 42     # merge the exact head of PR 42
 ```
 
