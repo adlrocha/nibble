@@ -660,19 +660,17 @@ fn the_exit_code_is_the_worst_result() {
 }
 
 #[test]
-fn the_real_shell_runs_in_its_directory_with_the_named_repository() {
+fn the_real_shell_runs_in_its_directory() {
     let dir = tempfile::tempdir().unwrap();
     let shell = RealShell {
         dir: Some(dir.path().to_path_buf()),
-        gh_repo: Some("a/b".to_string()),
     };
     let seen = shell
-        .run("sh", &["-c", "printf '%s %s' \"$PWD\" \"$GH_REPO\""], None)
+        .run("sh", &["-c", "printf '%s' \"$PWD\""], None)
         .unwrap();
     let real = dir.path().canonicalize().unwrap();
     assert!(
-        seen == format!("{} a/b", dir.path().display())
-            || seen == format!("{} a/b", real.display()),
+        seen == dir.path().display().to_string() || seen == real.display().to_string(),
         "{seen}"
     );
     // An explicit directory still wins, as publishing from a worktree needs.

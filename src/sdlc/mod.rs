@@ -37,12 +37,10 @@ trait Shell {
     fn run(&self, program: &str, args: &[&str], dir: Option<&Path>) -> Result<String>;
 }
 
-/// Runs commands for real, optionally inside another checkout (`dir`) or
-/// against another GitHub repository (`gh_repo`, passed to `gh` as `GH_REPO`).
+/// Runs commands for real, optionally inside another checkout (`dir`).
 #[derive(Default)]
 struct RealShell {
     dir: Option<PathBuf>,
-    gh_repo: Option<String>,
 }
 
 impl Shell for RealShell {
@@ -51,9 +49,6 @@ impl Shell for RealShell {
         command.args(args);
         if let Some(dir) = dir.or(self.dir.as_deref()) {
             command.current_dir(dir);
-        }
-        if let Some(name) = &self.gh_repo {
-            command.env("GH_REPO", name);
         }
         let output = command
             .output()
@@ -209,7 +204,6 @@ fn clone_repo(name: &str) -> Result<Workspace> {
     Ok(Workspace {
         shell: Box::new(RealShell {
             dir: Some(clone.path().to_path_buf()),
-            ..RealShell::default()
         }),
         _clone: Some(clone),
     })

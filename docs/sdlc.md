@@ -48,7 +48,9 @@ Each repository gets a heading. `install`, `uninstall` and `check` work from a t
 nibble sdlc check        # compare the default branch with the expected setup
 ```
 
-Land's result for each PR is in its `## Risk` comment and its `nibble-review/land` status. Merging is yours: use GitHub or `gh pr merge`. nibble has no merge command, so an agent can't turn land's report into a merge.
+Land's result for each PR is in its `## Risk` comment and in the `nibble-review/land` status on the commit it judged. Merging is yours: use GitHub, or `gh pr merge <pr> --match-head-commit <sha>` with the commit land judged, so a later push can't merge without a land result. nibble no longer merges on land's report. Agents are kept from merging by the `nibble-sdlc` skill and your `AGENTS.md`, which are instructions, not something nibble enforces.
+
+A `[merge]` table in an older `.nibble/sdlc.toml` is no longer read by anything; delete it whenever you like.
 
 ## Remove it
 
