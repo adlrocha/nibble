@@ -32,26 +32,23 @@ The agent's side is the `nibble-sdlc` skill, which `install.sh` installs globall
 
 ## Several repositories
 
-`install`, `uninstall`, `check` and `status` take repositories as `owner/name`. With none, they act on the repository in the current directory.
+`install`, `uninstall` and `check` take repositories as `owner/name`. With none, they act on the repository in the current directory.
 
 ```bash
 nibble sdlc install --dry-run adlrocha/nibble adlrocha/nibble-review
 nibble sdlc install --yes adlrocha/nibble adlrocha/nibble-review
 nibble sdlc check adlrocha/nibble adlrocha/nibble-review
-nibble sdlc status adlrocha/nibble adlrocha/nibble-review
 ```
 
-Each repository gets a heading. `install`, `uninstall` and `check` work from a temporary clone without a checkout, which is deleted afterwards; `status` only talks to GitHub. A failing repository is reported and the rest still run, and the exit code is non-zero if any failed or, for `check`, drifted. `merge` acts on the current directory only.
+Each repository gets a heading. `install`, `uninstall` and `check` work from a temporary clone without a checkout, which is deleted afterwards. A failing repository is reported and the rest still run, and the exit code is non-zero if any failed or, for `check`, drifted.
 
 ## Use it
 
 ```bash
 nibble sdlc check        # compare the default branch with the expected setup
-nibble sdlc status       # list open PRs (up to 500) with their land result
-nibble sdlc merge 42     # merge the exact head of PR 42
 ```
 
-`merge` shows land's result, then asks. It pins the commit, so a later push stops it, and uses `[merge] method` from `.nibble/sdlc.toml` on the default branch. `--auto` lets GitHub merge once required checks pass. It is pinned only when you enable it, and land isn't a required check yet, so a later push can merge without land clearing it. Without a terminal, `--yes` works only when land cleared that commit, so an agent can't use it to override land.
+Land's result for each PR is in its `## Risk` comment and its `nibble-review/land` status. Merging is yours: use GitHub or `gh pr merge`. nibble has no merge command, so an agent can't turn land's report into a merge.
 
 ## Remove it
 

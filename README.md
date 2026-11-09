@@ -48,7 +48,7 @@ What it aims for:
 | 28 | **Kimi backend** | experimental | `claude --kimi` (via the installed claude wrapper) points Claude Code at `KIMI_BASE_URL` / `KIMI_API_KEY` for that session |
 | 29 | **Recoverable zellij sessions** | core | `nibble mux [name]` opens a named zellij session whose Claude Code and pi agents (host and sandbox) come back after a killed session, crash or reboot: a watcher records which agent is in which tab, and a gone session is rebuilt with each pane resuming its own conversation. See [docs/mux.md](docs/mux.md) |
 | 30 | **Slack remote control** | experimental | `/nibble-rc` in a Claude Code, pi or omp session (host or sandbox) continues it from a Slack thread while it stays live in zellij: thread replies are typed into the pane, finished turns post their reply, Slack's stop button interrupts. `/nibble` in Slack starts a new session (host or sandbox, any repo) in a new tab of the `nibble mux` session (`rc.zellij_session`, default `main`). Disconnect leaves a session running; End session stops a host session started from Slack and closes its tab. `nibble-rc.service` holds the Socket Mode connection; tokens stay outside sandbox reach. Needs a Slack app you create once ([setup](#slack-remote-control-nibble-rc)). See [docs/rc.md](docs/rc.md) |
-| 31 | **SDLC flow** | dx | `nibble sdlc` installs nibble-review and the delivery flow into one or more repos through a PR each (no `AGENTS.md` edits; agents follow the `nibble-sdlc` skill), reports drift, lists PRs with their `land` result, and merges a PR's exact head. See [docs/sdlc.md](docs/sdlc.md) |
+| 31 | **SDLC flow** | dx | `nibble sdlc` installs nibble-review and the delivery flow into one or more repos through a PR each (no `AGENTS.md` edits; agents follow the `nibble-sdlc` skill), and reports drift. Merging stays with you. See [docs/sdlc.md](docs/sdlc.md) |
 
 ---
 
@@ -607,8 +607,6 @@ Network is host-mode, so services started inside the container (e.g. `npm run de
 | `nibble sdlc install [owner/name…]` | Open a PR that installs nibble-review with `land` in shadow mode (`--dry-run`, `--yes`, `--ref`, `--main-is-staging`) |
 | `nibble sdlc uninstall [owner/name…]` | Open a PR that removes the flow and keeps the reviewer (`--dry-run`, `--yes`, `--remove-reviewer`) |
 | `nibble sdlc check [owner/name…]` | Report drift between the default branch and the expected setup |
-| `nibble sdlc status [owner/name…]` | List open PRs (up to 500) with their land result |
-| `nibble sdlc merge <pr>` | Merge a PR's current head after showing land's result (`--auto`, `--yes`); only a person at a terminal can override land |
 | `nibble prune` | Mark stale processes as exited |
 | `nibble sandbox spawn <repo>` | Start a sandboxed agent |
 | `nibble sandbox list` | List open sandboxes |

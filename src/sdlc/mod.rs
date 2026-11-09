@@ -1,4 +1,4 @@
-//! `nibble sdlc`: install and run the delivery flow in a repository.
+//! `nibble sdlc`: install, check, or remove the delivery flow in a repository.
 //!
 //! The flow is committed to the repository through a pull request, so it is
 //! reviewable and easy to back out: `install` and `uninstall` both open a PR and
@@ -9,12 +9,12 @@
 //! Its `AGENTS.md` is left alone; the config file marks the repository as using
 //! the flow, and the global `nibble-sdlc` skill carries the agent's rules.
 //!
-//! `install`, `uninstall`, `check` and `status` take `owner/name` arguments to
+//! `install`, `uninstall` and `check` take `owner/name` arguments to
 //! act on other repositories, and default to the one in the current directory.
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
-use std::io::{BufRead, IsTerminal, Write};
+use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -25,12 +25,6 @@ const WORKFLOW_PATH: &str = ".github/workflows/nibble-review.yml";
 const CONFIG_PATH: &str = ".nibble/sdlc.toml";
 const INSTALL_BRANCH: &str = "chore/nibble-sdlc";
 const UNINSTALL_BRANCH: &str = "chore/nibble-sdlc-remove";
-const LAND_CONTEXT: &str = "nibble-review/land";
-/// Land's description when it clears a commit, set by `statusDescription` in
-/// nibble-review. Matched exactly: other descriptions quote file names.
-const LAND_CLEARED: &str = "shadow: would merge";
-/// Most open PRs `status` lists; gh's own default of 30 would cut silently.
-const STATUS_LIMIT: &str = "500";
 const SECRET_NAME: &str = "OPENCODE_API_KEY";
 const SECRET_UNKNOWN: &str = "Could not check the secret: listing secrets needs admin access.";
 const LAND_INPUT: &str = "land: \"true\"";
@@ -101,8 +95,6 @@ struct Change {
 struct SdlcFile {
     #[serde(default)]
     land: LandSettings,
-    #[serde(default)]
-    merge: MergeSettings,
 }
 
 #[derive(Deserialize, Default)]
@@ -111,29 +103,9 @@ struct LandSettings {
     main_is_staging: bool,
 }
 
-#[derive(Deserialize)]
-struct MergeSettings {
-    #[serde(default = "default_merge_method")]
-    method: String,
-}
-
-impl Default for MergeSettings {
-    fn default() -> Self {
-        Self {
-            method: default_merge_method(),
-        }
-    }
-}
-
-fn default_merge_method() -> String {
-    "squash".to_string()
-}
-
 /// Entry point for `nibble sdlc`; returns the process exit code.
 pub(crate) fn cmd_sdlc(action: SdlcAction) -> Result<i32> {
-    let stdin = std::io::stdin();
-    let interactive = stdin.is_terminal();
-    let mut input = stdin.lock();
+    let mut input = std::io::stdin().lock();
     let mut out = std::io::stdout();
     match action {
         SdlcAction::Install {
@@ -184,40 +156,6 @@ pub(crate) fn cmd_sdlc(action: SdlcAction) -> Result<i32> {
                 }
                 Ok(i32::from(checks.iter().any(|(ok, _)| !ok)))
             })
-        }
-        SdlcAction::Status { repos } => {
-            // Status only talks to GitHub, so it needs no clone.
-            let open = |name: &str| -> Result<Workspace> {
-                Ok(Workspace {
-                    shell: Box::new(RealShell {
-                        gh_repo: Some(name.to_string()),
-                        ..RealShell::default()
-                    }),
-                    _clone: None,
-                })
-            };
-            for_each_repo(&repos, &mut out, &open, &mut |shell, out| {
-                write!(out, "{}", render_status(shell)?)?;
-                Ok(0)
-            })
-        }
-        SdlcAction::Merge { pr, auto, yes } => {
-            let shell = RealShell::default();
-            let repo = load_repo(&shell)?;
-            let method = merge_method(&shell, &repo)?;
-            merge(
-                &shell,
-                &MergeRequest {
-                    pr,
-                    auto,
-                    yes,
-                    interactive,
-                    method,
-                },
-                &mut input,
-                &mut out,
-            )?;
-            Ok(0)
         }
     }
 }
@@ -446,10 +384,7 @@ fn render_config(main_is_staging: bool) -> String {
          # Optional, with nibble-review's defaults when left out:\n\
          # max_lines = 400\n\
          # max_review_rounds = 5\n\
-         # always_human = [\"src/auth/**\"]  # extra paths that always need a person\n\
-         \n\
-         [merge]\n\
-         method = \"squash\"  # squash, merge, or rebase; used by `nibble sdlc merge`\n"
+         # always_human = [\"src/auth/**\"]  # extra paths that always need a person\n"
     )
 }
 
@@ -859,137 +794,7 @@ fn check_repo(shell: &dyn Shell, repo: &Repo) -> Result<Vec<(bool, String)>> {
 }
 
 fn parse_config(text: &str) -> Result<SdlcFile> {
-    let file: SdlcFile = toml::from_str(text).with_context(|| format!("invalid {CONFIG_PATH}"))?;
-    if !["squash", "merge", "rebase"].contains(&file.merge.method.as_str()) {
-        bail!(
-            "invalid {CONFIG_PATH}: unknown merge method {}",
-            file.merge.method
-        );
-    }
-    Ok(file)
-}
-
-/// Reads the merge method from the default branch, like every other setting.
-fn merge_method(shell: &dyn Shell, repo: &Repo) -> Result<String> {
-    match read_default(shell, repo, CONFIG_PATH)? {
-        Some(text) => Ok(parse_config(&text)?.merge.method),
-        None => Ok(default_merge_method()),
-    }
-}
-
-/// Reads land's report for a commit. PR status rollups leave descriptions out,
-/// so this asks the commit status API.
-fn land_description(shell: &dyn Shell, sha: &str) -> Result<Option<String>> {
-    let filter = format!(".statuses[] | select(.context == \"{LAND_CONTEXT}\") | .description");
-    let endpoint = format!("repos/{{owner}}/{{repo}}/commits/{sha}/status");
-    let text = shell.run("gh", &["api", &endpoint, "--jq", &filter], None)?;
-    Ok(text.lines().next().map(str::to_string))
-}
-
-fn render_status(shell: &dyn Shell) -> Result<String> {
-    let raw = shell.run(
-        "gh",
-        &[
-            "pr",
-            "list",
-            "--state",
-            "open",
-            "--limit",
-            STATUS_LIMIT,
-            "--json",
-            "number,title,headRefOid",
-        ],
-        None,
-    )?;
-    let prs: serde_json::Value = serde_json::from_str(&raw).context("failed to parse gh output")?;
-    let lines = prs
-        .as_array()
-        .map(Vec::as_slice)
-        .unwrap_or_default()
-        .iter()
-        .map(|pr| {
-            // One failed lookup shouldn't lose the rest of the report.
-            let land = land_description(shell, pr["headRefOid"].as_str().unwrap_or_default())
-                .ok()
-                .flatten();
-            format!(
-                "#{} {}: {}\n",
-                pr["number"],
-                pr["title"].as_str().unwrap_or(""),
-                land.unwrap_or_else(|| "no land result yet".to_string())
-            )
-        })
-        .collect::<Vec<String>>();
-    Ok(if lines.is_empty() {
-        "No open pull requests.\n".to_string()
-    } else {
-        lines.concat()
-    })
-}
-
-struct MergeRequest {
-    pr: u64,
-    auto: bool,
-    yes: bool,
-    interactive: bool,
-    method: String,
-}
-
-/// Merges the PR's current head, and only a person can override land.
-fn merge(
-    shell: &dyn Shell,
-    request: &MergeRequest,
-    input: &mut dyn BufRead,
-    out: &mut dyn Write,
-) -> Result<()> {
-    let number = request.pr.to_string();
-    let raw = shell.run(
-        "gh",
-        &["pr", "view", &number, "--json", "headRefOid,title"],
-        None,
-    )?;
-    let pr: serde_json::Value = serde_json::from_str(&raw).context("failed to parse gh output")?;
-    let head = pr["headRefOid"]
-        .as_str()
-        .ok_or_else(|| anyhow!("PR #{number} has no head commit"))?;
-    let land = land_description(shell, head)?;
-    let clear = land.as_deref() == Some(LAND_CLEARED);
-    writeln!(
-        out,
-        "#{number} {}\nLand: {}",
-        pr["title"].as_str().unwrap_or(""),
-        land.as_deref().unwrap_or("no result for this commit")
-    )?;
-
-    if !clear && !request.interactive {
-        bail!("land did not clear PR #{number}, and only a person at a terminal can override it");
-    }
-    if !(clear && request.yes) {
-        if !request.interactive {
-            bail!("pass --yes to merge PR #{number} without a terminal");
-        }
-        if !confirm("Merge this commit?", input, out)? {
-            writeln!(out, "Cancelled.")?;
-            return Ok(());
-        }
-    }
-
-    let method = format!("--{}", request.method);
-    let mut args = vec!["pr", "merge", &number, &method, "--match-head-commit", head];
-    if request.auto {
-        args.push("--auto");
-    }
-    shell.run("gh", &args, None)?;
-    writeln!(
-        out,
-        "{}",
-        if request.auto {
-            "Auto-merge enabled."
-        } else {
-            "Merged."
-        }
-    )?;
-    Ok(())
+    toml::from_str(text).with_context(|| format!("invalid {CONFIG_PATH}"))
 }
 
 #[cfg(test)]
