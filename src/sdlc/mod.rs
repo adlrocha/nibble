@@ -471,12 +471,22 @@ fn reviewer_step(text: &str) -> Result<(Vec<&str>, usize)> {
     Ok((lines, uses))
 }
 
-/// Indentation of the first non-blank line in `block`, or `fallback` when it
-/// has none: hand-written workflows don't always indent by two.
-fn entry_indent(lines: &[&str], block: std::ops::Range<usize>, fallback: usize) -> usize {
+/// Indentation of the first entry in `block` other than `key` itself, or
+/// `fallback` when it has none: hand-written workflows don't always indent by
+/// two. Blank lines, comments and `key` are skipped, because a comment can sit
+/// at any depth and an earlier release may have written `key` at the wrong one.
+fn entry_indent(
+    lines: &[&str],
+    block: std::ops::Range<usize>,
+    key: &str,
+    fallback: usize,
+) -> usize {
     lines[block]
         .iter()
-        .find(|line| !line.trim().is_empty())
+        .find(|line| {
+            let trimmed = line.trim_start();
+            !trimmed.is_empty() && !trimmed.starts_with('#') && !trimmed.starts_with(key)
+        })
         .map_or(fallback, |line| indent_of(line))
 }
 
@@ -495,17 +505,8 @@ fn set_pin(text: &str, pin: &Pin) -> Result<String> {
         .split_once('@')
         .ok_or_else(|| anyhow!("unexpected uses line in {WORKFLOW_PATH}"))?;
     let pinned = format!("{head}@{}", pin_text(pin));
-    let lines: Vec<String> = borrowed
-        .iter()
-        .enumerate()
-        .map(|(i, line)| {
-            if i == index {
-                pinned.clone()
-            } else {
-                (*line).to_string()
-            }
-        })
-        .collect();
+    let mut lines: Vec<String> = borrowed.iter().map(|line| line.to_string()).collect();
+    lines[index] = pinned;
     Ok(join_lines(&lines))
 }
 
@@ -530,7 +531,7 @@ fn ensure_land_input(text: &str) -> Result<String> {
         .take_while(|candidate| candidate.trim().is_empty() || indent_of(candidate) > key_indent)
         .count();
     let block = with + 1..with + 1 + block_len;
-    let indent = entry_indent(&borrowed, block.clone(), key_indent + 2);
+    let indent = entry_indent(&borrowed, block.clone(), "land:", key_indent + 2);
     let line = format!("{}{LAND_INPUT}", " ".repeat(indent));
     Ok(set_key(text, block, "land:", with + 1, &line))
 }
@@ -600,7 +601,7 @@ fn ensure_statuses_write(text: &str) -> Result<String> {
         .map_or(0, |last| last + 1);
     let range = block + 1..block + 1 + count;
     // Match the block's own indentation, which isn't always two spaces.
-    let child_indent = entry_indent(&borrowed, range.clone(), parent_indent + 2);
+    let child_indent = entry_indent(&borrowed, range.clone(), "statuses:", parent_indent + 2);
     let line = format!("{}{STATUSES_PERMISSION}", " ".repeat(child_indent));
     Ok(set_key(text, range.clone(), "statuses:", range.end, &line))
 }

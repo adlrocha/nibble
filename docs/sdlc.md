@@ -8,6 +8,7 @@ Land is in **shadow mode**: it reports and never merges or blocks.
 
 - An authenticated `gh`, with write access to the repository.
 - A nibble-review release that includes `land`. Until one ships, pass `--ref` with a commit or branch that has it, or the `land` input does nothing.
+- If `.github/workflows/nibble-review.yml` already exists, a `permissions:` block in it, at the top level or on the reviewer job. Install adds `statuses: write` to that block and stops when there is none.
 - An `OPENCODE_API_KEY` repository secret. Listing secrets needs admin access, so without it the secret check is skipped.
 
 ## Install
