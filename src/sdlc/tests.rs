@@ -349,8 +349,7 @@ fn apply_with(
         &repo(),
         changes,
         &PUBLISH,
-        dry,
-        yes,
+        Mode { dry_run: dry, yes },
         &mut Cursor::new(answer.to_string()),
         &mut out,
     );
@@ -702,5 +701,80 @@ jobs:
         ensure_statuses_write(&once).unwrap(),
         once,
         "rerun converges"
+    );
+}
+
+#[test]
+fn land_matches_a_four_space_with_block() {
+    let workflow = "permissions:
+  contents: read
+jobs:
+  review:
+    steps:
+      - uses: adlrocha/nibble-review@v1
+        with:
+            api-key: ${{ secrets.KEY }}
+";
+    let once = ensure_land_input(workflow).unwrap();
+    assert!(
+        once.contains("        with:\n            land: \"true\"\n            api-key:"),
+        "{once}"
+    );
+    assert_eq!(ensure_land_input(&once).unwrap(), once, "rerun converges");
+}
+
+#[test]
+fn land_skips_a_leading_comment_for_its_indent() {
+    let workflow = "permissions:
+  contents: read
+jobs:
+  review:
+    steps:
+      - uses: adlrocha/nibble-review@v1
+        with:
+          # the key lives in a secret
+            api-key: ${{ secrets.KEY }}
+";
+    let once = ensure_land_input(workflow).unwrap();
+    assert!(
+        once.contains("        with:\n            land: \"true\"\n          # the key"),
+        "{once}"
+    );
+}
+
+#[test]
+fn reinstall_repairs_a_misindented_land_line() {
+    let broken = "permissions:
+  contents: read
+jobs:
+  review:
+    steps:
+      - uses: adlrocha/nibble-review@v1
+        with:
+          land: \"true\"
+            api-key: ${{ secrets.KEY }}
+";
+    let fixed = ensure_land_input(broken).unwrap();
+    assert_ne!(fixed, broken, "a misindented land line counts as drift");
+    assert!(
+        fixed.contains("        with:\n            land: \"true\"\n            api-key:"),
+        "{fixed}"
+    );
+}
+
+#[test]
+fn reinstall_repairs_a_misindented_statuses_line() {
+    let broken = "permissions:
+  statuses: write
+    contents: read
+jobs:
+  review:
+    steps:
+      - uses: adlrocha/nibble-review@v1
+";
+    let fixed = ensure_statuses_write(broken).unwrap();
+    assert!(
+        fixed.starts_with("permissions:\n    statuses: write\n    contents: read\n"),
+        "{fixed}"
     );
 }

@@ -8,6 +8,7 @@ Land is in **shadow mode**: it reports and never merges or blocks.
 
 - An authenticated `gh`, with write access to the repository.
 - A nibble-review release that includes `land`. Until one ships, pass `--ref` with a commit or branch that has it, or the `land` input does nothing.
+- If `.github/workflows/nibble-review.yml` already exists, a `permissions:` block in it, at the top level or on the reviewer job. Install adds `statuses: write` to that block and stops when there is none.
 - An `OPENCODE_API_KEY` repository secret. Listing secrets needs admin access, so without it the secret check is skipped.
 
 ## Install
@@ -21,7 +22,7 @@ Scripts and agents need `--yes`, because without a terminal the prompt counts as
 
 Install works in a throwaway worktree, so your checkout is untouched. A local `chore/nibble-sdlc` branch with unmerged work stops the run rather than being deleted. It opens one PR on `chore/nibble-sdlc` that:
 
-- creates or updates `.github/workflows/nibble-review.yml`, pinning the action to a commit and enabling `land`. Your other inputs are kept;
+- creates or updates `.github/workflows/nibble-review.yml`, pinning the action to a commit, enabling `land`, and granting `statuses: write` to the reviewer job so land can post its commit status. Your other inputs are kept;
 - adds `.nibble/sdlc.toml`, unless the repository already has one.
 
 `AGENTS.md` and `CLAUDE.md` are not touched. `.nibble/sdlc.toml` marks the repository as using the flow, and the global `nibble-sdlc` skill, which applies wherever that file exists, carries the agent's rules.
