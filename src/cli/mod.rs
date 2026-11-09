@@ -46,22 +46,6 @@ pub enum SdlcAction {
         /// Repositories as owner/name (default: the one in the current directory)
         repos: Vec<String>,
     },
-    /// List open PRs with their land result
-    Status {
-        /// Repositories as owner/name (default: the one in the current directory)
-        repos: Vec<String>,
-    },
-    /// Merge a PR's current head, showing land's result first
-    Merge {
-        /// Pull request number
-        pr: u64,
-        /// Let GitHub merge once its required checks pass
-        #[arg(long)]
-        auto: bool,
-        /// Skip the prompt, only when land cleared this commit
-        #[arg(short, long)]
-        yes: bool,
-    },
 }
 
 #[derive(Subcommand)]
@@ -134,7 +118,7 @@ pub enum Commands {
     /// Open vert on the repo in the current directory (the Alt v pane)
     Vert,
 
-    /// Install and run the delivery flow in one or more repositories
+    /// Install, check, or remove the delivery flow in one or more repositories
     Sdlc {
         #[command(subcommand)]
         action: SdlcAction,

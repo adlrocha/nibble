@@ -528,133 +528,26 @@ jobs:
         .iter()
         .any(|(ok, line)| !ok && line.contains("statuses")));
 
-    let invalid = tree(&[(CONFIG_PATH, "[merge]\nmethod = \"yolo\"\n")]);
+    let invalid = tree(&[(CONFIG_PATH, "not toml =\n")]);
     let checks = check_repo(&invalid, &repo()).unwrap();
-    assert!(checks.last().unwrap().1.contains("unknown merge method"));
+    assert!(!checks.last().unwrap().0);
+    assert!(checks.last().unwrap().1.contains("invalid"));
+
+    // Configs written before `merge` was removed still carry a [merge] table.
+    let older = tree(&[(
+        CONFIG_PATH,
+        "[land]\nmode = \"shadow\"\n[merge]\nmethod = \"squash\"\n",
+    )]);
+    let checks = check_repo(&older, &repo()).unwrap();
+    assert!(checks.last().unwrap().0);
 }
 
 #[test]
-fn the_merge_method_comes_from_the_default_branch() {
-    assert_eq!(merge_method(&tree(&[]), &repo()).unwrap(), "squash");
-    let shell = tree(&[(CONFIG_PATH, "[merge]\nmethod = \"rebase\"\n")]);
-    assert_eq!(merge_method(&shell, &repo()).unwrap(), "rebase");
-    assert!(merge_method(&tree(&[(CONFIG_PATH, "not toml =")]), &repo()).is_err());
-}
-
-#[test]
-fn status_lists_land_results() {
-    let prs = r#"[
-      {"number": 1, "title": "One", "headRefOid": "aaa"},
-      {"number": 2, "title": "Two", "headRefOid": "bbb"}
-    ]"#;
-    let shell = FakeShell::new(&[
-        ("pr list", prs),
-        ("commits/aaa/status", "shadow: would merge"),
-    ]);
-    assert_eq!(
-        render_status(&shell).unwrap(),
-        "#1 One: shadow: would merge\n#2 Two: no land result yet\n"
-    );
-    let partial = FakeShell::new(&[("pr list", prs)]).failing("commits/bbb/status");
-    assert!(render_status(&partial)
-        .unwrap()
-        .contains("#2 Two: no land result yet"));
-    let empty = render_status(&FakeShell::new(&[("pr list", "[]")])).unwrap();
-    assert_eq!(empty, "No open pull requests.\n");
-    assert!(render_status(&FakeShell::new(&[("pr list", "oops")])).is_err());
-}
-
-const VIEW: &str = r#"{"headRefOid": "abc", "title": "T"}"#;
-const CLEARED: &str = "shadow: would merge";
-const ASKS: &str = "shadow: would ask you (size)";
-const QUOTES: &str = "shadow: would ask you (test file removed: tests/would merge.test.ts)";
-const UNKNOWN: &str = "";
-
-fn merge_with(
-    land: &str,
-    yes: bool,
-    interactive: bool,
-    auto: bool,
-    answer: &str,
-) -> (FakeShell, Result<()>, String) {
-    let shell = FakeShell::new(&[("pr view", VIEW), ("commits/abc/status", land)]);
-    let mut out = Vec::new();
-    let request = MergeRequest {
-        pr: 7,
-        auto,
-        yes,
-        interactive,
-        method: "squash".to_string(),
-    };
-    let result = merge(
-        &shell,
-        &request,
-        &mut Cursor::new(answer.to_string()),
-        &mut out,
-    );
-    (shell, result, String::from_utf8(out).unwrap())
-}
-
-#[test]
-fn merge_pins_the_head_and_uses_the_method() {
-    let (shell, result, output) = merge_with(CLEARED, true, false, false, "");
-    result.unwrap();
-    assert!(shell.called("pr merge 7 --squash --match-head-commit abc"));
-    assert!(output.contains("Land: shadow: would merge") && output.contains("Merged."));
-
-    let (shell, result, output) = merge_with(CLEARED, true, false, true, "");
-    result.unwrap();
-    assert!(shell.called("--match-head-commit abc --auto"));
-    assert!(output.contains("Auto-merge enabled."));
-}
-
-#[test]
-fn only_a_person_at_a_terminal_can_override_land() {
-    for view in [ASKS, UNKNOWN, QUOTES] {
-        let (shell, result, _) = merge_with(view, true, false, false, "");
-        assert!(result.unwrap_err().to_string().contains("only a person"));
-        assert!(!shell.called("pr merge"));
-    }
-    let (shell, result, _) = merge_with(ASKS, true, true, false, "y\n");
-    result.unwrap();
-    assert!(shell.called("pr merge"));
-    let (shell, result, output) = merge_with(ASKS, true, true, false, "n\n");
-    result.unwrap();
-    assert!(output.contains("Cancelled."));
-    assert!(!shell.called("pr merge"));
-}
-
-#[test]
-fn a_cleared_merge_without_a_terminal_still_needs_yes() {
-    let (shell, result, _) = merge_with(CLEARED, false, false, false, "");
-    assert!(result.unwrap_err().to_string().contains("pass --yes"));
-    assert!(!shell.called("pr merge"));
-    let (shell, result, _) = merge_with(CLEARED, false, true, false, "yes\n");
-    result.unwrap();
-    assert!(shell.called("pr merge"));
-}
-
-#[test]
-fn merge_fails_on_bad_gh_output() {
-    let bad = FakeShell::new(&[("pr view", "oops")]);
-    let request = MergeRequest {
-        pr: 7,
-        auto: false,
-        yes: true,
-        interactive: true,
-        method: "squash".to_string(),
-    };
-    let mut out = Vec::new();
-    assert!(merge(&bad, &request, &mut Cursor::new(String::new()), &mut out).is_err());
-    let headless = FakeShell::new(&[("pr view", "{}")]);
-    let error = merge(
-        &headless,
-        &request,
-        &mut Cursor::new(String::new()),
-        &mut out,
-    )
-    .unwrap_err();
-    assert!(error.to_string().contains("no head commit"));
+fn a_new_config_has_no_merge_settings() {
+    let config = render_config(false);
+    assert!(!config.contains("[merge]"));
+    assert!(!config.contains("nibble sdlc merge"));
+    assert!(parse_config(&config).is_ok());
 }
 
 #[test]
@@ -767,19 +660,17 @@ fn the_exit_code_is_the_worst_result() {
 }
 
 #[test]
-fn the_real_shell_runs_in_its_directory_with_the_named_repository() {
+fn the_real_shell_runs_in_its_directory() {
     let dir = tempfile::tempdir().unwrap();
     let shell = RealShell {
         dir: Some(dir.path().to_path_buf()),
-        gh_repo: Some("a/b".to_string()),
     };
     let seen = shell
-        .run("sh", &["-c", "printf '%s %s' \"$PWD\" \"$GH_REPO\""], None)
+        .run("sh", &["-c", "printf '%s' \"$PWD\""], None)
         .unwrap();
     let real = dir.path().canonicalize().unwrap();
     assert!(
-        seen == format!("{} a/b", dir.path().display())
-            || seen == format!("{} a/b", real.display()),
+        seen == dir.path().display().to_string() || seen == real.display().to_string(),
         "{seen}"
     );
     // An explicit directory still wins, as publishing from a worktree needs.

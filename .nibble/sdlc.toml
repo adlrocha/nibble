@@ -7,6 +7,3 @@ main_is_staging = false
 # max_lines = 400
 # max_review_rounds = 5
 # always_human = ["src/auth/**"]  # extra paths that always need a person
-
-[merge]
-method = "merge"  # squash, merge, or rebase; used by `nibble sdlc merge`. main lands merge commits
