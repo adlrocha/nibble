@@ -39,7 +39,7 @@ jobs:
       # Pinned to the full commit SHA of a release (mutable tags on an action holding
       # write permissions + secrets are a supply-chain risk). Bump deliberately.
       # Requires the OPENCODE_API_KEY repository secret — see README before first run.
-      - uses: adlrocha/nibble-review@e371349d97c6750d313c75a4b11f834aea6aca63 # v1.1.1
+      - uses: adlrocha/nibble-review@325792c4bd3a92d494ac684df980171cc2e21986 # v1.1.2
         with:
           land: "true"
           api-key: ${{ secrets.OPENCODE_API_KEY }}
