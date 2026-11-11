@@ -5,7 +5,8 @@ or start a new one from your phone.
 
 - **`/nibble-rc`** inside a Claude Code, pi or omp session (on the host or in
   a sandbox) posts the session to your DM with the nibble Slack app as a new
-  thread, with its last reply. From then on:
+  thread, with its last reply (if a turn is still running, its reply is
+  posted when it finishes). From then on:
   - a message in that thread is typed into the session's zellij pane;
   - each finished turn's reply comes back to the thread;
   - a permission prompt is posted as a note (reply with a number to pick a

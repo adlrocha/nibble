@@ -12,10 +12,11 @@
 //!
 //! The reply is the last assistant text since the last real user prompt;
 //! tool results (user-role lines in Claude, `toolResult` in pi) belong to
-//! the same turn and are skipped over. A text with a tool call or result
-//! after it is not the reply: the turn went on, and its final message is
-//! not on disk yet (Claude Code can run the Stop hook that reports the
-//! turn idle before flushing that message).
+//! the same turn, but a tool call or result after a text means that text
+//! is not the reply: the turn went on. The final message may not be on
+//! disk yet (Claude Code can run the Stop hook that reports the turn idle
+//! before flushing that message) or may never come (the turn really
+//! ended on a tool result), so `None` does not always mean "not yet".
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -203,15 +204,21 @@ mod tests {
 {"type":"assistant","uuid":"a4","message":{"id":"m2","content":[{"type":"tool_use","id":"t2"}]}}
 {"type":"user","uuid":"u3","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","content":"ok"}]}}"#;
 
+    /// The fixture's lines up to and including the one containing `marker`.
+    fn through(fixture: &str, marker: &str) -> String {
+        let lines: Vec<&str> = fixture.lines().collect();
+        let end = lines
+            .iter()
+            .position(|l| l.contains(marker))
+            .expect("marker is in the fixture");
+        lines[..=end].join("\n")
+    }
+
     #[test]
     fn claude_text_followed_by_tools_is_not_the_reply_yet() {
         assert!(last_reply_in(CLAUDE_UNFLUSHED, &AgentType::ClaudeCode).is_none());
         // The text and its tool call in one message, nothing after it yet.
-        let cut = CLAUDE_UNFLUSHED
-            .lines()
-            .take(4)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let cut = through(CLAUDE_UNFLUSHED, r#""uuid":"a3""#);
         assert!(last_reply_in(&cut, &AgentType::ClaudeCode).is_none());
         // Once the final message lands, it is the reply.
         let t = format!(
@@ -227,20 +234,17 @@ mod tests {
 
     #[test]
     fn pi_text_followed_by_a_tool_result_is_not_the_reply_yet() {
-        let cut = PI.lines().take(3).collect::<Vec<_>>().join("\n");
+        let cut = through(PI, r#""id":"p3""#);
         assert!(last_reply_in(&cut, &AgentType::Pi).is_none());
         // The text that came with the tool call, nothing after it yet.
-        let cut = PI.lines().take(2).collect::<Vec<_>>().join("\n");
+        let cut = through(PI, r#""id":"p2""#);
         assert!(last_reply_in(&cut, &AgentType::Pi).is_none());
     }
 
     #[test]
     fn claude_interrupted_turn_has_no_reply() {
-        let cut = CLAUDE_UNFLUSHED
-            .lines()
-            .take(5)
-            .collect::<Vec<_>>()
-            .join("\n");
+        // The tool call's result, then the interrupt Claude Code writes.
+        let cut = through(CLAUDE_UNFLUSHED, r#""uuid":"u2""#);
         let t = format!(
             "{cut}\n{}",
             r#"{"type":"user","uuid":"u9","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}"#
