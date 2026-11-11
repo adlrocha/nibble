@@ -12,7 +12,10 @@
 //!
 //! The reply is the last assistant text since the last real user prompt;
 //! tool results (user-role lines in Claude, `toolResult` in pi) belong to
-//! the same turn and are skipped over.
+//! the same turn and are skipped over. A text with a tool call or result
+//! after it is not the reply: the turn went on, and its final message is
+//! not on disk yet (Claude Code can run the Stop hook that reports the
+//! turn idle before flushing that message).
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -87,12 +90,26 @@ fn is_claude_prompt(line: &Value) -> bool {
     }
 }
 
+/// Whether a message's content calls a tool (Claude `tool_use`, pi `toolCall`).
+fn calls_tool(content: &Value) -> bool {
+    content.as_array().is_some_and(|blocks| {
+        blocks
+            .iter()
+            .any(|b| matches!(b["type"].as_str(), Some("tool_use" | "toolCall")))
+    })
+}
+
 fn claude_reply(lines_rev: impl Iterator<Item = Value>) -> Option<Reply> {
     // Walking backwards: find the newest assistant line with text, then
-    // gather earlier text lines of the same API message.
+    // gather earlier text lines of the same API message. Tool activity
+    // newer than any text means the final message is still to come.
     let mut found: Option<(String, Vec<String>)> = None;
     for line in lines_rev {
         match line["type"].as_str() {
+            Some("assistant") if found.is_none() && calls_tool(&line["message"]["content"]) => {
+                return None;
+            }
+            Some("user") if found.is_none() && !is_claude_prompt(&line) => return None,
             Some("assistant") => {
                 let msg_id = line["message"]["id"]
                     .as_str()
@@ -127,6 +144,8 @@ fn pi_reply(lines_rev: impl Iterator<Item = Value>) -> Option<Reply> {
             continue;
         }
         match line["message"]["role"].as_str() {
+            Some("assistant") if calls_tool(&line["message"]["content"]) => return None,
+            Some("toolResult") => return None,
             Some("assistant") => {
                 let t = texts(&line["message"]["content"]);
                 if !t.is_empty() {
@@ -168,6 +187,63 @@ mod tests {
         let t = format!(
             "{CLAUDE}\n{}",
             r#"{"type":"user","uuid":"u9","message":{"role":"user","content":"next"}}"#
+        );
+        assert!(last_reply_in(&t, &AgentType::ClaudeCode).is_none());
+    }
+
+    /// The tail as the daemon can read it when the Stop hook reports idle
+    /// before Claude Code has flushed the turn's final message: the newest
+    /// text is an earlier one, and the turn went on with tools after it.
+    const CLAUDE_UNFLUSHED: &str = r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"log the stats"}}
+{"type":"assistant","uuid":"a1","message":{"id":"m1","content":[{"type":"thinking","thinking":"hm"}]}}
+{"type":"assistant","uuid":"a2","message":{"id":"m1","content":[{"type":"text","text":"Logging the stats first."}]}}
+{"type":"assistant","uuid":"a3","message":{"id":"m1","content":[{"type":"tool_use","id":"t1"}]}}
+{"type":"user","uuid":"u2","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}
+{"type":"api-request"}
+{"type":"assistant","uuid":"a4","message":{"id":"m2","content":[{"type":"tool_use","id":"t2"}]}}
+{"type":"user","uuid":"u3","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","content":"ok"}]}}"#;
+
+    #[test]
+    fn claude_text_followed_by_tools_is_not_the_reply_yet() {
+        assert!(last_reply_in(CLAUDE_UNFLUSHED, &AgentType::ClaudeCode).is_none());
+        // The text and its tool call in one message, nothing after it yet.
+        let cut = CLAUDE_UNFLUSHED
+            .lines()
+            .take(4)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(last_reply_in(&cut, &AgentType::ClaudeCode).is_none());
+        // Once the final message lands, it is the reply.
+        let t = format!(
+            "{CLAUDE_UNFLUSHED}\n{}",
+            r#"{"type":"assistant","uuid":"a5","message":{"id":"m3","content":[{"type":"text","text":"Logged all 16 posts."}]}}"#
+        );
+        let r = last_reply_in(&t, &AgentType::ClaudeCode).unwrap();
+        assert_eq!(
+            (r.id.as_str(), r.text.as_str()),
+            ("m3", "Logged all 16 posts.")
+        );
+    }
+
+    #[test]
+    fn pi_text_followed_by_a_tool_result_is_not_the_reply_yet() {
+        let cut = PI.lines().take(3).collect::<Vec<_>>().join("\n");
+        assert!(last_reply_in(&cut, &AgentType::Pi).is_none());
+        // The text that came with the tool call, nothing after it yet.
+        let cut = PI.lines().take(2).collect::<Vec<_>>().join("\n");
+        assert!(last_reply_in(&cut, &AgentType::Pi).is_none());
+    }
+
+    #[test]
+    fn claude_interrupted_turn_has_no_reply() {
+        let cut = CLAUDE_UNFLUSHED
+            .lines()
+            .take(5)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let t = format!(
+            "{cut}\n{}",
+            r#"{"type":"user","uuid":"u9","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}"#
         );
         assert!(last_reply_in(&t, &AgentType::ClaudeCode).is_none());
     }
