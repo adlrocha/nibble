@@ -23,10 +23,6 @@ pub(crate) fn open(db: &Database) -> Result<CronStore> {
 /// and do it once confirmed.
 pub(crate) fn cmd_import(db: &Database, store: &CronStore, yes: bool) -> Result<()> {
     use super::store::LegacyItem;
-    if super::store::legacy_done(store)? {
-        println!("Older cron jobs were already imported on this machine.");
-        return Ok(());
-    }
     let plan = super::store::plan_legacy(db)?;
     if plan.is_empty() {
         println!("No older cron jobs to import.");
@@ -74,13 +70,7 @@ fn confirm(question: &str) -> Result<bool> {
     Ok(matches!(line.trim(), "y" | "Y" | "yes"))
 }
 
-fn expand_tilde(a: &str) -> Result<PathBuf> {
-    Ok(match a.strip_prefix("~/") {
-        Some(rest) => dirs::home_dir().context("no home directory")?.join(rest),
-        None if a == "~" => dirs::home_dir().context("no home directory")?,
-        None => PathBuf::from(a),
-    })
-}
+use crate::format::expand_tilde;
 
 /// `~` expanded, canonical, and allowed to hold jobs (see
 /// [`super::validate_repo`]). With no argument: the git repo around the
@@ -196,6 +186,14 @@ pub(crate) fn status(def: &JobDef, s: &JobState, now: DateTime<Utc>) -> &'static
 /// A job the user named: `name`, `repo/name` (repo by its directory name),
 /// or the path of a job file.
 pub(crate) fn resolve_job(store: &CronStore, arg: &str) -> Result<(PathBuf, JobDef)> {
+    let (repo, name) = resolve_job_file(store, arg)?;
+    let def = super::load_job_file(&super::job_path(&repo, &name))?;
+    Ok((repo, def))
+}
+
+/// [`resolve_job`] without parsing the file, for commands that must work
+/// on a file that does not parse (`kill`). Returns the repo and job name.
+pub(crate) fn resolve_job_file(store: &CronStore, arg: &str) -> Result<(PathBuf, String)> {
     let as_path = Path::new(arg);
     if arg.ends_with(".md") && as_path.is_file() {
         let path = std::fs::canonicalize(as_path)?;
@@ -206,7 +204,12 @@ pub(crate) fn resolve_job(store: &CronStore, arg: &str) -> Result<(PathBuf, JobD
             .filter(|_| path.parent().is_some_and(|d| d.ends_with(super::JOBS_DIR)))
             .with_context(|| format!("{arg} is not in a repo's {}", super::JOBS_DIR))?
             .to_path_buf();
-        return Ok((repo, super::load_job_file(&path)?));
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .context("job file name is not UTF-8")?
+            .to_string();
+        return Ok((repo, name));
     }
     let (repo_name, name) = match arg.rsplit_once('/') {
         Some((r, n)) => (Some(r), n),
@@ -226,10 +229,7 @@ pub(crate) fn resolve_job(store: &CronStore, arg: &str) -> Result<(PathBuf, JobD
         }
     }
     match matches.as_slice() {
-        [repo] => {
-            let def = super::load_job_file(&super::job_path(repo, name))?;
-            Ok((repo.clone(), def))
-        }
+        [repo] => Ok((repo.clone(), name.to_string())),
         [] => bail!("no job {arg:?} in any registered repo (see `nibble cron list`)"),
         many => {
             let names: Vec<String> = many
@@ -334,7 +334,9 @@ pub(crate) fn cmd_add(store: &CronStore, a: AddArgs) -> Result<()> {
         }
         let path = write_new(&repo, &def)?;
         // You wrote it here: it is approved.
-        store.set_approved(&key, &def.name, &super::format_job(&def))?;
+        // You wrote it here: approved, as read back from the file.
+        let written = super::load_job_file(&path)?;
+        store.set_approved(&key, &written.name, &super::format_job(&written))?;
         println!("Wrote {} (commit it to share it).", path.display());
     }
     if added {
@@ -556,6 +558,10 @@ fn apply_edit(def: &mut JobDef, e: EditArgs, now: DateTime<Utc>) -> Result<bool>
 pub(crate) fn cmd_edit(store: &CronStore, job: &str, e: EditArgs) -> Result<()> {
     let (repo, mut def) = resolve_job(store, job)?;
     let path = super::job_path(&repo, &def.name);
+    // Only a job you had approved stays approved: editing one that changed
+    // under you (from the sandbox, say) must not approve what you never saw.
+    let was_approved =
+        approval(&def, &store.job(&repo_str(&repo), &def.name)?) == Approval::Approved;
     if apply_edit(&mut def, e, Utc::now())? {
         std::fs::write(&path, super::format_job(&def))
             .with_context(|| format!("failed to write {}", path.display()))?;
@@ -575,10 +581,16 @@ pub(crate) fn cmd_edit(store: &CronStore, job: &str, e: EditArgs) -> Result<()> 
         super::load_job_file(&path)
             .with_context(|| format!("{} is now invalid", path.display()))?;
     }
-    // Changed by you, here: approved.
-    let def = super::load_job_file(&path)?;
-    store.set_approved(&repo_str(&repo), &def.name, &super::format_job(&def))?;
     println!("Updated {} (commit it to share it).", path.display());
+    if was_approved {
+        let def = super::load_job_file(&path)?;
+        store.set_approved(&repo_str(&repo), &def.name, &super::format_job(&def))?;
+    } else {
+        println!(
+            "It was not approved before the edit; review it with `nibble cron approve {}`.",
+            def.name
+        );
+    }
     Ok(())
 }
 
@@ -596,10 +608,11 @@ pub(crate) fn cmd_pause(store: &CronStore, job: &str, paused: bool) -> Result<()
 
 /// `nibble cron kill`: delete the job file and its state.
 pub(crate) fn cmd_kill(store: &CronStore, job: &str) -> Result<()> {
-    let (repo, def) = resolve_job(store, job)?;
-    let path = super::job_path(&repo, &def.name);
+    // Not parsed: a broken file is the one most worth deleting.
+    let (repo, name) = resolve_job_file(store, job)?;
+    let path = super::job_path(&repo, &name);
     std::fs::remove_file(&path).with_context(|| format!("failed to delete {}", path.display()))?;
-    store.delete_job(&repo_str(&repo), &def.name)?;
+    store.delete_job(&repo_str(&repo), &name)?;
     println!(
         "Deleted {} (commit the deletion to remove it everywhere).",
         path.display()
@@ -890,12 +903,21 @@ mod tests {
         let (_, d) = resolve_job(&store, "logs").unwrap();
         let err = require_approved(&store, &repo, &d).unwrap_err().to_string();
         assert!(err.contains("changed since"), "{err}");
-        // Edits through nibble are approved, being yours.
+        // Editing a changed job does not approve what you never saw...
+        let flags = || EditArgs {
+            schedule: Some("0 7 * * *".into()),
+            ..no_flags()
+        };
+        cmd_edit(&store, "logs", flags()).unwrap();
+        let (_, d) = resolve_job(&store, "logs").unwrap();
+        assert!(require_approved(&store, &repo, &d).is_err());
+        // ...while editing an approved one keeps it approved, being yours.
+        cmd_approve(&store, Some("logs"), None, true).unwrap();
         cmd_edit(
             &store,
             "logs",
             EditArgs {
-                schedule: Some("0 7 * * *".into()),
+                schedule: Some("0 8 * * *".into()),
                 ..no_flags()
             },
         )
@@ -906,6 +928,15 @@ mod tests {
         // Approving needs a registered repo.
         cmd_forget(&store, &key).unwrap();
         assert!(cmd_approve(&store, None, Some(&key), true).is_err());
+    }
+
+    #[test]
+    fn kill_deletes_a_broken_file() {
+        let (_tmp, store, repo) = setup();
+        std::fs::write(super::super::job_path(&repo, "logs"), "## Prompt\nbroken").unwrap();
+        assert!(resolve_job(&store, "logs").is_err());
+        cmd_kill(&store, "logs").unwrap();
+        assert!(!super::super::job_path(&repo, "logs").exists());
     }
 
     #[test]

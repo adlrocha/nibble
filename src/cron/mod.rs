@@ -81,7 +81,7 @@ pub fn validate_schedule(schedule: &str) -> Result<()> {
 pub enum Notify {
     /// A card in your Slack DM, through `nibble rc`.
     Slack,
-    /// Only `nibble cron runs`.
+    /// Kept on this machine only.
     None,
 }
 
@@ -248,7 +248,9 @@ pub fn validate_name(name: &str) -> Result<()> {
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
     if !ok {
-        bail!("job name {name:?} must be 1-64 lowercase letters, digits, '-' or '_'");
+        bail!(
+            "job name {name:?} must be 1-64 lowercase letters, digits, '-' or '_', starting with a letter or digit"
+        );
     }
     Ok(())
 }
@@ -341,6 +343,10 @@ fn quote(s: &str) -> String {
 }
 
 /// The file text for `def`; [`parse_job`] reads it back unchanged.
+///
+/// Its exact output is also what approval compares (see
+/// `commands::approval`): a layout change here marks every approved job
+/// `changed` until it is approved again, so change it only deliberately.
 pub fn format_job(def: &JobDef) -> String {
     let mut out = format!("# {}\n\nschedule = {}\n", def.label, quote(&def.schedule));
     if !def.enabled {

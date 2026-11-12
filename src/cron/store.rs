@@ -3,8 +3,9 @@
 //!
 //! It is kept out of `~/.nibble` on purpose: every sandbox mounts that
 //! directory read-write, and a sandboxed agent must not be able to register
-//! another repo, or change when or where jobs run. Job definitions are not
-//! stored here; they are read from each repo's files on every pass.
+//! another repo, or change when or where jobs run. Job definitions are
+//! read from each repo's files on every pass; what is kept here is the
+//! snapshot of each definition you approved, to tell when a file changed.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, TimeZone, Utc};
@@ -572,6 +573,7 @@ pub enum LegacyItem {
 }
 
 /// Whether `nibble cron import` already ran on this machine.
+#[cfg(test)]
 pub fn legacy_done(store: &CronStore) -> Result<bool> {
     Ok(store.meta(LEGACY_EXPORTED)?.is_some())
 }
