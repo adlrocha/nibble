@@ -81,6 +81,7 @@ CREATE TABLE meta (
 ",
     "
 ALTER TABLE jobs ADD COLUMN owner_pid INTEGER;
+ALTER TABLE jobs ADD COLUMN claimed_at INTEGER;
 CREATE TABLE runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     repo_path TEXT NOT NULL,
@@ -103,12 +104,35 @@ CREATE INDEX idx_runs_job ON runs(repo_path, name, id);
 ",
 ];
 
+/// A run [`CronStore::reap_stale`] closed because its process was gone.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Reaped {
+    pub run_id: i64,
+    /// (container, task id), when the run got as far as starting there.
+    pub target: Option<(String, String)>,
+}
+
 /// Runs kept per job; older ones are deleted as new ones start.
 const RUNS_KEPT: i64 = 200;
 
+/// When this machine last booted (Linux; `None` elsewhere).
+fn boot_time() -> Option<i64> {
+    std::fs::read_to_string("/proc/stat")
+        .ok()?
+        .lines()
+        .find_map(|l| l.strip_prefix("btime ")?.trim().parse().ok())
+}
+
+/// Whether a claim or run made at `since` by `pid` still has its owner. A
+/// claim from before the last boot is dead even if its pid number now
+/// belongs to another process, which is likely right after a reboot.
+pub fn owner_alive(pid: Option<u32>, since: Option<i64>) -> bool {
+    let before_boot = matches!((since, boot_time()), (Some(s), Some(b)) if s < b);
+    !before_boot && pid.is_some_and(alive)
+}
+
 /// Whether process `pid` still exists: a run's owner that died (Ctrl-C,
-/// a crash, a stopped service) leaves its claim behind. A reused pid can
-/// keep a dead claim alive until that process ends; no worse than a skip.
+/// a crash, a stopped service) leaves its claim behind.
 pub fn alive(pid: u32) -> bool {
     let Ok(pid) = libc::pid_t::try_from(pid) else {
         return false;
@@ -391,20 +415,30 @@ impl CronStore {
             "INSERT OR IGNORE INTO jobs (repo_path, name) VALUES (?1, ?2)",
             params![repo, name],
         )?;
-        let (running, owner): (i64, Option<u32>) = self.conn.query_row(
-            "SELECT running, owner_pid FROM jobs WHERE repo_path = ?1 AND name = ?2",
+        let (running, owner, since): (i64, Option<u32>, Option<i64>) = self.conn.query_row(
+            "SELECT running, owner_pid, claimed_at FROM jobs WHERE repo_path = ?1 AND name = ?2",
             params![repo, name],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
-        let live = running > 0 && owner.is_some_and(alive);
+        let live = running > 0 && owner_alive(owner, since);
         if live && !overlap {
             return Ok(false);
         }
         let count = if live { running + 1 } else { 1 };
+        // Compare-and-swap on what was read, so two claimers never both win.
         let n = self.conn.execute(
-            "UPDATE jobs SET running = ?6, owner_pid = ?3
-             WHERE repo_path = ?1 AND name = ?2 AND running = ?4 AND owner_pid IS ?5",
-            params![repo, name, pid, running, owner, count],
+            "UPDATE jobs SET running = :count, owner_pid = :pid, claimed_at = :now
+             WHERE repo_path = :repo AND name = :name
+               AND running = :was_running AND owner_pid IS :was_owner",
+            rusqlite::named_params! {
+                ":count": count,
+                ":pid": pid,
+                ":now": Utc::now().timestamp(),
+                ":repo": repo,
+                ":name": name,
+                ":was_running": running,
+                ":was_owner": owner,
+            },
         )?;
         Ok(n == 1)
     }
@@ -433,18 +467,19 @@ impl CronStore {
     /// Clear claims and close runs whose owning process is gone. Run by the
     /// daemon at start and on every pass, so a run killed with Ctrl-C does
     /// not block its job for good, while a live manual run is left alone.
-    /// Returns the (container, task id) of each closed run, whose session
-    /// may still be going inside the container.
-    pub fn reap_stale(&self) -> Result<Vec<(String, String)>> {
-        let owners: Vec<(String, String, Option<u32>)> = {
-            let mut stmt = self
-                .conn
-                .prepare("SELECT repo_path, name, owner_pid FROM jobs WHERE running > 0")?;
-            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    /// Returns each run it closed, with where its session may still be
+    /// going inside the container.
+    pub fn reap_stale(&self) -> Result<Vec<Reaped>> {
+        type Claim = (String, String, Option<u32>, Option<i64>);
+        let owners: Vec<Claim> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT repo_path, name, owner_pid, claimed_at FROM jobs WHERE running > 0",
+            )?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
             rows.collect::<Result<_, _>>()?
         };
-        for (repo, name, owner) in owners {
-            if !owner.is_some_and(alive) {
+        for (repo, name, owner, since) in owners {
+            if !owner_alive(owner, since) {
                 self.conn.execute(
                     "UPDATE jobs SET running = 0, owner_pid = NULL
                      WHERE repo_path = ?1 AND name = ?2 AND owner_pid IS ?3",
@@ -452,26 +487,30 @@ impl CronStore {
                 )?;
             }
         }
-        type Open = (i64, Option<u32>, Option<String>, Option<String>);
+        type Open = (i64, Option<u32>, i64, Option<String>, Option<String>);
         let open: Vec<Open> = {
             let mut stmt = self.conn.prepare(
-                "SELECT id, owner_pid, container, task_id FROM runs WHERE status = 'running'",
+                "SELECT id, owner_pid, started_at, container, task_id FROM runs
+                 WHERE status = 'running'",
             )?;
-            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+            let rows = stmt.query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })?;
             rows.collect::<Result<_, _>>()?
         };
         let mut orphans = Vec::new();
-        for (id, owner, container, task_id) in open {
-            if !owner.is_some_and(alive) {
+        for (id, owner, started, container, task_id) in open {
+            if !owner_alive(owner, Some(started)) {
                 self.conn.execute(
                     "UPDATE runs SET status = 'failed', finished_at = ?2,
                        error = 'the process running it stopped before it finished'
                      WHERE id = ?1 AND status = 'running'",
                     params![id, Utc::now().timestamp()],
                 )?;
-                if let (Some(c), Some(t)) = (container, task_id) {
-                    orphans.push((c, t));
-                }
+                orphans.push(Reaped {
+                    run_id: id,
+                    target: container.zip(task_id),
+                });
             }
         }
         Ok(orphans)
@@ -876,6 +915,12 @@ mod tests {
         assert!(!s.job("/r", "c").unwrap().running);
         assert!(s.job("/r", "b").unwrap().running, "a live claim stays");
         assert!(alive(me) && !alive(DEAD));
+        // A claim from before the last boot is dead, whatever its pid.
+        if boot_time().is_some() {
+            assert!(!owner_alive(Some(me), Some(0)));
+            assert!(owner_alive(Some(me), Some(Utc::now().timestamp())));
+        }
+        assert!(!owner_alive(None, None));
     }
 
     #[test]
@@ -913,7 +958,10 @@ mod tests {
         s.set_run_target(b, "ctr", "task-b").unwrap();
         assert_eq!(
             s.reap_stale().unwrap(),
-            [("ctr".to_string(), "task-b".to_string())],
+            [Reaped {
+                run_id: b,
+                target: Some(("ctr".to_string(), "task-b".to_string()))
+            }],
             "the orphan is handed back to be killed"
         );
         assert!(s.reap_stale().unwrap().is_empty(), "once");

@@ -156,10 +156,15 @@ pub fn run(db_path: PathBuf) -> Result<()> {
         match store.reap_stale() {
             // Their process died (a restart, an upgrade), but the session
             // inside the container may still run, holding the job's secrets.
-            Ok(orphans) => {
-                for (container, task_id) in orphans {
-                    log(&format!("stopping an orphaned run in {container}"));
-                    super::run::kill_in_container(&container, &task_id);
+            Ok(reaped) => {
+                for r in reaped {
+                    if let Some((container, task_id)) = &r.target {
+                        log(&format!(
+                            "stopping orphaned run {} in {container}",
+                            r.run_id
+                        ));
+                        super::run::kill_in_container(container, task_id);
+                    }
                 }
             }
             Err(e) => log(&format!("could not clear stale runs: {e:#}")),

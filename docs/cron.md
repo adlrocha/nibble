@@ -108,7 +108,9 @@ A slot missed while the machine was off runs once when it is back. A job
 whose previous run is still going is skipped (unless `skip_if_running =
 false`), whether that run came from the daemon or `nibble cron run`. At most
 four runs go at once; others wait for a free slot. Stopping or upgrading the
-service ends the runs in flight; they are recorded as failed.
+service cuts the runs in flight off from nibble: their sessions in the
+sandbox go on until their timeout or the daemon's next start, which records
+them as failed and stops what is left.
 
 Before passing secrets, the runner checks with podman that the container
 really mounts the repo, since the record naming it is in `~/.nibble`, and
