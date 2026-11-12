@@ -1,13 +1,18 @@
 # Scheduled jobs (`nibble cron`)
 
+> The scheduler that runs jobs on their schedules lands with
+> `nibble-cron.service` in the next change; until then `nibble cron run`
+> runs a job by hand.
+
 A cron job is a prompt that runs on a schedule against a repository. Jobs
 are files in the repository they belong to, so they are versioned with the
 code and any machine can run them: clone the repo, register it, done.
 
 ## Job files
 
-Each job is `<repo>/.nibble/cron/<name>.md`. The file name (lowercase
-letters, digits, `-`, `_`) is the job's name.
+Each job is `<repo>/.nibble/cron/<name>.md`. The file name is the job's
+name: up to 64 lowercase letters, digits, `-` and `_`, starting with a
+letter or digit.
 
 ```markdown
 # Production logs
@@ -36,7 +41,7 @@ the repo's other jobs still run.
 | `model` | Claude Code's default | Model for the run |
 | `env` | `[]` | Names of variables the run gets from this machine's [secrets](#secrets) |
 | `notify` | `"slack"` | `"slack"` posts a report when the run finds something; `"none"` keeps it local |
-| `read_only` | `true` | Withholds the file-editing tools, so the run cannot change your working tree |
+| `read_only` | `true` | Withholds Claude Code's file-editing tools (Edit, Write, NotebookEdit). The run keeps Bash and is only asked not to change anything, so this guards against slips, not against a run set on changing files |
 
 For now `nibble cron run` types the prompt into the repo's running sandbox
 session, where `timeout`, `model`, `env`, `notify` and `read_only` do not
@@ -45,12 +50,14 @@ apply yet.
 ## Commands
 
 ```bash
-nibble cron add                       # register the repo around the current directory
+nibble cron add                       # register the repo around the current directory,
+                                      # and review its job files
 nibble cron add --repo ~/src/shop     # register another repo
 nibble cron add --schedule "0 8 * * *" --prompt "Audit dependencies" --label "Deps audit"
                                       # write .nibble/cron/deps-audit.md, then register
 nibble cron add --file job.md         # copy a job file into the repo, then register
 nibble cron list [repo]               # jobs, status, next and last run
+nibble cron approve deps-audit        # review a new or changed job file
 nibble cron edit deps-audit           # open the file in $EDITOR
 nibble cron edit deps-audit --schedule "0 9 * * *" --expires +30d
 nibble cron stop deps-audit           # pause on this machine only
@@ -77,6 +84,22 @@ are read every time, with nothing to reload. Commit them to share them.
 `stop` and `start` only affect this machine. To turn a job off everywhere,
 set `enabled = false` in its file (`nibble cron edit <job> --disable`).
 
+## Approving jobs
+
+A job file can be written by anyone who can write the repo, including an
+agent in its sandbox. So a job only runs on a machine once you have
+approved it there: nibble keeps the approved definition in its private
+state and runs the file only while it still matches.
+
+- `nibble cron add` shows each job file of the repo and asks. `--yes`
+  approves them all.
+- A job you create or edit with `nibble cron add` or `nibble cron edit` is
+  approved, being yours.
+- A file that changes (a `git pull`, an edit in the sandbox) shows as
+  `changed` and stops running until `nibble cron approve <job>`. A new file
+  shows as `unapproved`. Changes that leave the definition the same, such as
+  a comment, keep the approval.
+
 ## Secrets
 
 Some jobs need credentials, such as a read-only token for a log API. They
@@ -91,15 +114,19 @@ nibble cron secret unset NORTHFLANK_API_TOKEN --repo ~/src/shop
 
 A job file lists the names it needs in `env`. A value is only given to jobs
 of the repo it was set for, so one repo's job file cannot ask for another
-repo's token. Give jobs the narrowest token that works: the run's agent can
-read every value it is given.
+repo's token, and a job only gets values once you approved its file. Give
+jobs the narrowest token that works (read-only where possible): the run's
+agent can read every value it is given, and while a run goes the value is
+in the environment of a process in the repo's sandbox, where the sandbox's
+other agents could read it.
 
 ## State
 
 What this machine knows about cron (registered repos, next and last runs,
 paused jobs) is in `~/.local/state/nibble/cron/cron.db` (`$XDG_STATE_HOME`
 is honoured). It is kept out of `~/.nibble` so a sandboxed agent cannot
-register repos or change when jobs run.
+register repos, approve jobs or unpause them. What a job does is in its
+file, which a sandbox can change; that is what approval is for.
 
 Older nibble versions stored jobs in `~/.nibble/tasks.db`, where nothing
 ran them on a schedule. `nibble cron` commands remind you while any are

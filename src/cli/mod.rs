@@ -834,6 +834,10 @@ pub enum CronAction {
         /// relative ("+7d"). The job stops running after it.
         #[arg(long)]
         expires: Option<String>,
+
+        /// Approve the repo's job files without asking
+        #[arg(long)]
+        yes: bool,
     },
 
     /// List the jobs of registered repos (optionally one repo)
@@ -870,6 +874,19 @@ pub enum CronAction {
         /// Expiry: RFC3339, relative ("+7d"), or "none" to remove it
         #[arg(long)]
         expires: Option<String>,
+    },
+
+    /// Review and approve job files to run on this machine (a file that
+    /// changes needs approving again)
+    Approve {
+        /// Job name, repo/name, or path (default: every pending job of --repo)
+        job: Option<String>,
+        /// Repository (default: the git repo around the current directory)
+        #[arg(short, long)]
+        repo: Option<String>,
+        /// Approve without asking
+        #[arg(long)]
+        yes: bool,
     },
 
     /// Pause a job on this machine only (the file is untouched)

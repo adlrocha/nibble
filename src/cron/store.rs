@@ -29,6 +29,10 @@ pub struct JobState {
     /// Paused here with `nibble cron stop` (the file is untouched).
     pub paused: bool,
     pub running: bool,
+    /// The definition you approved on this machine, as [`super::format_job`]
+    /// writes it. Only an approved definition runs: job files can be
+    /// written from the repo's sandbox.
+    pub approved: Option<String>,
 }
 
 impl JobState {
@@ -41,6 +45,7 @@ impl JobState {
             last_run: None,
             paused: false,
             running: false,
+            approved: None,
         }
     }
 }
@@ -49,12 +54,14 @@ pub struct CronStore {
     conn: Connection,
 }
 
-const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS repos (
+/// Schema changes, in order; `PRAGMA user_version` counts those applied.
+/// Append to change the schema, never edit an entry.
+const MIGRATIONS: &[&str] = &["
+CREATE TABLE repos (
     repo_path TEXT PRIMARY KEY,
     added_at INTEGER NOT NULL
 );
-CREATE TABLE IF NOT EXISTS jobs (
+CREATE TABLE jobs (
     repo_path TEXT NOT NULL,
     name TEXT NOT NULL,
     schedule TEXT,
@@ -62,13 +69,34 @@ CREATE TABLE IF NOT EXISTS jobs (
     last_run INTEGER,
     paused INTEGER NOT NULL DEFAULT 0,
     running INTEGER NOT NULL DEFAULT 0,
+    approved TEXT,
     PRIMARY KEY (repo_path, name)
 );
-CREATE TABLE IF NOT EXISTS meta (
+CREATE TABLE meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
-";
+"];
+
+/// Bring the schema up to date, one migration per transaction.
+fn migrate(conn: &mut Connection) -> Result<()> {
+    let done: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    let done = usize::try_from(done).unwrap_or(0);
+    if done > MIGRATIONS.len() {
+        anyhow::bail!(
+            "cron.db is from a newer nibble (schema {done}, this one knows {}); upgrade nibble",
+            MIGRATIONS.len()
+        );
+    }
+    for (i, sql) in MIGRATIONS.iter().enumerate().skip(done) {
+        let tx = conn.transaction()?;
+        tx.execute_batch(sql)
+            .with_context(|| format!("cron.db migration {} failed", i + 1))?;
+        tx.pragma_update(None, "user_version", (i + 1) as i64)?;
+        tx.commit()?;
+    }
+    Ok(())
+}
 
 /// Set once the jobs an older nibble kept in `~/.nibble/tasks.db` were
 /// written out as files.
@@ -91,11 +119,10 @@ impl CronStore {
             .with_context(|| format!("failed to create {}", dir.display()))?;
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
             .with_context(|| format!("failed to restrict {}", dir.display()))?;
-        let conn = Connection::open(dir.join("cron.db")).context("failed to open cron.db")?;
+        let mut conn = Connection::open(dir.join("cron.db")).context("failed to open cron.db")?;
         conn.busy_timeout(std::time::Duration::from_secs(10))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.execute_batch(SCHEMA)
-            .context("failed to create the cron tables")?;
+        migrate(&mut conn)?;
         Ok(CronStore { conn })
     }
 
@@ -130,7 +157,7 @@ impl CronStore {
         Ok(self
             .conn
             .query_row(
-                "SELECT schedule, next_run, last_run, paused, running
+                "SELECT schedule, next_run, last_run, paused, running, approved
                  FROM jobs WHERE repo_path = ?1 AND name = ?2",
                 params![repo, name],
                 |r| {
@@ -142,6 +169,7 @@ impl CronStore {
                         last_run: ts(r.get(2)?),
                         paused: r.get::<_, i64>(3)? != 0,
                         running: r.get::<_, i64>(4)? != 0,
+                        approved: r.get(5)?,
                     })
                 },
             )
@@ -149,12 +177,59 @@ impl CronStore {
             .unwrap_or_else(|| JobState::new(repo, name)))
     }
 
+    /// Set one column of a job's row, creating the row if needed. Writes go
+    /// column by column, so concurrent writers (the daemon's pass, a run
+    /// finishing, `nibble cron stop`) never undo each other.
+    fn set(&self, repo: &str, name: &str, column: &str, value: &dyn rusqlite::ToSql) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO jobs (repo_path, name) VALUES (?1, ?2)",
+            params![repo, name],
+        )?;
+        self.conn.execute(
+            &format!("UPDATE jobs SET {column} = ?3 WHERE repo_path = ?1 AND name = ?2"),
+            params![repo, name, value],
+        )?;
+        Ok(())
+    }
+
+    /// Record the schedule `next_run` was computed from, and the time.
+    pub fn set_schedule(
+        &self,
+        repo: &str,
+        name: &str,
+        schedule: &str,
+        next: DateTime<Utc>,
+    ) -> Result<()> {
+        self.set(repo, name, "schedule", &schedule)?;
+        self.set_next_run(repo, name, next)
+    }
+
+    pub fn set_next_run(&self, repo: &str, name: &str, next: DateTime<Utc>) -> Result<()> {
+        self.set(repo, name, "next_run", &next.timestamp())
+    }
+
+    pub fn set_last_run(&self, repo: &str, name: &str, at: DateTime<Utc>) -> Result<()> {
+        self.set(repo, name, "last_run", &at.timestamp())
+    }
+
+    pub fn set_paused(&self, repo: &str, name: &str, paused: bool) -> Result<()> {
+        self.set(repo, name, "paused", &(paused as i64))
+    }
+
+    /// Approve a definition (its [`super::format_job`] text) to run here.
+    pub fn set_approved(&self, repo: &str, name: &str, text: &str) -> Result<()> {
+        self.set(repo, name, "approved", &text)
+    }
+
+    #[cfg(test)]
     pub fn put_job(&self, s: &JobState) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO jobs (repo_path, name, schedule, next_run, last_run, paused, running)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO jobs (repo_path, name, schedule, next_run, last_run, paused, running,
+                               approved)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT (repo_path, name) DO UPDATE SET
-               schedule = ?3, next_run = ?4, last_run = ?5, paused = ?6, running = ?7",
+               schedule = ?3, next_run = ?4, last_run = ?5, paused = ?6, running = ?7,
+               approved = ?8",
             params![
                 s.repo_path,
                 s.name,
@@ -163,6 +238,7 @@ impl CronStore {
                 s.last_run.map(|t| t.timestamp()),
                 s.paused as i64,
                 s.running as i64,
+                s.approved,
             ],
         )?;
         Ok(())
@@ -229,6 +305,11 @@ pub enum LegacyItem {
     },
 }
 
+/// Whether `nibble cron import` already ran on this machine.
+pub fn legacy_done(store: &CronStore) -> Result<bool> {
+    Ok(store.meta(LEGACY_EXPORTED)?.is_some())
+}
+
 /// Whether the jobs in `~/.nibble/tasks.db` are still to be imported.
 pub fn legacy_pending(store: &CronStore, db: &crate::db::Database) -> Result<bool> {
     Ok(store.meta(LEGACY_EXPORTED)?.is_none() && !db.list_cron_jobs(None)?.is_empty())
@@ -266,6 +347,32 @@ pub fn plan_legacy(db: &crate::db::Database) -> Result<Vec<LegacyItem>> {
             continue;
         }
         let base = super::slug(&label);
+        let mut wanted = super::JobDef {
+            name: base.clone(),
+            label: label.clone(),
+            schedule: job.schedule.clone(),
+            enabled: job.enabled,
+            skip_if_running: job.skip_if_running,
+            expires_at: job.expires_at,
+            timeout: super::DEFAULT_TIMEOUT,
+            model: None,
+            env: vec![],
+            notify: super::Notify::Slack,
+            // Old jobs were plain prompts that could edit the repo.
+            read_only: false,
+            prompt: job.prompt.clone(),
+        };
+        // A retry after a partial import finds its own earlier files.
+        let same = |name: &str| {
+            let mut d = wanted.clone();
+            d.name = name.to_string();
+            std::fs::read_to_string(super::job_path(&repo, name))
+                .is_ok_and(|t| t == super::format_job(&d))
+        };
+        if same(&base) || (2..10).any(|n| same(&format!("{base}-{n}"))) {
+            plan.push(skip("already imported".to_string()));
+            continue;
+        }
         let (name, path) = (1..)
             .map(|n| {
                 let name = if n == 1 {
@@ -279,22 +386,12 @@ pub fn plan_legacy(db: &crate::db::Database) -> Result<Vec<LegacyItem>> {
             .find(|(_, p)| !p.exists() && !taken.contains(p))
             .unwrap_or_default();
         taken.push(path.clone());
-        let def = super::JobDef {
-            name,
-            label,
-            schedule: job.schedule.clone(),
-            enabled: job.enabled,
-            skip_if_running: job.skip_if_running,
-            expires_at: job.expires_at,
-            timeout: super::DEFAULT_TIMEOUT,
-            model: None,
-            env: vec![],
-            notify: super::Notify::Slack,
-            // Old jobs were plain prompts that could edit the repo.
-            read_only: false,
-            prompt: job.prompt.clone(),
-        };
-        plan.push(LegacyItem::Import { repo, path, def });
+        wanted.name = name;
+        plan.push(LegacyItem::Import {
+            repo,
+            path,
+            def: wanted,
+        });
     }
     Ok(plan)
 }
@@ -304,10 +401,20 @@ pub fn plan_legacy(db: &crate::db::Database) -> Result<Vec<LegacyItem>> {
 pub fn apply_legacy(store: &CronStore, plan: &[LegacyItem]) -> Result<()> {
     for item in plan {
         if let LegacyItem::Import { repo, path, def } = item {
+            let key = repo.to_string_lossy();
+            let text = super::format_job(def);
+            // The plan was made before you were asked: a file that appeared
+            // since is not replaced.
+            if path.exists() {
+                eprintln!("  skipped {}: it appeared after the plan", path.display());
+                continue;
+            }
             std::fs::create_dir_all(super::jobs_dir(repo))?;
-            std::fs::write(path, super::format_job(def))
+            std::fs::write(path, &text)
                 .with_context(|| format!("failed to write {}", path.display()))?;
-            store.add_repo(&repo.to_string_lossy())?;
+            store.add_repo(&key)?;
+            // You reviewed it in the plan.
+            store.set_approved(&key, &def.name, &text)?;
         }
     }
     mark_legacy_done(store)
@@ -468,6 +575,55 @@ mod tests {
         assert_eq!(def.prompt, "Do the thing.");
         assert_eq!(s.repos().unwrap(), [r]);
         assert!(!legacy_pending(&s, &db).unwrap(), "done once");
+    }
+
+    #[test]
+    fn schema_is_versioned() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("c");
+        drop(CronStore::open_in(&dir).unwrap());
+        let conn = Connection::open(dir.join("cron.db")).unwrap();
+        let v: i64 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(v as usize, MIGRATIONS.len());
+        // Reopening applies nothing twice.
+        drop(CronStore::open_in(&dir).unwrap());
+        conn.pragma_update(None, "user_version", 99).unwrap();
+        let err = CronStore::open_in(&dir).err().unwrap().to_string();
+        assert!(err.contains("newer nibble"), "{err}");
+    }
+
+    #[test]
+    fn a_retried_import_skips_what_it_wrote() {
+        let (tmp, s) = store();
+        let repo = git_repo(tmp.path(), "repo");
+        let db = crate::db::Database::open(tmp.path().join("tasks.db")).unwrap();
+        db.insert_cron_job(&crate::models::CronJob::new(
+            repo.to_string_lossy().to_string(),
+            "0 9 * * *".into(),
+            "Go".into(),
+            Some("Daily".into()),
+            Utc::now(),
+        ))
+        .unwrap();
+        let plan = plan_legacy(&db).unwrap();
+        apply_legacy(&s, &plan).unwrap();
+        let again = plan_legacy(&db).unwrap();
+        assert!(
+            matches!(&again[..], [LegacyItem::Skip { reason, .. }] if reason == "already imported"),
+            "{again:?}"
+        );
+        // A file appearing between plan and apply is not replaced.
+        std::fs::remove_file(super::super::job_path(&repo, "daily")).unwrap();
+        let plan = plan_legacy(&db).unwrap();
+        std::fs::write(super::super::job_path(&repo, "daily"), "theirs").unwrap();
+        apply_legacy(&s, &plan).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(super::super::job_path(&repo, "daily")).unwrap(),
+            "theirs"
+        );
+        assert!(legacy_done(&s).unwrap());
     }
 
     #[test]

@@ -23,6 +23,10 @@ pub(crate) fn open(db: &Database) -> Result<CronStore> {
 /// and do it once confirmed.
 pub(crate) fn cmd_import(db: &Database, store: &CronStore, yes: bool) -> Result<()> {
     use super::store::LegacyItem;
+    if super::store::legacy_done(store)? {
+        println!("Older cron jobs were already imported on this machine.");
+        return Ok(());
+    }
     let plan = super::store::plan_legacy(db)?;
     if plan.is_empty() {
         println!("No older cron jobs to import.");
@@ -110,12 +114,49 @@ pub(crate) fn refresh_state(mut s: JobState, def: &JobDef, now: DateTime<Utc>) -
     Ok(s)
 }
 
+/// [`refresh_state`], saved.
+pub(crate) fn refresh(
+    store: &CronStore,
+    repo: &str,
+    def: &JobDef,
+    now: DateTime<Utc>,
+) -> Result<JobState> {
+    let old = store.job(repo, &def.name)?;
+    let s = refresh_state(old.clone(), def, now)?;
+    if let (true, Some(next)) = (s.next_run != old.next_run, s.next_run) {
+        store.set_schedule(repo, &def.name, &def.schedule, next)?;
+    }
+    Ok(s)
+}
+
+/// Whether the file's definition is the one you approved here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Approval {
+    Approved,
+    /// Never approved on this machine.
+    New,
+    /// Approved once, but the file changed since.
+    Changed,
+}
+
+pub(crate) fn approval(def: &JobDef, s: &JobState) -> Approval {
+    match &s.approved {
+        None => Approval::New,
+        Some(text) if *text == super::format_job(def) => Approval::Approved,
+        Some(_) => Approval::Changed,
+    }
+}
+
 /// What `list` shows for a job.
 pub(crate) fn status(def: &JobDef, s: &JobState, now: DateTime<Utc>) -> &'static str {
     if s.running {
         "running"
     } else if !def.enabled {
         "disabled"
+    } else if approval(def, s) == Approval::New {
+        "unapproved"
+    } else if approval(def, s) == Approval::Changed {
+        "changed"
     } else if s.paused {
         "paused"
     } else if def.expires_at.is_some_and(|e| e <= now) {
@@ -201,6 +242,8 @@ pub(crate) struct AddArgs {
     pub file: Option<String>,
     pub label: Option<String>,
     pub expires: Option<String>,
+    /// Approve the repo's job files without asking.
+    pub yes: bool,
 }
 
 /// `nibble cron add`: register a repo so its job files run on this machine,
@@ -252,6 +295,9 @@ pub(crate) fn cmd_add(store: &CronStore, a: AddArgs) -> Result<()> {
         bail!("--label and --expires only apply when creating a job");
     }
     let repo = canonical_repo(repo_arg.as_deref())?;
+    let key = repo_str(&repo);
+    // Registered first, so a refused write still leaves the repo usable.
+    let added = store.add_repo(&key)?;
     if let Some(mut def) = new_def {
         if let Some(l) = a.label {
             super::validate_label(&l)?;
@@ -262,17 +308,97 @@ pub(crate) fn cmd_add(store: &CronStore, a: AddArgs) -> Result<()> {
             def.expires_at = Some(super::parse_expiry(&e, now)?);
         }
         let path = write_new(&repo, &def)?;
+        // You wrote it here: it is approved.
+        store.set_approved(&key, &def.name, &super::format_job(&def))?;
         println!("Wrote {} (commit it to share it).", path.display());
     }
-    if store.add_repo(&repo_str(&repo))? {
-        println!(
-            "Registered {}: its jobs now run on this machine.",
-            repo.display()
-        );
+    if added {
+        println!("Registered {}.", repo.display());
     } else {
         println!("{} is already registered.", repo.display());
     }
-    cmd_list(store, Some(&repo_str(&repo)))
+    approve_pending(store, &repo, None, a.yes)?;
+    cmd_list(store, Some(&key))
+}
+
+/// Refuse to run a definition you have not approved here.
+pub(crate) fn require_approved(store: &CronStore, repo: &Path, def: &JobDef) -> Result<()> {
+    match approval(def, &store.job(&repo_str(repo), &def.name)?) {
+        Approval::Approved => Ok(()),
+        a => bail!(
+            "{} {} on this machine; review it with `nibble cron approve {}`",
+            def.name,
+            if a == Approval::New {
+                "is not approved"
+            } else {
+                "has changed since you approved it"
+            },
+            def.name
+        ),
+    }
+}
+
+/// Show each job of `repo` that is not approved (or only `only`), and
+/// approve it on a yes. Returns how many were approved.
+fn approve_pending(store: &CronStore, repo: &Path, only: Option<&str>, yes: bool) -> Result<usize> {
+    let key = repo_str(repo);
+    let (jobs, _) = super::load_repo_jobs(repo)?;
+    let mut approved = 0;
+    for def in jobs.iter().filter(|d| only.is_none_or(|o| o == d.name)) {
+        let state = store.job(&key, &def.name)?;
+        let a = approval(def, &state);
+        if a == Approval::Approved {
+            continue;
+        }
+        let text = super::format_job(def);
+        println!(
+            "\n── {} ({}) ──\n{text}",
+            super::job_path(repo, &def.name).display(),
+            if a == Approval::New { "new" } else { "changed" }
+        );
+        if !def.env.is_empty() {
+            println!("It gets these secrets: {}", def.env.join(", "));
+        }
+        if !def.read_only {
+            println!("It may edit files (read_only = false).");
+        }
+        if yes || confirm("Run this job on this machine?")? {
+            store.set_approved(&key, &def.name, &text)?;
+            approved += 1;
+        } else {
+            println!(
+                "Not approved; it will not run. Approve later with `nibble cron approve {}`.",
+                def.name
+            );
+        }
+    }
+    Ok(approved)
+}
+
+/// `nibble cron approve`: review and approve a job (or every pending job
+/// of a repo) to run on this machine.
+pub(crate) fn cmd_approve(
+    store: &CronStore,
+    job: Option<&str>,
+    repo: Option<&str>,
+    yes: bool,
+) -> Result<()> {
+    let (repo, only) = match job {
+        Some(j) => {
+            let (r, d) = resolve_job(store, j)?;
+            (r, Some(d.name))
+        }
+        None => (canonical_repo(repo)?, None),
+    };
+    if !store.repos()?.contains(&repo_str(&repo)) {
+        bail!(
+            "{} is not registered; use `nibble cron add`",
+            repo.display()
+        );
+    }
+    let n = approve_pending(store, &repo, only.as_deref(), yes)?;
+    println!("{n} job(s) approved.");
+    Ok(())
 }
 
 fn when(t: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
@@ -351,8 +477,7 @@ pub(crate) fn cmd_list(store: &CronStore, repo_filter: Option<&str>) -> Result<(
             println!("{short}: no jobs in {}", super::jobs_dir(&repo).display());
         }
         for def in jobs {
-            let s = refresh_state(store.job(&repo_str(&repo), &def.name)?, &def, now)?;
-            store.put_job(&s)?;
+            let s = refresh(store, &repo_str(&repo), &def, now)?;
             println!(
                 "{:<32} {:<16} {:<10} {:<12} {:<12} {}",
                 format!("{short}/{}", def.name),
@@ -441,6 +566,9 @@ pub(crate) fn cmd_edit(store: &CronStore, job: &str, e: EditArgs) -> Result<()> 
         super::load_job_file(&path)
             .with_context(|| format!("{} is now invalid", path.display()))?;
     }
+    // Changed by you, here: approved.
+    let def = super::load_job_file(&path)?;
+    store.set_approved(&repo_str(&repo), &def.name, &super::format_job(&def))?;
     println!("Updated {} (commit it to share it).", path.display());
     Ok(())
 }
@@ -448,9 +576,7 @@ pub(crate) fn cmd_edit(store: &CronStore, job: &str, e: EditArgs) -> Result<()> 
 /// `nibble cron stop` / `start`: pause or resume a job on this machine only.
 pub(crate) fn cmd_pause(store: &CronStore, job: &str, paused: bool) -> Result<()> {
     let (repo, def) = resolve_job(store, job)?;
-    let mut s = store.job(&repo_str(&repo), &def.name)?;
-    s.paused = paused;
-    store.put_job(&s)?;
+    store.set_paused(&repo_str(&repo), &def.name, paused)?;
     let word = if paused { "Paused" } else { "Resumed" };
     println!("{word} {} on this machine.", def.name);
     if !paused && !def.enabled {
@@ -499,13 +625,7 @@ pub(crate) fn cmd_secret_set(name: &str, repo: Option<&str>) -> Result<()> {
     let repo = repo_str(&canonical_repo(repo)?);
     // Reuse the job-file rule, so a name that a file could never ask for
     // is refused here too.
-    super::parse_job(
-        "check",
-        &format!(
-            "schedule = \"0 0 * * *\"\nenv = [{}]\n## Prompt\nx",
-            toml::Value::from(name)
-        ),
-    )?;
+    super::validate_env_name(name)?;
     let value = crate::rc::prompt_line(&format!("Value for {name}"), true)?;
     if value.is_empty() {
         bail!("empty value; nothing saved");
@@ -561,7 +681,15 @@ pub(crate) fn cmd_secret_list(repo: Option<&str>) -> Result<()> {
 
 /// `nibble cron secret unset`.
 pub(crate) fn cmd_secret_unset(name: &str, repo: Option<&str>) -> Result<()> {
-    let repo = repo_str(&canonical_repo(repo)?);
+    // A deleted repo cannot be canonicalised; its stored values must still
+    // be removable, so match the key as given.
+    let repo = match (canonical_repo(repo), repo) {
+        (Ok(r), _) => repo_str(&r),
+        (Err(_), Some(given)) => repo_str(&expand_tilde(given)?)
+            .trim_end_matches('/')
+            .to_string(),
+        (Err(e), None) => return Err(e),
+    };
     remove_secret(&secrets::path(), &repo, name)?;
     println!("Removed {name} for {repo}.");
     Ok(())
@@ -571,6 +699,7 @@ pub(crate) fn cmd_secret_unset(name: &str, repo: Option<&str>) -> Result<()> {
 /// session now.
 pub(crate) fn cmd_run(db: &Database, store: &CronStore, job: &str) -> Result<()> {
     let (repo, def) = resolve_job(store, job)?;
+    require_approved(store, &repo, &def)?;
     let task = db
         .get_task_by_repo_path(&repo_str(&repo))?
         .filter(|t| {
@@ -592,9 +721,7 @@ pub(crate) fn cmd_run(db: &Database, store: &CronStore, job: &str) -> Result<()>
     println!("Running {} in sandbox {}…", def.name, task.task_id);
     println!("Note: this types into the sandbox's session; timeout, model, env, notify and read_only do not apply yet.");
     crate::agent_input::inject(&task, &def.prompt)?;
-    let mut s = store.job(&repo_str(&repo), &def.name)?;
-    s.last_run = Some(Utc::now());
-    store.put_job(&s)?;
+    store.set_last_run(&repo_str(&repo), &def.name, Utc::now())?;
     println!("Done.");
     Ok(())
 }
@@ -630,18 +757,82 @@ mod tests {
         let now = Utc::now();
         let mut d = def("0 9 * * *");
         let mut s = JobState::new("/r", "j");
+        s.approved = Some(super::super::format_job(&d));
         s.next_run = Some(now + chrono::Duration::hours(1));
         assert_eq!(status(&d, &s, now), "enabled");
         s.next_run = Some(now);
         assert_eq!(status(&d, &s, now), "due");
         d.expires_at = Some(now);
+        assert_eq!(
+            status(&d, &s, now),
+            "changed",
+            "the file differs from what was approved"
+        );
+        s.approved = Some(super::super::format_job(&d));
         assert_eq!(status(&d, &s, now), "expired");
         s.paused = true;
         assert_eq!(status(&d, &s, now), "paused");
+        s.approved = None;
+        assert_eq!(status(&d, &s, now), "unapproved");
         d.enabled = false;
         assert_eq!(status(&d, &s, now), "disabled");
         s.running = true;
         assert_eq!(status(&d, &s, now), "running");
+    }
+
+    #[test]
+    fn approval_follows_the_definition() {
+        let (_tmp, store, repo) = setup();
+        let key = repo_str(&repo);
+        let (_, d) = resolve_job(&store, "logs").unwrap();
+        assert!(
+            require_approved(&store, &repo, &d).is_err(),
+            "a file found in the repo waits"
+        );
+        // No terminal and no --yes: nothing is approved.
+        assert_eq!(approve_pending(&store, &repo, None, false).unwrap(), 0);
+        cmd_approve(&store, Some("logs"), None, true).unwrap();
+        assert!(require_approved(&store, &repo, &d).is_ok());
+        // A cosmetic change (a comment) keeps the approval; a real one does not.
+        let path = super::super::job_path(&repo, "logs");
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, text.replace("## Prompt", "# a comment\n## Prompt")).unwrap();
+        let (_, d) = resolve_job(&store, "logs").unwrap();
+        assert!(require_approved(&store, &repo, &d).is_ok());
+        std::fs::write(
+            &path,
+            "schedule = \"* * * * *\"\nenv = [\"TOKEN\"]\n## Prompt\nexfiltrate",
+        )
+        .unwrap();
+        let (_, d) = resolve_job(&store, "logs").unwrap();
+        let err = require_approved(&store, &repo, &d).unwrap_err().to_string();
+        assert!(err.contains("changed since"), "{err}");
+        // Edits through nibble are approved, being yours.
+        cmd_edit(
+            &store,
+            "logs",
+            EditArgs {
+                schedule: Some("0 7 * * *".into()),
+                ..no_flags()
+            },
+        )
+        .unwrap();
+        let (_, d) = resolve_job(&store, "logs").unwrap();
+        assert!(require_approved(&store, &repo, &d).is_ok());
+        assert!(store.job(&key, "logs").unwrap().approved.is_some());
+        // Approving needs a registered repo.
+        cmd_forget(&store, &key).unwrap();
+        assert!(cmd_approve(&store, None, Some(&key), true).is_err());
+    }
+
+    #[test]
+    fn secrets_of_a_deleted_repo_can_be_unset() {
+        // Only the key matching: the real secrets file is not touched,
+        // since the value was never there.
+        let err = cmd_secret_unset("TOKEN", Some("/no/such/repo"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not set for /no/such/repo"), "{err}");
     }
 
     fn no_flags() -> EditArgs {
@@ -758,6 +949,7 @@ mod tests {
                 file: None,
                 label: Some("Deps Audit".into()),
                 expires: Some("+30d".into()),
+                yes: false,
             },
         )
         .unwrap();
@@ -775,6 +967,7 @@ mod tests {
             file: None,
             label: Some("Deps Audit".into()),
             expires: None,
+            yes: false,
         };
         assert!(cmd_add(&store, again).is_err());
         // From a legacy file naming its repo.
@@ -796,6 +989,7 @@ mod tests {
                 file: Some(src.to_string_lossy().to_string()),
                 label: None,
                 expires: None,
+                yes: false,
             },
         )
         .unwrap();
@@ -808,6 +1002,7 @@ mod tests {
             file: None,
             label: None,
             expires: None,
+            yes: false,
         };
         assert!(cmd_add(&store, half).is_err());
     }
@@ -824,6 +1019,7 @@ mod tests {
             file: None,
             label: Some("a\nread_only = false".into()),
             expires: None,
+            yes: false,
         };
         assert!(cmd_add(&store, bad_label).is_err());
         let empty_prompt = AddArgs {
@@ -833,6 +1029,7 @@ mod tests {
             file: None,
             label: Some("Empty".into()),
             expires: None,
+            yes: false,
         };
         assert!(cmd_add(&store, empty_prompt).is_err());
         assert!(

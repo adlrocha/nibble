@@ -512,6 +512,7 @@ fn main() -> Result<()> {
                     file,
                     label,
                     expires,
+                    yes,
                 } => cc::cmd_add(
                     &store,
                     cc::AddArgs {
@@ -521,8 +522,12 @@ fn main() -> Result<()> {
                         file,
                         label,
                         expires,
+                        yes,
                     },
                 )?,
+                cli::CronAction::Approve { job, repo, yes } => {
+                    cc::cmd_approve(&store, job.as_deref(), repo.as_deref(), yes)?
+                }
                 cli::CronAction::List { repo_path } => cc::cmd_list(&store, repo_path.as_deref())?,
                 cli::CronAction::Edit {
                     id,

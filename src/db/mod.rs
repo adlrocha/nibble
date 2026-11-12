@@ -948,7 +948,7 @@ impl Database {
 
         Ok((rows, window))
     }
-    /// Test-only: legacy rows are only ever read now (see `cron::store::export_legacy`).
+    /// Test-only: legacy rows are only ever read now (see `cron::store::plan_legacy`).
     #[cfg(test)]
     pub fn insert_cron_job(&self, job: &CronJob) -> Result<i64> {
         let now = Utc::now().timestamp();

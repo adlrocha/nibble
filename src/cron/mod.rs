@@ -63,11 +63,13 @@ pub fn compute_next_run(schedule: &str, after: DateTime<Utc>) -> Result<DateTime
     Ok(next_local.with_timezone(&Utc))
 }
 
-/// Validate a cron expression
+/// Validate a cron expression: it must parse and fire at some point
+/// (`0 0 30 2 *` never does).
 pub fn validate_schedule(schedule: &str) -> Result<()> {
     Cron::new(schedule)
         .parse()
         .map_err(|e| anyhow::anyhow!("Invalid cron expression: {}", e))?;
+    compute_next_run(schedule, Utc::now()).context("the schedule never fires")?;
     Ok(())
 }
 
@@ -249,7 +251,8 @@ pub fn validate_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_env_name(var: &str) -> Result<()> {
+/// An env name a job may take from secrets.
+pub(crate) fn validate_env_name(var: &str) -> Result<()> {
     let ok = var.starts_with(|c: char| c.is_ascii_uppercase() || c == '_')
         && var
             .chars()
@@ -733,6 +736,7 @@ enabled = false is prompt text, not a setting.
         let local = next.with_timezone(&Local);
         assert_eq!((local.hour(), local.minute()), (0, 0));
         assert!(compute_next_run("bad", now).is_err());
+        assert!(validate_schedule("0 0 30 2 *").is_err(), "never fires");
         assert!(validate_schedule("*/5 * * * *").is_ok());
     }
 }
