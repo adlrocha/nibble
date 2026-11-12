@@ -564,7 +564,7 @@ impl Daemon {
         let turn = self.current_turn(&task);
         link.last_reply_id = turn.newest_id();
         store::put_link(&self.state, &link)?;
-        if let Some(reply) = turn.reply {
+        if let Some(reply) = relay::reply_to_show(turn, link.watch) {
             if let Err(e) = self.post_reply(&link, &format!("*Last reply*\n\n{}", reply.text)) {
                 log(&format!("could not post the last reply: {e:#}"));
             }

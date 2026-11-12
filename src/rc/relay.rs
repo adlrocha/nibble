@@ -33,9 +33,12 @@ impl Daemon {
         let len = crate::session::files::session_file_for(&task)
             .and_then(|p| std::fs::metadata(p).ok())
             .map(|m| m.len());
-        let fresh = observed != link.watch
-            || len.is_none()
-            || self.transcript_lens.get(&task.task_id) != len.as_ref();
+        let fresh = needs_read(
+            observed,
+            link.watch,
+            len,
+            self.transcript_lens.get(&task.task_id).copied(),
+        );
         let step = next_step(&link, observed, prompt.as_deref(), &|| {
             if fresh {
                 self.current_turn(&task)
@@ -43,9 +46,6 @@ impl Daemon {
                 transcript::Turn::default()
             }
         });
-        if let Some(len) = len {
-            self.transcript_lens.insert(task.task_id.clone(), len);
-        }
         // Record the new state (the reply included) before acting on it: a
         // post that fails or times out after Slack delivered it must not be
         // retried on the next poll and appear twice.
@@ -60,6 +60,10 @@ impl Daemon {
             if store::link(&self.state, &link.task_id)?.is_some_and(|l| !l.closed) {
                 store::put_link(&self.state, &link)?;
             }
+        }
+        // Only once the state is saved: a failed save reads the turn again.
+        if let Some(len) = len {
+            self.transcript_lens.insert(task.task_id.clone(), len);
         }
         for effect in &step.effects {
             match effect {
@@ -238,6 +242,19 @@ fn next_step(
     }
 }
 
+/// Whether the relay reads the transcript (`len`: its size now, `seen`: at
+/// the last read): a running turn only when it grew, a change of state (above
+/// all, the turn going idle) always, and always when the size is unknown.
+fn needs_read(observed: Watch, shown: Watch, len: Option<u64>, seen: Option<u64>) -> bool {
+    observed != shown || len.is_none() || len != seen
+}
+
+/// What a new link shows as the session's last reply: the turn's reply, but
+/// only once the turn is over (mid-turn, the newest text may be progress).
+pub(super) fn reply_to_show(turn: transcript::Turn, watch: Watch) -> Option<transcript::Reply> {
+    turn.reply.filter(|_| watch == Watch::Idle)
+}
+
 /// The link state right after a thread reply was typed into the pane: a
 /// turn is expected (a fast one may finish between two polls), except that
 /// an answer to a permission prompt stays `Blocked` until the agent reports
@@ -345,6 +362,34 @@ mod tests {
                 Effect::Status(SessionStatus::Active)
             ]
         );
+    }
+
+    #[test]
+    fn the_transcript_is_read_when_it_grew_or_the_state_changed() {
+        let (w, i) = (Watch::Working, Watch::Idle);
+        assert!(!needs_read(w, w, Some(10), Some(10)));
+        assert!(needs_read(w, w, Some(11), Some(10)));
+        assert!(needs_read(w, w, Some(10), None));
+        assert!(needs_read(w, w, None, None));
+        // The idle retry keeps the link Working: every poll reads.
+        assert!(needs_read(i, w, Some(10), Some(10)));
+    }
+
+    #[test]
+    fn a_new_link_shows_a_reply_only_between_turns() {
+        assert_eq!(reply_to_show(done(&["a"], "b"), Watch::Idle), reply("b"));
+        assert_eq!(reply_to_show(done(&["a"], "b"), Watch::Working), None);
+        assert_eq!(reply_to_show(done(&["a"], "b"), Watch::Blocked), None);
+        assert_eq!(reply_to_show(done(&["a"], ""), Watch::Idle), None);
+    }
+
+    #[test]
+    fn progress_between_idle_retries_is_posted_while_waiting() {
+        let l = link(Watch::Working, Some("a"), 3);
+        let s = next_step(&l, Watch::Idle, None, &|| done(&["a", "b"], ""));
+        assert_eq!(s.effects, vec![Effect::Progress(reply("b").unwrap())]);
+        assert_eq!((s.watch, s.idle_checks), (Watch::Working, 4));
+        assert_eq!(s.reply_id.as_deref(), Some("b"));
     }
 
     #[test]

@@ -159,7 +159,9 @@ enum Event {
 
 /// Texts become replies: consecutive texts of one message (Claude writes a
 /// message's blocks on separate lines sharing `message.id`) are one; the
-/// newest is the reply unless a tool came after it.
+/// newest is the reply unless a tool came after it. Ids are assumed unique
+/// per text: no message has text after its own tool call, which the API
+/// never produces.
 fn turn_of(events: Vec<Event>) -> Turn {
     let mut texts: Vec<(String, Vec<String>)> = Vec::new();
     let mut tool_last = false;
@@ -196,7 +198,10 @@ fn claude_events(lines_rev: impl Iterator<Item = Value>) -> Vec<Event> {
             Some("assistant") => {
                 let content = &line["message"]["content"];
                 // Reversed later: a line's tool call comes after its text.
-                if calls_tool(content) {
+                // Claude Code stamps every line of a message with its
+                // `stop_reason`, so a text whose message goes on to call a
+                // tool is known as progress before that call is on disk.
+                if calls_tool(content) || line["message"]["stop_reason"] == "tool_use" {
                     events.push(Event::Tool);
                 }
                 let t = texts(content);
@@ -396,6 +401,26 @@ mod tests {
         let t = turn_in(&t, &AgentType::ClaudeCode);
         assert_eq!(ids(&t.progress), ["m1"]);
         assert_eq!(t.reply.unwrap().id, "m9");
+    }
+
+    #[test]
+    fn claude_stop_reason_marks_a_text_as_progress_before_its_tool_call() {
+        // Cut right after the text line; its tool call is not on disk yet.
+        let line = |stop: &str| {
+            let prompt = r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"go"}}"#;
+            format!(
+                r#"{prompt}
+{{"type":"assistant","uuid":"a1","message":{{"id":"m1","stop_reason":{stop},"content":[{{"type":"text","text":"Checking."}}]}}}}"#
+            )
+        };
+        let t = turn_in(&line(r#""tool_use""#), &AgentType::ClaudeCode);
+        assert_eq!(ids(&t.progress), ["m1"]);
+        assert_eq!(t.reply, None);
+        for stop in [r#""end_turn""#, "null"] {
+            let t = turn_in(&line(stop), &AgentType::ClaudeCode);
+            assert!(t.progress.is_empty());
+            assert_eq!(t.reply.unwrap().id, "m1");
+        }
     }
 
     #[test]
