@@ -98,8 +98,14 @@ fn decide(store: &CronStore, r: &RunRecord, now: DateTime<Utc>) -> Result<Vec<St
 /// asks for it. The card waits in `nibble rc`'s queue, so this works while
 /// the Slack daemon is down.
 pub fn after_run(store: &CronStore, def: &JobDef, r: &RunRecord) -> Result<bool> {
+    // Only advance the dedupe state when a card can be delivered: otherwise
+    // findings would be stamped as reported while nothing reached you, and
+    // switching `notify` on (or setting up `nibble rc`) would stay silent.
+    if def.notify == Notify::None || !crate::rc::reports::configured() {
+        return Ok(false);
+    }
     let new = new_findings(store, r, Utc::now())?;
-    if new.is_empty() || def.notify == Notify::None {
+    if new.is_empty() {
         return Ok(false);
     }
     let card = crate::rc::reports::ReportCard::new(r, findings_of(r), new);

@@ -22,7 +22,7 @@ use super::daemon::{log, Daemon};
 use super::modal::{NewSession, Origin};
 use super::slack;
 use super::store::{self, Location, SpawnAgent, StateDb};
-use crate::cron::run::{Finding, Severity};
+use crate::cron::run::Finding;
 use crate::cron::store::RunRecord;
 
 /// Cards older than this are dropped from the queue, posted or not.
@@ -125,6 +125,12 @@ impl ReportCard {
             _ => ":warning:",
         }
     }
+}
+
+/// Whether `nibble rc` is set up, as the daemon sees it (the secrets file
+/// or its env overrides).
+pub(crate) fn configured() -> bool {
+    super::secrets::load().is_ok()
 }
 
 /// Queue a card for the daemon to post (opening its private state).
@@ -241,10 +247,7 @@ pub(crate) fn card_blocks(c: &ReportCard) -> Value {
         } else {
             ""
         };
-        let sev = match f.severity {
-            Severity::Critical => "critical",
-            _ => "warn",
-        };
+        let sev = f.severity.as_str();
         let mut text = format!("{new}*[{sev}] {}*", mrkdwn(&f.title, 200));
         if !f.details.trim().is_empty() {
             text.push('\n');
@@ -306,8 +309,8 @@ pub(crate) fn remedy_prompt(c: &ReportCard, remedy: Remedy) -> String {
     let mut report = format!("Status: {}\nSummary: {}\n", c.status, field(&c.summary));
     for f in &c.findings {
         report.push_str(&format!(
-            "\n### [{:?}] {}\nfingerprint: {}\n{}\n",
-            f.severity,
+            "\n### [{}] {}\nfingerprint: {}\n{}\n",
+            f.severity.as_str(),
             field(&f.title),
             field(&f.fingerprint),
             field(&f.details)
@@ -471,6 +474,7 @@ impl Daemon {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cron::run::Severity;
 
     fn card_of(n: usize, state: ReportState) -> ReportCard {
         ReportCard {

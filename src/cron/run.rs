@@ -173,6 +173,25 @@ pub fn normalize(mut r: Report) -> Report {
     r
 }
 
+impl Parsed {
+    /// A run that ended without a report.
+    fn failed(
+        status: RunStatus,
+        error: &str,
+        session_id: Option<String>,
+        cost_usd: Option<f64>,
+    ) -> Self {
+        Parsed {
+            status,
+            report: None,
+            session_id,
+            cost_usd,
+            // Shown in terminals and logs: same cleaning as report fields.
+            error: Some(clip(error)),
+        }
+    }
+}
+
 /// What Claude Code's `--output-format json` result says about a run.
 #[derive(Debug, PartialEq)]
 pub struct Parsed {
@@ -201,13 +220,7 @@ pub fn parse_output(exit: Option<i32>, stdout: &str, stderr: &str, overran: bool
         .and_then(|v| v["session_id"].as_str())
         .map(str::to_string);
     let cost_usd = v.as_ref().and_then(|v| v["total_cost_usd"].as_f64());
-    let fail = |status, error: String| Parsed {
-        status,
-        report: None,
-        session_id: session_id.clone(),
-        cost_usd,
-        error: Some(error),
-    };
+    let fail = |status, error: String| Parsed::failed(status, &error, session_id.clone(), cost_usd);
     if exit == Some(TIMEOUT_EXIT) || (overran && exit.is_none_or(|c| c == KILLED_EXIT)) {
         return fail(RunStatus::TimedOut, "the run hit its timeout".to_string());
     }
@@ -315,7 +328,9 @@ pub fn valid_container_ref(s: &str) -> bool {
 }
 
 /// Kill whatever still runs in the container for this run (found by its
-/// AGENT_TASK_ID), after the host gave up on `podman exec`.
+/// AGENT_TASK_ID). Called when the host gives up on `podman exec`, and by
+/// the daemon for runs whose process died (a restart, an upgrade), whose
+/// sessions would otherwise keep going with the job's secrets.
 pub fn kill_in_container(container: &str, task_id: &str) {
     let script = format!(
         "for p in /proc/[0-9]*; do grep -qz '^AGENT_TASK_ID={task_id}$' \"$p/environ\" 2>/dev/null && kill -9 \"${{p#/proc/}}\"; done; true"
@@ -498,13 +513,8 @@ pub fn run_job(
         name: def.name.clone(),
     };
     let id = store.start_run(&key, &def.name, &def.label, trigger.as_str(), pid)?;
-    let parsed = execute(db, store, id, repo, def).unwrap_or_else(|e| Parsed {
-        status: RunStatus::Failed,
-        report: None,
-        session_id: None,
-        cost_usd: None,
-        error: Some(format!("{e:#}")),
-    });
+    let parsed = execute(db, store, id, repo, def)
+        .unwrap_or_else(|e| Parsed::failed(RunStatus::Failed, &format!("{e:#}"), None, None));
     store.finish_run(
         id,
         &RunEnd {
@@ -724,6 +734,11 @@ mod tests {
         assert_eq!(
             parse_output(Some(KILLED_EXIT), "", "", false).status,
             RunStatus::Failed
+        );
+        let dirty = parse_output(Some(1), "", "\u{1b}]0;title\u{7}boom", false);
+        assert!(
+            !dirty.error.unwrap().contains('\u{1b}'),
+            "errors are cleaned too"
         );
         let none = parse_output(Some(1), "not json", "line1\nboom", false);
         assert_eq!(none.status, RunStatus::Failed);

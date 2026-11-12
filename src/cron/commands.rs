@@ -23,14 +23,16 @@ pub(crate) fn open(db: &Database) -> Result<CronStore> {
 /// and do it once confirmed.
 pub(crate) fn cmd_import(db: &Database, store: &CronStore, yes: bool) -> Result<()> {
     use super::store::LegacyItem;
-    let plan = super::store::plan_legacy(db)?;
+    let plan = super::store::plan_legacy(store, db)?;
     if plan.is_empty() {
         println!("No older cron jobs to import.");
         return super::store::mark_legacy_done(store);
     }
     for item in &plan {
         match item {
-            LegacyItem::Import { repo, path, def } => {
+            LegacyItem::Import {
+                repo, path, def, ..
+            } => {
                 // In full: importing approves it, so you see what you approve.
                 println!(
                     "\n── import → {} (registers {}){}\n{}",
@@ -251,7 +253,8 @@ pub(crate) fn resolve_job_file(store: &CronStore, arg: &str) -> Result<(PathBuf,
 /// Write a new job file, refusing to replace one.
 fn write_new(repo: &Path, def: &JobDef) -> Result<PathBuf> {
     let path = super::job_path(repo, &def.name);
-    if path.exists() {
+    // A dangling symlink "does not exist", yet writing would follow it.
+    if !super::nothing_at(&path) {
         bail!(
             "{} already exists; edit it with `nibble cron edit {}`",
             path.display(),
@@ -976,6 +979,27 @@ mod tests {
         let err = cmd_add(&store, a).unwrap_err().to_string();
         assert!(err.contains("outside the repo"), "{err}");
         assert!(!elsewhere.join("cron/job.md").exists());
+    }
+
+    #[test]
+    fn writes_refuse_a_dangling_symlinked_file() {
+        let (tmp, store, repo) = setup();
+        let target = tmp.path().join("outside.md");
+        std::os::unix::fs::symlink(&target, super::super::job_path(&repo, "job")).unwrap();
+        let a = AddArgs {
+            repo: Some(repo_str(&repo)),
+            schedule: Some("0 1 * * *".into()),
+            prompt: Some("p".into()),
+            file: None,
+            label: Some("Job".into()),
+            expires: None,
+            yes: false,
+        };
+        assert!(cmd_add(&store, a)
+            .unwrap_err()
+            .to_string()
+            .contains("already exists"));
+        assert!(!target.exists(), "nothing written through the link");
     }
 
     #[test]

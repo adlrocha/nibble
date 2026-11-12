@@ -156,10 +156,18 @@ pub fn run(db_path: PathBuf) -> Result<()> {
         match store.reap_stale() {
             // Their process died (a restart, an upgrade), but the session
             // inside the container may still run, holding the job's secrets.
-            Ok(orphans) => {
-                for (container, task_id) in orphans {
-                    log(&format!("stopping an orphaned run in {container}"));
-                    super::run::kill_in_container(&container, &task_id);
+            Ok(reaped) => {
+                for r in reaped {
+                    if let Some((container, task_id)) = &r.target {
+                        log(&format!(
+                            "stopping orphaned run {} in {container}",
+                            r.run_id
+                        ));
+                        super::run::kill_in_container(container, task_id);
+                    }
+                    // A run whose process died is a failure like any other,
+                    // so it is reported the same way.
+                    report_reaped(&store, r.run_id);
                 }
             }
             Err(e) => log(&format!("could not clear stale runs: {e:#}")),
@@ -178,6 +186,24 @@ pub fn run(db_path: PathBuf) -> Result<()> {
             Err(e) => log(&format!("pass failed: {e:#}")),
         }
         std::thread::sleep(POLL);
+    }
+}
+
+/// Report a run that `reap_stale` closed, as `after_run` reports any other.
+fn report_reaped(store: &CronStore, run_id: i64) {
+    let Ok(Some(r)) = store.run(run_id) else {
+        return;
+    };
+    let path = super::job_path(Path::new(&r.repo_path), &r.name);
+    match super::load_job_file(&path) {
+        Ok(def) => {
+            if let Err(e) = super::notify::after_run(store, &def, &r) {
+                log(&format!("run {run_id}: could not queue the report: {e:#}"));
+            }
+        }
+        Err(e) => log(&format!(
+            "run {run_id}: not reported, its job file is unreadable: {e:#}"
+        )),
     }
 }
 
