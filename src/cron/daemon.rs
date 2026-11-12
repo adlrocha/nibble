@@ -13,7 +13,7 @@ use super::JobDef;
 use crate::db::Database;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -32,10 +32,16 @@ fn log(msg: &str) {
     );
 }
 
-/// Log `msg` unless it was logged before.
-fn warn_once(warned: &mut HashSet<String>, msg: String) {
-    if warned.insert(msg.clone()) {
+/// The problem last logged for each job, repo or file.
+type Warned = HashMap<String, String>;
+
+/// Log `msg` for `key` unless it is what was last logged for it. A key is
+/// cleared when its job runs again, so the same problem coming back later
+/// is logged again.
+fn warn_once(warned: &mut Warned, key: &str, msg: String) {
+    if warned.get(key) != Some(&msg) {
         log(&msg);
+        warned.insert(key.to_string(), msg);
     }
 }
 
@@ -60,7 +66,7 @@ pub fn due_jobs(
     now: DateTime<Utc>,
     active: &Active,
     mut capacity: usize,
-    warned: &mut HashSet<String>,
+    warned: &mut Warned,
 ) -> Result<Vec<(PathBuf, JobDef)>> {
     let mut due = Vec::new();
     for repo in store.repos()? {
@@ -68,60 +74,62 @@ pub fn due_jobs(
         let (jobs, bad) = match sync_repo(store, &path) {
             Ok(x) => x,
             Err(e) => {
-                warn_once(warned, format!("{repo}: {e:#}"));
+                warn_once(warned, &repo, format!("{repo}: {e:#}"));
                 continue;
             }
         };
         for b in bad {
-            warn_once(
-                warned,
-                format!("{} is invalid: {}", b.path.display(), b.error),
-            );
+            let key = b.path.display().to_string();
+            warn_once(warned, &key, format!("{key} is invalid: {}", b.error));
         }
         for def in jobs {
             let id = format!("{repo}/{}", def.name);
             let s = match refresh(store, &repo, &def, now) {
                 Ok(s) => s,
                 Err(e) => {
-                    warn_once(warned, format!("{id}: {e:#}"));
+                    warn_once(warned, &id, format!("{id}: {e:#}"));
                     continue;
                 }
             };
             if !s.next_run.is_some_and(|n| n <= now) {
                 continue;
             }
-            let approved = approval(&def, &s);
-            if !runnable(&def, s.paused, now) {
-                // Off for now: move on to the next slot.
-            } else if approved != Approval::Approved {
-                let why = if approved == Approval::New {
-                    "not approved"
+            if runnable(&def, s.paused, now) {
+                let approved = approval(&def, &s);
+                if approved != Approval::Approved {
+                    let why = if approved == Approval::New {
+                        "not approved"
+                    } else {
+                        "changed since approved"
+                    };
+                    warn_once(
+                        warned,
+                        &id,
+                        format!(
+                            "{id}: {why} on this machine, so it does not run; `nibble cron approve {}`",
+                            def.name
+                        ),
+                    );
                 } else {
-                    "changed since approved"
-                };
-                warn_once(
-                    warned,
-                    format!(
-                        "{id}: {why} on this machine, so it does not run; `nibble cron approve {}`",
-                        def.name
-                    ),
-                );
-            } else {
-                let key = (repo.clone(), def.name.clone());
-                let busy = active.get(&key).is_some_and(|n| *n > 0) || s.running;
-                if busy && def.skip_if_running {
-                    log(&format!("{id}: still running; skipped"));
-                } else if capacity == 0 {
-                    // Leave next_run in the past: it starts when a slot frees.
-                    continue;
-                } else {
-                    capacity -= 1;
-                    due.push((path.clone(), def.clone()));
+                    let key = (repo.clone(), def.name.clone());
+                    let busy = active.get(&key).is_some_and(|n| *n > 0) || s.running;
+                    if busy && def.skip_if_running {
+                        log(&format!("{id}: still running; skipped"));
+                    } else if capacity == 0 {
+                        // Leave next_run in the past: it starts when a slot frees.
+                        continue;
+                    } else {
+                        capacity -= 1;
+                        // Running fine again: a later problem is news.
+                        warned.remove(&id);
+                        due.push((path.clone(), def.clone()));
+                    }
                 }
             }
+            // Off, unapproved or started: move on to the next slot.
             match super::compute_next_run(&def.schedule, now) {
                 Ok(next) => store.set_next_run(&repo, &def.name, next)?,
-                Err(e) => warn_once(warned, format!("{id}: {e:#}")),
+                Err(e) => warn_once(warned, &id, format!("{id}: {e:#}")),
             }
         }
     }
@@ -137,14 +145,17 @@ pub fn run(db_path: PathBuf) -> Result<()> {
     })?;
     log("started");
     let active: Arc<Mutex<Active>> = Arc::default();
-    let mut warned = HashSet::new();
+    let mut warned = Warned::new();
     loop {
         // Claims of runs whose process died (a killed `cron run`, a crash).
         if let Err(e) = store.reap_stale() {
             log(&format!("could not clear stale runs: {e:#}"));
         }
         let snapshot = active.lock().map(|a| a.clone()).unwrap_or_default();
-        let free = MAX_PARALLEL.saturating_sub(snapshot.values().sum());
+        // Live claims count manual `nibble cron run`s too.
+        let mine: usize = snapshot.values().sum();
+        let claimed = store.runs_in_flight().unwrap_or(0);
+        let free = MAX_PARALLEL.saturating_sub(mine.max(claimed));
         match due_jobs(&store, Utc::now(), &snapshot, free, &mut warned) {
             Ok(due) => {
                 for (repo, def) in due {
@@ -251,7 +262,7 @@ mod tests {
     fn registering_waits_then_runs_once_per_slot() {
         let (_t, store, repo) = setup(&[("a", "")]);
         let now = Utc::now();
-        let mut w = HashSet::new();
+        let mut w = Warned::new();
         assert!(due_jobs(&store, now, &none(), 4, &mut w)
             .unwrap()
             .is_empty());
@@ -283,7 +294,7 @@ mod tests {
         )
         .unwrap();
         let now = Utc::now();
-        let mut w = HashSet::new();
+        let mut w = Warned::new();
         due_jobs(&store, now, &none(), 9, &mut w).unwrap();
         let later = now + chrono::Duration::minutes(2);
         let active: Active = [
@@ -295,7 +306,7 @@ mod tests {
         let due = due_jobs(&store, later, &active, 9, &mut w).unwrap();
         assert_eq!(names(&due), ["overlap"], "only the job allowed to overlap");
         assert!(
-            w.iter().any(|m| m.contains("changed since approved")),
+            w.values().any(|m| m.contains("changed since approved")),
             "{w:?}"
         );
         // Skipped jobs still move on to their next slot.
@@ -311,7 +322,7 @@ mod tests {
     fn a_full_house_keeps_jobs_due() {
         let (_t, store, repo) = setup(&[("a", ""), ("b", ""), ("c", "")]);
         let now = Utc::now();
-        let mut w = HashSet::new();
+        let mut w = Warned::new();
         due_jobs(&store, now, &none(), 9, &mut w).unwrap();
         let later = now + chrono::Duration::minutes(2);
         let due = due_jobs(&store, later, &none(), 2, &mut w).unwrap();
@@ -342,7 +353,7 @@ mod tests {
         store
             .add_repo(&tmp.path().join("gone").to_string_lossy())
             .unwrap();
-        let mut w = HashSet::new();
+        let mut w = Warned::new();
         let now = Utc::now();
         due_jobs(&store, now, &none(), 4, &mut w).unwrap();
         assert_eq!(w.len(), 3, "{w:?}");
@@ -357,6 +368,30 @@ mod tests {
         )
         .unwrap();
         assert_eq!(names(&due), ["a"]);
+    }
+
+    #[test]
+    fn a_problem_that_returns_after_a_good_run_is_logged_again() {
+        let (_t, store, repo) = setup(&[("a", "")]);
+        let path = super::super::job_path(Path::new(&repo), "a");
+        let good = std::fs::read_to_string(&path).unwrap();
+        let mut w = Warned::new();
+        let now = Utc::now();
+        due_jobs(&store, now, &none(), 4, &mut w).unwrap();
+        let mut t = now;
+        let mut step = |w: &mut Warned| {
+            t += chrono::Duration::minutes(2);
+            due_jobs(&store, t, &none(), 4, w).unwrap()
+        };
+        std::fs::write(&path, good.replace("\nx", "\nchanged")).unwrap();
+        step(&mut w);
+        assert!(w.contains_key(&format!("{repo}/a")), "logged");
+        std::fs::write(&path, &good).unwrap();
+        assert_eq!(names(&step(&mut w)), ["a"], "approved again: it runs");
+        assert!(
+            !w.contains_key(&format!("{repo}/a")),
+            "and its warning is cleared"
+        );
     }
 
     #[test]

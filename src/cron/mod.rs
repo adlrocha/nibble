@@ -114,8 +114,9 @@ pub struct JobDef {
     /// Names of variables the run gets from the secrets file.
     pub env: Vec<String>,
     pub notify: Notify,
-    /// Withhold the file-editing tools, so the run cannot change your
-    /// working tree (the sandbox mounts the repo read-write).
+    /// Withhold Claude Code's file-editing tools (Edit, Write, NotebookEdit).
+    /// The run keeps a shell, so this stops slips, not a run set on changing
+    /// the repo, which the sandbox mounts read-write.
     pub read_only: bool,
     pub prompt: String,
 }
@@ -387,6 +388,25 @@ pub fn format_job(def: &JobDef) -> String {
 /// `<repo>/.nibble/cron`.
 pub fn jobs_dir(repo: &Path) -> PathBuf {
     repo.join(JOBS_DIR)
+}
+
+/// `<repo>/.nibble/cron`, created if needed, and refused unless it really
+/// is inside `repo`: a symlinked `.nibble` or `.nibble/cron` (committed, or
+/// dropped by a sandbox) must not send writes elsewhere, `~/.nibble` say.
+pub fn real_jobs_dir(repo: &Path) -> Result<PathBuf> {
+    let dir = jobs_dir(repo);
+    std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    let real = std::fs::canonicalize(&dir)?;
+    let repo_real = std::fs::canonicalize(repo)?;
+    if real != repo_real.join(JOBS_DIR) {
+        bail!(
+            "{} resolves to {}, outside the repo; refusing to write there",
+            dir.display(),
+            real.display()
+        );
+    }
+    check_outside_sandbox_mount(&real)?;
+    Ok(real)
 }
 
 /// `<repo>/.nibble/cron/<name>.md`.

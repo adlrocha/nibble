@@ -26,6 +26,16 @@ pub enum Severity {
     Critical,
 }
 
+impl Severity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Severity::Ok => "ok",
+            Severity::Warn => "warn",
+            Severity::Critical => "critical",
+        }
+    }
+}
+
 /// One problem a run found.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Finding {
@@ -321,7 +331,7 @@ fn ensure_sandbox(db: &Database, repo: &Path) -> Result<Task> {
         }))
     };
     if let Some(t) = healthy(db)? {
-        return Ok(t);
+        return can_run_claude(t);
     }
     let _one = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
     // Another job may have started it while this one waited.
@@ -343,7 +353,21 @@ fn ensure_sandbox(db: &Database, repo: &Path) -> Result<Task> {
         },
     )
     .context("failed to start a sandbox")?;
-    healthy(db)?.context("the sandbox started but is not healthy")
+    can_run_claude(healthy(db)?.context("the sandbox started but is not healthy")?)
+}
+
+/// A Hermes sandbox has no Claude Code: say so instead of failing every
+/// run with exit 127.
+fn can_run_claude(t: Task) -> Result<Task> {
+    if t.agent_type == crate::models::AgentType::Hermes {
+        bail!(
+            "the repo's sandbox ({}) is a Hermes sandbox, which cannot run Claude Code; \
+             replace it with `nibble sandbox kill {}` and a normal sandbox",
+            t.task_id,
+            t.task_id
+        );
+    }
+    Ok(t)
 }
 
 /// The `podman exec` that runs one job. The prompt goes on stdin; secret
@@ -733,6 +757,23 @@ mod tests {
             !store.job(&key, &d.name).unwrap().running,
             "the claim is released"
         );
+    }
+
+    #[test]
+    fn hermes_sandboxes_are_refused() {
+        let mut t = Task::new(
+            "h".into(),
+            crate::models::AgentType::Hermes,
+            "[x:hermes]".into(),
+            None,
+            None,
+        );
+        assert!(can_run_claude(t.clone())
+            .unwrap_err()
+            .to_string()
+            .contains("nibble sandbox kill h"));
+        t.agent_type = crate::models::AgentType::ClaudeCode;
+        assert!(can_run_claude(t).is_ok());
     }
 
     #[test]

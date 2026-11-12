@@ -974,6 +974,20 @@ impl Database {
         Ok(self.conn.last_insert_rowid())
     }
 
+    #[cfg(test)]
+    pub fn set_cron_next_run_for_test(&self, ts: i64) -> Result<()> {
+        self.conn
+            .execute("UPDATE cron_jobs SET next_run = ?1", params![ts])?;
+        Ok(())
+    }
+
+    /// Whether any legacy cron row exists, without reading the rows.
+    pub fn has_cron_jobs(&self) -> Result<bool> {
+        Ok(self
+            .conn
+            .query_row("SELECT EXISTS (SELECT 1 FROM cron_jobs)", [], |r| r.get(0))?)
+    }
+
     pub fn list_cron_jobs(&self, repo_path_filter: Option<&str>) -> Result<Vec<CronJob>> {
         let jobs = match repo_path_filter {
             Some(repo_path) => {
@@ -1018,10 +1032,18 @@ impl Database {
             enabled: row.get::<_, i32>(5)? != 0,
             skip_if_running: row.get::<_, i32>(6)? != 0,
             running: row.get::<_, i32>(7)? != 0,
-            last_run: last_run_ts.map(|ts| Utc.timestamp_opt(ts, 0).unwrap()),
-            next_run: Utc.timestamp_opt(next_run_ts, 0).unwrap(),
-            expires_at: expires_ts.map(|ts| Utc.timestamp_opt(ts, 0).unwrap()),
-            created_at: Utc.timestamp_opt(created_ts, 0).unwrap(),
+            // These rows sit in a database sandboxes can write: an
+            // out-of-range time must not panic every `nibble cron` command.
+            last_run: last_run_ts.and_then(|ts| Utc.timestamp_opt(ts, 0).single()),
+            next_run: Utc
+                .timestamp_opt(next_run_ts, 0)
+                .single()
+                .unwrap_or_default(),
+            expires_at: expires_ts.and_then(|ts| Utc.timestamp_opt(ts, 0).single()),
+            created_at: Utc
+                .timestamp_opt(created_ts, 0)
+                .single()
+                .unwrap_or_default(),
         })
     }
 
