@@ -104,11 +104,19 @@ CREATE INDEX idx_runs_job ON runs(repo_path, name, id);
 /// Runs kept per job; older ones are deleted as new ones start.
 const RUNS_KEPT: i64 = 200;
 
-/// Whether process `pid` is a live nibble: a run's owner that died
-/// (Ctrl-C, a crash, a stopped service) leaves its claim behind.
+/// Whether process `pid` still exists: a run's owner that died (Ctrl-C,
+/// a crash, a stopped service) leaves its claim behind. A reused pid can
+/// keep a dead claim alive until that process ends; no worse than a skip.
 pub fn alive(pid: u32) -> bool {
-    std::fs::read(format!("/proc/{pid}/cmdline"))
-        .is_ok_and(|c| String::from_utf8_lossy(&c).contains("nibble"))
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: signal 0 sends nothing; it only checks the process exists.
+    let rc = unsafe { libc::kill(pid, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 /// How a run ended (or that it has not).
