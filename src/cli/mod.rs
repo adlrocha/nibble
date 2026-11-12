@@ -907,11 +907,29 @@ pub enum CronAction {
         id: String,
     },
 
-    /// Run a job now
+    /// Run a job now, in the foreground, and print its report
     Run {
         /// Job name, repo/name, or path of the job file
         id: String,
     },
+
+    /// Recent runs, newest first
+    Runs {
+        /// Only this job (name, repo/name, or file path)
+        job: Option<String>,
+        /// How many to show
+        #[arg(short = 'n', long, default_value_t = 20)]
+        limit: usize,
+    },
+
+    /// One run's full report
+    Show {
+        /// Run number (from `nibble cron runs`)
+        run: i64,
+    },
+
+    /// Run due jobs until stopped (what nibble-cron.service runs)
+    Daemon,
 
     /// Stop running a repo's jobs on this machine (its files are kept)
     Forget {

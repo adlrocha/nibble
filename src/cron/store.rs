@@ -56,7 +56,8 @@ pub struct CronStore {
 
 /// Schema changes, in order; `PRAGMA user_version` counts those applied.
 /// Append to change the schema, never edit an entry.
-const MIGRATIONS: &[&str] = &["
+const MIGRATIONS: &[&str] = &[
+    "
 CREATE TABLE repos (
     repo_path TEXT PRIMARY KEY,
     added_at INTEGER NOT NULL
@@ -76,7 +77,104 @@ CREATE TABLE meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
-"];
+",
+    "
+ALTER TABLE jobs ADD COLUMN owner_pid INTEGER;
+CREATE TABLE runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo_path TEXT NOT NULL,
+    name TEXT NOT NULL,
+    label TEXT NOT NULL,
+    trigger TEXT NOT NULL,
+    started_at INTEGER NOT NULL,
+    finished_at INTEGER,
+    status TEXT NOT NULL,
+    summary TEXT,
+    report TEXT,
+    session_id TEXT,
+    cost_usd REAL,
+    error TEXT,
+    owner_pid INTEGER
+);
+CREATE INDEX idx_runs_job ON runs(repo_path, name, id);
+",
+];
+
+/// Runs kept per job; older ones are deleted as new ones start.
+const RUNS_KEPT: i64 = 200;
+
+/// Whether process `pid` is a live nibble: a run's owner that died
+/// (Ctrl-C, a crash, a stopped service) leaves its claim behind.
+pub fn alive(pid: u32) -> bool {
+    std::fs::read(format!("/proc/{pid}/cmdline"))
+        .is_ok_and(|c| String::from_utf8_lossy(&c).contains("nibble"))
+}
+
+/// How a run ended (or that it has not).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunStatus {
+    Running,
+    /// The report found nothing wrong.
+    Ok,
+    Warn,
+    Critical,
+    /// The run broke before reporting (no sandbox, bad output, ...).
+    Failed,
+    TimedOut,
+}
+
+impl RunStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RunStatus::Running => "running",
+            RunStatus::Ok => "ok",
+            RunStatus::Warn => "warn",
+            RunStatus::Critical => "critical",
+            RunStatus::Failed => "failed",
+            RunStatus::TimedOut => "timeout",
+        }
+    }
+
+    fn parse(s: &str) -> Self {
+        match s {
+            "running" => RunStatus::Running,
+            "ok" => RunStatus::Ok,
+            "warn" => RunStatus::Warn,
+            "critical" => RunStatus::Critical,
+            "timeout" => RunStatus::TimedOut,
+            _ => RunStatus::Failed,
+        }
+    }
+}
+
+/// One run of a job, as recorded.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunRecord {
+    pub id: i64,
+    pub repo_path: String,
+    pub name: String,
+    pub label: String,
+    /// `schedule` or `manual`.
+    pub trigger: String,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub status: RunStatus,
+    pub summary: Option<String>,
+    pub report: Option<super::run::Report>,
+    /// The run's Claude session, to resume it.
+    pub session_id: Option<String>,
+    pub cost_usd: Option<f64>,
+    pub error: Option<String>,
+}
+
+/// How a finished run is recorded.
+pub struct RunEnd<'a> {
+    pub status: RunStatus,
+    pub report: Option<&'a super::run::Report>,
+    pub session_id: Option<&'a str>,
+    pub cost_usd: Option<f64>,
+    pub error: Option<&'a str>,
+}
 
 /// Bring the schema up to date, one migration per transaction.
 fn migrate(conn: &mut Connection) -> Result<()> {
@@ -267,6 +365,174 @@ impl CronStore {
             self.delete_job(repo, name)?;
         }
         Ok(())
+    }
+
+    /// Claim the job for a run by process `pid`. False when a live run
+    /// holds it and overlapping is not allowed. A claim whose owner died is
+    /// taken over. Compare-and-swap, so two claimers never both win.
+    pub fn claim(&self, repo: &str, name: &str, pid: u32, overlap: bool) -> Result<bool> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO jobs (repo_path, name) VALUES (?1, ?2)",
+            params![repo, name],
+        )?;
+        let (running, owner): (i64, Option<u32>) = self.conn.query_row(
+            "SELECT running, owner_pid FROM jobs WHERE repo_path = ?1 AND name = ?2",
+            params![repo, name],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        if running != 0 && owner.is_some_and(alive) && !overlap {
+            return Ok(false);
+        }
+        let n = self.conn.execute(
+            "UPDATE jobs SET running = 1, owner_pid = ?3
+             WHERE repo_path = ?1 AND name = ?2 AND running = ?4 AND owner_pid IS ?5",
+            params![repo, name, pid, running, owner],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// Give up a claim made by `pid` (a newer overlapping run keeps its own).
+    pub fn release(&self, repo: &str, name: &str, pid: u32) -> Result<()> {
+        self.conn.execute(
+            "UPDATE jobs SET running = 0, owner_pid = NULL
+             WHERE repo_path = ?1 AND name = ?2 AND owner_pid = ?3",
+            params![repo, name, pid],
+        )?;
+        Ok(())
+    }
+
+    /// Clear claims and close runs whose owning process is gone. Run by the
+    /// daemon at start and on every pass, so a run killed with Ctrl-C does
+    /// not block its job for good, while a live manual run is left alone.
+    pub fn reap_stale(&self) -> Result<()> {
+        let owners: Vec<(String, String, Option<u32>)> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT repo_path, name, owner_pid FROM jobs WHERE running = 1")?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            rows.collect::<Result<_, _>>()?
+        };
+        for (repo, name, owner) in owners {
+            if !owner.is_some_and(alive) {
+                self.conn.execute(
+                    "UPDATE jobs SET running = 0, owner_pid = NULL
+                     WHERE repo_path = ?1 AND name = ?2 AND owner_pid IS ?3",
+                    params![repo, name, owner],
+                )?;
+            }
+        }
+        let open: Vec<(i64, Option<u32>)> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id, owner_pid FROM runs WHERE status = 'running'")?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect::<Result<_, _>>()?
+        };
+        for (id, owner) in open {
+            if !owner.is_some_and(alive) {
+                self.conn.execute(
+                    "UPDATE runs SET status = 'failed', finished_at = ?2,
+                       error = 'the process running it stopped before it finished'
+                     WHERE id = ?1 AND status = 'running'",
+                    params![id, Utc::now().timestamp()],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Record a run starting in process `pid`; returns its id. Old runs of
+    /// the job beyond the kept number are deleted.
+    pub fn start_run(
+        &self,
+        repo: &str,
+        name: &str,
+        label: &str,
+        trigger: &str,
+        pid: u32,
+    ) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO runs (repo_path, name, label, trigger, started_at, status, owner_pid)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6)",
+            params![repo, name, label, trigger, Utc::now().timestamp(), pid],
+        )?;
+        let id = self.conn.last_insert_rowid();
+        self.conn.execute(
+            "DELETE FROM runs WHERE repo_path = ?1 AND name = ?2
+               AND id NOT IN (SELECT id FROM runs WHERE repo_path = ?1 AND name = ?2
+                              ORDER BY id DESC LIMIT ?3)",
+            params![repo, name, RUNS_KEPT],
+        )?;
+        Ok(id)
+    }
+
+    pub fn finish_run(&self, id: i64, end: &RunEnd) -> Result<()> {
+        let report = end.report.map(serde_json::to_string).transpose()?;
+        self.conn.execute(
+            "UPDATE runs SET finished_at = ?2, status = ?3, summary = ?4, report = ?5,
+               session_id = ?6, cost_usd = ?7, error = ?8
+             WHERE id = ?1",
+            params![
+                id,
+                Utc::now().timestamp(),
+                end.status.as_str(),
+                end.report.map(|r| r.summary.as_str()),
+                report,
+                end.session_id,
+                end.cost_usd,
+                end.error,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn row_to_run(r: &rusqlite::Row) -> rusqlite::Result<RunRecord> {
+        let report: Option<String> = r.get(9)?;
+        Ok(RunRecord {
+            id: r.get(0)?,
+            repo_path: r.get(1)?,
+            name: r.get(2)?,
+            label: r.get(3)?,
+            trigger: r.get(4)?,
+            started_at: ts(r.get(5)?).unwrap_or_default(),
+            finished_at: ts(r.get(6)?),
+            status: RunStatus::parse(&r.get::<_, String>(7)?),
+            summary: r.get(8)?,
+            // A report that no longer parses is shown as missing.
+            report: report.and_then(|j| serde_json::from_str(&j).ok()),
+            session_id: r.get(10)?,
+            cost_usd: r.get(11)?,
+            error: r.get(12)?,
+        })
+    }
+
+    /// The newest runs first; of one job when `job` is given.
+    pub fn runs(&self, job: Option<(&str, &str)>, limit: usize) -> Result<Vec<RunRecord>> {
+        let (repo, name) = job.unwrap_or_default();
+        let mut stmt = self.conn.prepare(
+            "SELECT id, repo_path, name, label, trigger, started_at, finished_at, status,
+                    summary, report, session_id, cost_usd, error
+             FROM runs WHERE ?1 = 0 OR (repo_path = ?2 AND name = ?3)
+             ORDER BY id DESC LIMIT ?4",
+        )?;
+        let rows = stmt.query_map(
+            params![job.is_some() as i64, repo, name, limit as i64],
+            Self::row_to_run,
+        )?;
+        rows.collect::<Result<_, _>>().map_err(Into::into)
+    }
+
+    pub fn run(&self, id: i64) -> Result<Option<RunRecord>> {
+        self.conn
+            .query_row(
+                "SELECT id, repo_path, name, label, trigger, started_at, finished_at, status,
+                        summary, report, session_id, cost_usd, error
+                 FROM runs WHERE id = ?1",
+                params![id],
+                Self::row_to_run,
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     fn meta(&self, key: &str) -> Result<Option<String>> {
@@ -489,6 +755,97 @@ mod tests {
                 .unwrap()
                 == 1
         );
+    }
+
+    fn report(status: super::super::run::Severity) -> super::super::run::Report {
+        super::super::run::Report {
+            status,
+            summary: "sum".into(),
+            findings: vec![],
+        }
+    }
+
+    /// A pid that is certainly not a live process.
+    const DEAD: u32 = u32::MAX - 1;
+
+    #[test]
+    fn claims_are_exclusive_and_dead_owners_lose_them() {
+        let (_t, s) = store();
+        let me = std::process::id();
+        assert!(s.claim("/r", "a", me, false).unwrap());
+        assert!(
+            !s.claim("/r", "a", me, false).unwrap(),
+            "held by a live owner"
+        );
+        assert!(s.claim("/r", "a", me, true).unwrap(), "overlap allowed");
+        assert!(s.job("/r", "a").unwrap().running);
+        s.release("/r", "a", DEAD).unwrap();
+        assert!(s.job("/r", "a").unwrap().running, "only the owner releases");
+        s.release("/r", "a", me).unwrap();
+        assert!(!s.job("/r", "a").unwrap().running);
+        // A dead owner's claim is taken over, and reaped.
+        assert!(s.claim("/r", "b", DEAD, false).unwrap());
+        assert!(s.claim("/r", "b", me, false).unwrap());
+        assert!(s.claim("/r", "c", DEAD, false).unwrap());
+        s.reap_stale().unwrap();
+        assert!(!s.job("/r", "c").unwrap().running);
+        assert!(s.job("/r", "b").unwrap().running, "a live claim stays");
+        assert!(alive(me) && !alive(DEAD));
+    }
+
+    #[test]
+    fn runs_are_recorded_listed_and_pruned() {
+        let (_t, s) = store();
+        let me = std::process::id();
+        let a = s.start_run("/r", "a", "A", "manual", me).unwrap();
+        let b = s.start_run("/r", "b", "B", "schedule", DEAD).unwrap();
+        let r = s.run(a).unwrap().unwrap();
+        assert_eq!((r.status, r.finished_at), (RunStatus::Running, None));
+        let rep = report(super::super::run::Severity::Warn);
+        s.finish_run(
+            a,
+            &RunEnd {
+                status: RunStatus::Warn,
+                report: Some(&rep),
+                session_id: Some("sid"),
+                cost_usd: Some(0.5),
+                error: None,
+            },
+        )
+        .unwrap();
+        let r = s.run(a).unwrap().unwrap();
+        assert_eq!(r.status, RunStatus::Warn);
+        assert_eq!(r.report, Some(rep));
+        assert_eq!(r.summary.as_deref(), Some("sum"));
+        assert_eq!(r.session_id.as_deref(), Some("sid"));
+        assert!(r.finished_at.is_some());
+        let all: Vec<i64> = s.runs(None, 10).unwrap().iter().map(|r| r.id).collect();
+        assert_eq!(all, [b, a], "newest first");
+        assert_eq!(s.runs(Some(("/r", "a")), 10).unwrap().len(), 1);
+        assert!(s.run(999).unwrap().is_none());
+        // A run whose process died is closed; a live one is not.
+        let live = s.start_run("/r", "d", "D", "manual", me).unwrap();
+        s.reap_stale().unwrap();
+        let r = s.run(b).unwrap().unwrap();
+        assert_eq!(r.status, RunStatus::Failed);
+        assert!(r.error.unwrap().contains("stopped"));
+        assert_eq!(s.run(live).unwrap().unwrap().status, RunStatus::Running);
+        // Only the newest RUNS_KEPT per job survive.
+        for _ in 0..RUNS_KEPT + 5 {
+            s.start_run("/r", "c", "C", "schedule", me).unwrap();
+        }
+        assert_eq!(
+            s.runs(Some(("/r", "c")), 1000).unwrap().len() as i64,
+            RUNS_KEPT
+        );
+        assert_eq!(
+            s.runs(Some(("/r", "a")), 10).unwrap().len(),
+            1,
+            "other jobs kept"
+        );
+        for st in ["running", "ok", "warn", "critical", "failed", "timeout"] {
+            assert_eq!(RunStatus::parse(st).as_str(), st);
+        }
     }
 
     fn git_repo(tmp: &Path, name: &str) -> PathBuf {

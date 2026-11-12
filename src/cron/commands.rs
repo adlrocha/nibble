@@ -114,6 +114,31 @@ pub(crate) fn refresh_state(mut s: JobState, def: &JobDef, now: DateTime<Utc>) -
     Ok(s)
 }
 
+/// Read a registered repo's job files and drop the state of jobs whose
+/// files are gone (an invalid file keeps its state).
+pub(crate) fn sync_repo(
+    store: &CronStore,
+    repo: &Path,
+) -> Result<(Vec<JobDef>, Vec<super::BadFile>)> {
+    if !repo.is_dir() {
+        bail!(
+            "repo is missing; `nibble cron forget {}` it",
+            repo.display()
+        );
+    }
+    let (jobs, bad) = super::load_repo_jobs(repo)?;
+    let names: Vec<String> = jobs
+        .iter()
+        .map(|j| j.name.clone())
+        .chain(
+            bad.iter()
+                .filter_map(|b| b.path.file_stem()?.to_str().map(str::to_string)),
+        )
+        .collect();
+    store.prune_jobs(&repo_str(repo), &names)?;
+    Ok((jobs, bad))
+}
+
 /// [`refresh_state`], saved.
 pub(crate) fn refresh(
     store: &CronStore,
@@ -450,29 +475,13 @@ pub(crate) fn cmd_list(store: &CronStore, repo_filter: Option<&str>) -> Result<(
     );
     for repo in repos {
         let short = repo.file_name().unwrap_or_default().to_string_lossy();
-        if !repo.is_dir() {
-            println!(
-                "{short}: repo is missing ({}); `nibble cron forget` it",
-                repo.display()
-            );
-            continue;
-        }
-        let (jobs, bad) = match super::load_repo_jobs(&repo) {
+        let (jobs, bad) = match sync_repo(store, &repo) {
             Ok(x) => x,
             Err(e) => {
                 println!("{short}: {e:#}");
                 continue;
             }
         };
-        let names: Vec<String> = jobs
-            .iter()
-            .map(|j| j.name.clone())
-            .chain(
-                bad.iter()
-                    .filter_map(|b| b.path.file_stem()?.to_str().map(str::to_string)),
-            )
-            .collect();
-        store.prune_jobs(&repo_str(&repo), &names)?;
         if jobs.is_empty() && bad.is_empty() {
             println!("{short}: no jobs in {}", super::jobs_dir(&repo).display());
         }
@@ -695,35 +704,109 @@ pub(crate) fn cmd_secret_unset(name: &str, repo: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// `nibble cron run`: send the job's prompt to the repo's running sandbox
-/// session now.
+/// `nibble cron run`: run a job now, in the foreground, and print its
+/// report.
 pub(crate) fn cmd_run(db: &Database, store: &CronStore, job: &str) -> Result<()> {
     let (repo, def) = resolve_job(store, job)?;
     require_approved(store, &repo, &def)?;
-    let task = db
-        .get_task_by_repo_path(&repo_str(&repo))?
-        .filter(|t| {
-            let name = t
-                .container_name
-                .as_deref()
-                .or(t.container_id.as_deref())
-                .unwrap_or_default();
-            crate::sandbox::podman::PodmanSandbox::new().health_check(name)
-                == crate::sandbox::SandboxHealth::Healthy
-        })
-        .with_context(|| {
-            format!(
-                "no healthy sandbox for {}; start one with: nibble sandbox spawn {}",
-                repo.display(),
-                repo.display()
-            )
-        })?;
-    println!("Running {} in sandbox {}…", def.name, task.task_id);
-    println!("Note: this types into the sandbox's session; timeout, model, env, notify and read_only do not apply yet.");
-    crate::agent_input::inject(&task, &def.prompt)?;
-    store.set_last_run(&repo_str(&repo), &def.name, Utc::now())?;
-    println!("Done.");
+    println!(
+        "Running {} in {}'s sandbox (timeout {}s)…",
+        def.name,
+        repo.display(),
+        def.timeout.as_secs()
+    );
+    let record = super::run::run_job(db, store, &repo, &def, super::run::Trigger::Manual)?
+        .with_context(|| format!("{} is already running", def.name))?;
+    print_record(&record);
     Ok(())
+}
+
+/// `nibble cron runs`: recent runs, newest first.
+pub(crate) fn cmd_runs(store: &CronStore, job: Option<&str>, limit: usize) -> Result<()> {
+    let resolved = job.map(|j| resolve_job(store, j)).transpose()?;
+    let key = resolved
+        .as_ref()
+        .map(|(r, d)| (repo_str(r), d.name.clone()));
+    let runs = store.runs(key.as_ref().map(|(r, n)| (r.as_str(), n.as_str())), limit)?;
+    if runs.is_empty() {
+        println!("No runs yet.");
+        return Ok(());
+    }
+    let now = Utc::now();
+    println!(
+        "{:<6} {:<32} {:<9} {:<9} {:<10} SUMMARY",
+        "RUN", "JOB", "STATUS", "TRIGGER", "STARTED"
+    );
+    for r in runs {
+        let short = Path::new(&r.repo_path)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let text = r.summary.or(r.error).unwrap_or_default();
+        println!(
+            "{:<6} {:<32} {:<9} {:<9} {:<10} {}",
+            r.id,
+            format!("{short}/{}", r.name),
+            r.status.as_str(),
+            r.trigger,
+            when(Some(r.started_at), now),
+            text.lines()
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .take(80)
+                .collect::<String>()
+        );
+    }
+    Ok(())
+}
+
+/// `nibble cron show`: one run's full report.
+pub(crate) fn cmd_show(store: &CronStore, id: i64) -> Result<()> {
+    let r = store.run(id)?.with_context(|| format!("no run {id}"))?;
+    print_record(&r);
+    Ok(())
+}
+
+fn print_record(r: &super::store::RunRecord) {
+    println!(
+        "Run {} of {} ({}): {}",
+        r.id,
+        r.label,
+        r.name,
+        r.status.as_str()
+    );
+    println!("  repo:    {}", r.repo_path);
+    println!(
+        "  started: {} ({})",
+        r.started_at.format("%Y-%m-%d %H:%M:%S UTC"),
+        r.trigger
+    );
+    if let Some(f) = r.finished_at {
+        println!("  took:    {}s", (f - r.started_at).num_seconds());
+    }
+    if let Some(c) = r.cost_usd {
+        println!("  cost:    ${c:.2}");
+    }
+    if let Some(sid) = &r.session_id {
+        println!("  session: {sid} (resume it inside the sandbox with `claude --resume {sid}`)");
+    }
+    if let Some(e) = &r.error {
+        println!("  error:   {e}");
+    }
+    if let Some(rep) = &r.report {
+        println!("\n{}", rep.summary);
+        for f in &rep.findings {
+            println!("\n[{:?}] {}  ({})", f.severity, f.title, f.fingerprint);
+            if !f.details.is_empty() {
+                println!("{}", f.details);
+            }
+            if !f.suggested_action.is_empty() {
+                println!("→ {}", f.suggested_action);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

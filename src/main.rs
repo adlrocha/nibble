@@ -501,6 +501,9 @@ fn main() -> Result<()> {
             }
         }
 
+        Commands::Cron {
+            action: cli::CronAction::Daemon,
+        } => cron::daemon::run(db_path)?,
         Commands::Cron { action } => {
             use cron::commands as cc;
             let store = cc::open(&db)?;
@@ -553,6 +556,11 @@ fn main() -> Result<()> {
                 cli::CronAction::Start { id } => cc::cmd_pause(&store, &id, false)?,
                 cli::CronAction::Kill { id } => cc::cmd_kill(&store, &id)?,
                 cli::CronAction::Run { id } => cc::cmd_run(&db, &store, &id)?,
+                cli::CronAction::Runs { job, limit } => {
+                    cc::cmd_runs(&store, job.as_deref(), limit)?
+                }
+                cli::CronAction::Show { run } => cc::cmd_show(&store, run)?,
+                cli::CronAction::Daemon => unreachable!("handled above"),
                 cli::CronAction::Forget { repo } => cc::cmd_forget(&store, &repo)?,
                 cli::CronAction::Import { yes } => cc::cmd_import(&db, &store, yes)?,
                 cli::CronAction::Secret { action } => match action {
