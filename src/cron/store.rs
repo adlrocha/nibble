@@ -267,6 +267,8 @@ impl CronStore {
     pub fn remove_repo(&self, repo: &str) -> Result<bool> {
         self.conn
             .execute("DELETE FROM jobs WHERE repo_path = ?1", params![repo])?;
+        self.conn
+            .execute("DELETE FROM findings WHERE repo_path = ?1", params![repo])?;
         let n = self
             .conn
             .execute("DELETE FROM repos WHERE repo_path = ?1", params![repo])?;
@@ -376,6 +378,11 @@ impl CronStore {
     pub fn delete_job(&self, repo: &str, name: &str) -> Result<()> {
         self.conn.execute(
             "DELETE FROM jobs WHERE repo_path = ?1 AND name = ?2",
+            params![repo, name],
+        )?;
+        // A job made again under the name starts with no reported findings.
+        self.conn.execute(
+            "DELETE FROM findings WHERE repo_path = ?1 AND name = ?2",
             params![repo, name],
         )?;
         Ok(())
@@ -621,22 +628,42 @@ impl CronStore {
     /// Forget the job's findings that its latest run no longer reports, so
     /// a problem that comes back is reported again. Snoozed ones are kept
     /// until their snooze ends.
+    /// Only rows last seen before `seen_before` (the run's start) go, so an
+    /// older overlapping run cannot erase what a newer one just recorded.
     pub fn retain_findings(
         &self,
         repo: &str,
         name: &str,
         keep: &[String],
         now: DateTime<Utc>,
+        seen_before: DateTime<Utc>,
     ) -> Result<()> {
         // One statement, so a snooze set while it runs is honoured.
         let keep = serde_json::to_string(keep)?;
         self.conn.execute(
             "DELETE FROM findings WHERE repo_path = ?1 AND name = ?2
                AND fingerprint NOT IN (SELECT value FROM json_each(?3))
-               AND (snoozed_until IS NULL OR snoozed_until <= ?4)",
-            params![repo, name, keep, now.timestamp()],
+               AND (snoozed_until IS NULL OR snoozed_until <= ?4)
+               AND last_seen < ?5",
+            params![repo, name, keep, now.timestamp(), seen_before.timestamp()],
         )?;
         Ok(())
+    }
+
+    /// Run `f` in one write transaction (`BEGIN IMMEDIATE`): another
+    /// process's writes cannot interleave with what `f` reads and writes.
+    pub fn atomically<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        match f() {
+            Ok(v) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(v)
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
     }
 
     /// Stop reporting these findings until `until`.

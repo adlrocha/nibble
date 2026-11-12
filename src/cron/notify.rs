@@ -40,6 +40,10 @@ pub fn findings_of(r: &RunRecord) -> Vec<Finding> {
 
 /// Record what the run found and return the fingerprints to report now.
 pub fn new_findings(store: &CronStore, r: &RunRecord, now: DateTime<Utc>) -> Result<Vec<String>> {
+    store.atomically(|| decide(store, r, now))
+}
+
+fn decide(store: &CronStore, r: &RunRecord, now: DateTime<Utc>) -> Result<Vec<String>> {
     if r.status == RunStatus::Running {
         return Ok(vec![]);
     }
@@ -85,7 +89,7 @@ pub fn new_findings(store: &CronStore, r: &RunRecord, now: DateTime<Utc>) -> Res
     // A failed run did not look, so what it did not report is not gone.
     if !matches!(r.status, RunStatus::Failed | RunStatus::TimedOut) {
         let keep: Vec<String> = found.into_iter().map(|f| f.fingerprint).collect();
-        store.retain_findings(&r.repo_path, &r.name, &keep, now)?;
+        store.retain_findings(&r.repo_path, &r.name, &keep, now, r.started_at)?;
     }
     Ok(new)
 }
@@ -174,7 +178,8 @@ mod tests {
     fn resolved_problems_report_again_when_back() {
         let tmp = tempfile::TempDir::new().unwrap();
         let s = CronStore::open_in(tmp.path()).unwrap();
-        let t = Utc::now();
+        // Findings recorded well before the runs that follow start.
+        let t = Utc::now() - chrono::Duration::hours(1);
         let bad = record(&s, RunStatus::Warn, &[("a", Severity::Warn)]);
         assert_eq!(new_findings(&s, &bad, t).unwrap(), ["a"]);
         let ok = record(&s, RunStatus::Ok, &[]);
@@ -215,7 +220,8 @@ mod tests {
     fn a_failed_run_does_not_reset_the_other_findings() {
         let tmp = tempfile::TempDir::new().unwrap();
         let s = CronStore::open_in(tmp.path()).unwrap();
-        let t = Utc::now();
+        // Findings recorded well before the runs that follow start.
+        let t = Utc::now() - chrono::Duration::hours(1);
         let bad = record(&s, RunStatus::Warn, &[("a", Severity::Warn)]);
         assert_eq!(new_findings(&s, &bad, t).unwrap(), ["a"]);
         let failed = record(&s, RunStatus::Failed, &[]);
@@ -228,6 +234,19 @@ mod tests {
             s.finding("/r", "j", "run:failed").unwrap().is_none(),
             "the failure is over"
         );
+    }
+
+    #[test]
+    fn an_older_overlapping_run_keeps_what_a_newer_one_recorded() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let s = CronStore::open_in(tmp.path()).unwrap();
+        let old = record(&s, RunStatus::Ok, &[]);
+        let newer = record(&s, RunStatus::Warn, &[("a", Severity::Warn)]);
+        let later = Utc::now() + chrono::Duration::minutes(5);
+        new_findings(&s, &newer, later).unwrap();
+        // The older run finishes last, without `a`: `a` was seen after it began.
+        new_findings(&s, &old, later).unwrap();
+        assert!(s.finding("/r", "j", "a").unwrap().is_some());
     }
 
     #[test]

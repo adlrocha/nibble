@@ -13,6 +13,9 @@
 //! - `rc:link:<task_id>`: a session ↔ Slack thread link ([`Link`]).
 //! - `rc:spawn:<thread_ts>`: a session started from Slack whose agent has
 //!   not registered yet ([`PendingSpawn`]).
+//! - `rc:report:<run id>`: a cron report card, queued by `nibble cron` and
+//!   posted by the daemon ([`super::reports::ReportCard`]); kept here so a
+//!   sandbox cannot forge a card whose button starts a session.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -45,13 +48,6 @@ pub(crate) fn state_dir() -> std::path::PathBuf {
 /// written to the database sandboxes can write.
 pub(crate) struct StateDb(Database);
 
-impl StateDb {
-    /// The underlying database, for records kept by other rc modules.
-    pub(super) fn db(&self) -> &Database {
-        &self.0
-    }
-}
-
 /// Open (creating, mode 0700) the daemon's private state database.
 pub(crate) fn open_state() -> Result<StateDb> {
     open_state_in(&state_dir())
@@ -71,6 +67,36 @@ const REQ_PREFIX: &str = "rc:req:";
 const RES_PREFIX: &str = "rc:res:";
 const SPAWN_PREFIX: &str = "rc:spawn:";
 const HEARTBEAT_KEY: &str = "rc:heartbeat";
+const REPORT_PREFIX: &str = "rc:report:";
+
+fn report_key(run_id: i64) -> String {
+    // Zero-padded, so keys sort by run.
+    format!("{REPORT_PREFIX}{run_id:012}")
+}
+
+pub(crate) fn put_report(state: &StateDb, card: &super::reports::ReportCard) -> Result<()> {
+    put(&state.0, &report_key(card.run_id), card)
+}
+
+pub(crate) fn report(state: &StateDb, run_id: i64) -> Result<Option<super::reports::ReportCard>> {
+    get(&state.0, &report_key(run_id))
+}
+
+/// Every report card, by run (oldest first). Corrupt ones are skipped.
+pub(crate) fn reports(state: &StateDb) -> Result<Vec<super::reports::ReportCard>> {
+    let mut all: Vec<(String, super::reports::ReportCard)> = all(&state.0, REPORT_PREFIX)?;
+    all.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(all.into_iter().map(|(_, c)| c).collect())
+}
+
+pub(crate) fn delete_report(state: &StateDb, run_id: i64) -> Result<()> {
+    state.0.kv_delete(&report_key(run_id))
+}
+
+#[cfg(test)]
+pub(crate) fn put_raw_report(state: &StateDb, run_id: i64, raw: &str) -> Result<()> {
+    state.0.kv_set(&report_key(run_id), raw)
+}
 
 /// The session state the daemon last relayed for a link.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

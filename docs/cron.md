@@ -120,8 +120,8 @@ The daemon logs to `$XDG_STATE_HOME/nibble/cron/daemon.log`
 ## Reports in Slack
 
 With [`nibble rc`](rc.md) set up, a run that finds something posts a card
-to your DM with the Slack app: the job, the summary, each finding (new ones
-marked) and three buttons.
+to your DM with the Slack app: the job, the summary, up to eight findings
+(new ones first, marked) and three buttons.
 
 - **Investigate** starts a sandbox session in the card's thread, given the
   report, to confirm the cause and propose a fix without changing anything.
@@ -144,7 +144,8 @@ of Slack; they stay in `nibble cron runs`.
 
 Cards wait in `nibble rc`'s private queue, so a report made while the Slack
 daemon is down is posted when it is back (cards older than 30 days are
-dropped, and a card Slack keeps refusing is given up after five tries).
+dropped). A card Slack refuses is retried after 1, 5, 15, 60 and 360
+minutes, then given up.
 Without `nibble rc` set up nothing is queued, and reports stay in `nibble
 cron runs`.
 
