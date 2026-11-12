@@ -144,10 +144,12 @@ pub(crate) fn status(def: &JobDef, s: &JobState, now: DateTime<Utc>) -> &'static
         "running"
     } else if !def.enabled {
         "disabled"
-    } else if approval(def, s) == Approval::New {
-        "unapproved"
-    } else if approval(def, s) == Approval::Changed {
-        "changed"
+    } else if let a @ (Approval::New | Approval::Changed) = approval(def, s) {
+        if a == Approval::New {
+            "unapproved"
+        } else {
+            "changed"
+        }
     } else if s.paused {
         "paused"
     } else if def.expires_at.is_some_and(|e| e <= now) {
@@ -233,7 +235,7 @@ fn write_new(repo: &Path, def: &JobDef) -> Result<PathBuf> {
     let text = super::format_job(def);
     // Never write a file that would not load.
     super::parse_job(&def.name, &text).context("the new job is invalid")?;
-    std::fs::create_dir_all(super::jobs_dir(repo))?;
+    super::real_jobs_dir(repo)?;
     std::fs::write(&path, text).with_context(|| format!("failed to write {}", path.display()))?;
     Ok(path)
 }
@@ -550,6 +552,7 @@ fn apply_edit(def: &mut JobDef, e: EditArgs, now: DateTime<Utc>) -> Result<bool>
 /// `nibble cron edit`: change the job file, with flags or in `$EDITOR`.
 pub(crate) fn cmd_edit(store: &CronStore, job: &str, e: EditArgs) -> Result<()> {
     let (repo, mut def) = resolve_job(store, job)?;
+    super::real_jobs_dir(&repo)?;
     let path = super::job_path(&repo, &def.name);
     // Only a job you had approved stays approved: editing one that changed
     // under you (from the sandbox, say) must not approve what you never saw.
@@ -603,6 +606,7 @@ pub(crate) fn cmd_pause(store: &CronStore, job: &str, paused: bool) -> Result<()
 pub(crate) fn cmd_kill(store: &CronStore, job: &str) -> Result<()> {
     // Not parsed: a broken file is the one most worth deleting.
     let (repo, name) = resolve_job_file(store, job)?;
+    super::real_jobs_dir(&repo)?;
     let path = super::job_path(&repo, &name);
     std::fs::remove_file(&path).with_context(|| format!("failed to delete {}", path.display()))?;
     store.delete_job(&repo_str(&repo), &name)?;
@@ -848,6 +852,29 @@ mod tests {
         // Approving needs a registered repo.
         cmd_forget(&store, &key).unwrap();
         assert!(cmd_approve(&store, None, Some(&key), true).is_err());
+    }
+
+    #[test]
+    fn writes_refuse_a_symlinked_job_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = CronStore::open_in(&tmp.path().join("state")).unwrap();
+        let repo = std::fs::canonicalize(tmp.path()).unwrap().join("shop");
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, repo.join(".nibble")).unwrap();
+        let a = AddArgs {
+            repo: Some(repo_str(&repo)),
+            schedule: Some("0 1 * * *".into()),
+            prompt: Some("p".into()),
+            file: None,
+            label: Some("Job".into()),
+            expires: None,
+            yes: false,
+        };
+        let err = cmd_add(&store, a).unwrap_err().to_string();
+        assert!(err.contains("outside the repo"), "{err}");
+        assert!(!elsewhere.join("cron/job.md").exists());
     }
 
     #[test]
