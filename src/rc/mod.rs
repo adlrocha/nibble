@@ -3,7 +3,7 @@
 //! - `/nibble-rc` inside a Claude Code, pi or omp session (host or sandbox)
 //!   sends that session to a new thread in your DM with the nibble Slack
 //!   app. Replies in the thread are typed into the session's zellij pane;
-//!   each finished turn's reply comes back to the thread. The pane stays
+//!   each turn's texts come back to the thread as it goes. The pane stays
 //!   live, so you can carry on at the terminal at any time.
 //! - `/nibble` in Slack (or any new DM to the app) starts a new session in a
 //!   new tab of the `rc.zellij_session` zellij session, on the host or in a

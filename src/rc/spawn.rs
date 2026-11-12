@@ -167,7 +167,7 @@ impl Daemon {
         // What counts as "already posted" is fixed before typing, so a
         // replay after the agent answered still relays that answer.
         if spawn.baseline_reply.is_none() {
-            spawn.baseline_reply = Some(self.current_reply(&task).map(|r| r.id));
+            spawn.baseline_reply = Some(self.current_turn(&task).newest_id());
             store::put_spawn(&self.state, &spawn)?;
         }
         // Type the first message and anything queued, recording progress so

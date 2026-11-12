@@ -307,6 +307,19 @@ pub(crate) fn markdown_blocks(text: &str) -> Value {
     json!([{ "type": "markdown", "text": text }])
 }
 
+/// Most text one context block element takes.
+const CONTEXT_LIMIT: usize = 3000;
+
+/// Blocks for a progress text (one the turn went on from): a context block,
+/// small and grey, so the turn's reply stands out. `None` when the text is
+/// too long for one, to be posted like a reply instead. Context blocks take
+/// mrkdwn, so `**bold**` becomes `*bold*`; inline code and plain text read
+/// the same in both.
+pub(crate) fn progress_blocks(text: &str) -> Option<Value> {
+    let text = escape(text.trim()).replace("**", "*");
+    (text.chars().count() <= CONTEXT_LIMIT).then(|| note_blocks(&text))
+}
+
 /// What a session's card (the message with its Close button) says about it.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SessionCard {
@@ -490,6 +503,15 @@ pub(crate) fn escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn progress_is_a_context_block_unless_too_long() {
+        let b = progress_blocks("  Checking **a < b** in `x.rs`\n").unwrap();
+        assert_eq!(b[0]["type"], "context");
+        assert_eq!(b[0]["elements"][0]["text"], "Checking *a &lt; b* in `x.rs`");
+        assert!(progress_blocks(&"x".repeat(CONTEXT_LIMIT)).is_some());
+        assert!(progress_blocks(&"x".repeat(CONTEXT_LIMIT + 1)).is_none());
+    }
 
     #[test]
     fn ok_responses_pass_and_errors_name_the_scope() {
