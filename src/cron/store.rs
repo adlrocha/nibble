@@ -386,9 +386,12 @@ impl CronStore {
     /// either way: a file that vanishes for a while (a branch switch) must
     /// not come back unpaused.
     pub fn prune_jobs(&self, repo: &str, keep: &[String]) -> Result<()> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT name FROM jobs WHERE repo_path = ?1 AND paused = 0")?;
+        // A paused or approved job keeps its row: a file that is away for a
+        // while (a branch switch) must come back paused and approved, and a
+        // returning file is still compared against the approval.
+        let mut stmt = self.conn.prepare(
+            "SELECT name FROM jobs WHERE repo_path = ?1 AND paused = 0 AND approved IS NULL",
+        )?;
         let names: Vec<String> = stmt
             .query_map(params![repo], |r| r.get(0))?
             .collect::<Result<_, _>>()?;
@@ -401,6 +404,8 @@ impl CronStore {
     /// Claim the job for a run by process `pid`. False when a live run
     /// holds it and overlapping is not allowed. A claim whose owner died is
     /// taken over. Compare-and-swap, so two claimers never both win.
+    /// `running` counts the job's runs in flight, so with overlapping runs
+    /// the first to finish does not clear the others'.
     pub fn claim(&self, repo: &str, name: &str, pid: u32, overlap: bool) -> Result<bool> {
         self.conn.execute(
             "INSERT OR IGNORE INTO jobs (repo_path, name) VALUES (?1, ?2)",
@@ -411,23 +416,26 @@ impl CronStore {
             params![repo, name],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
-        if running != 0 && owner.is_some_and(alive) && !overlap {
+        let live = running > 0 && owner.is_some_and(alive);
+        if live && !overlap {
             return Ok(false);
         }
+        let count = if live { running + 1 } else { 1 };
         let n = self.conn.execute(
-            "UPDATE jobs SET running = 1, owner_pid = ?3
+            "UPDATE jobs SET running = ?6, owner_pid = ?3
              WHERE repo_path = ?1 AND name = ?2 AND running = ?4 AND owner_pid IS ?5",
-            params![repo, name, pid, running, owner],
+            params![repo, name, pid, running, owner, count],
         )?;
         Ok(n == 1)
     }
 
-    /// Give up a claim made by `pid` (a newer overlapping run keeps its own).
-    pub fn release(&self, repo: &str, name: &str, pid: u32) -> Result<()> {
+    /// End one run's claim; the job is free once none is left.
+    pub fn release(&self, repo: &str, name: &str) -> Result<()> {
         self.conn.execute(
-            "UPDATE jobs SET running = 0, owner_pid = NULL
-             WHERE repo_path = ?1 AND name = ?2 AND owner_pid = ?3",
-            params![repo, name, pid],
+            "UPDATE jobs SET running = MAX(running - 1, 0),
+               owner_pid = CASE WHEN running <= 1 THEN NULL ELSE owner_pid END
+             WHERE repo_path = ?1 AND name = ?2 AND running > 0",
+            params![repo, name],
         )?;
         Ok(())
     }
@@ -439,7 +447,7 @@ impl CronStore {
         let owners: Vec<(String, String, Option<u32>)> = {
             let mut stmt = self
                 .conn
-                .prepare("SELECT repo_path, name, owner_pid FROM jobs WHERE running = 1")?;
+                .prepare("SELECT repo_path, name, owner_pid FROM jobs WHERE running > 0")?;
             let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
             rows.collect::<Result<_, _>>()?
         };
@@ -517,6 +525,10 @@ impl CronStore {
         Ok(())
     }
 
+    /// The columns [`Self::row_to_run`] reads, in its order.
+    const RUN_COLUMNS: &'static str = "id, repo_path, name, label, trigger, started_at, \
+        finished_at, status, summary, report, session_id, cost_usd, error";
+
     fn row_to_run(r: &rusqlite::Row) -> rusqlite::Result<RunRecord> {
         let report: Option<String> = r.get(9)?;
         Ok(RunRecord {
@@ -540,12 +552,11 @@ impl CronStore {
     /// The newest runs first; of one job when `job` is given.
     pub fn runs(&self, job: Option<(&str, &str)>, limit: usize) -> Result<Vec<RunRecord>> {
         let (repo, name) = job.unwrap_or_default();
-        let mut stmt = self.conn.prepare(
-            "SELECT id, repo_path, name, label, trigger, started_at, finished_at, status,
-                    summary, report, session_id, cost_usd, error
-             FROM runs WHERE ?1 = 0 OR (repo_path = ?2 AND name = ?3)
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {} FROM runs WHERE ?1 = 0 OR (repo_path = ?2 AND name = ?3)
              ORDER BY id DESC LIMIT ?4",
-        )?;
+            Self::RUN_COLUMNS
+        ))?;
         let rows = stmt.query_map(
             params![job.is_some() as i64, repo, name, limit as i64],
             Self::row_to_run,
@@ -556,9 +567,7 @@ impl CronStore {
     pub fn run(&self, id: i64) -> Result<Option<RunRecord>> {
         self.conn
             .query_row(
-                "SELECT id, repo_path, name, label, trigger, started_at, finished_at, status,
-                        summary, report, session_id, cost_usd, error
-                 FROM runs WHERE id = ?1",
+                &format!("SELECT {} FROM runs WHERE id = ?1", Self::RUN_COLUMNS),
                 params![id],
                 Self::row_to_run,
             )
@@ -745,29 +754,37 @@ pub fn plan_legacy(db: &crate::db::Database) -> Result<Vec<LegacyItem>> {
             read_only: false,
             prompt: job.prompt.clone(),
         };
-        // A retry after a partial import finds its own earlier files.
-        let same = |name: &str| {
+        // As the file will read back (titles and prompts are trimmed), so
+        // what is approved is exactly what is on disk.
+        if let Ok(p) = super::parse_job(&base, &super::format_job(&wanted)) {
+            wanted = p.def;
+        }
+        // Walk base, base-2, ... once: a file holding this very job means a
+        // retry after a partial import; the first free name is taken.
+        let mut already = false;
+        let mut free = None;
+        for n in 1.. {
+            let name = if n == 1 {
+                base.clone()
+            } else {
+                format!("{base}-{n}")
+            };
+            let path = super::job_path(&repo, &name);
             let mut d = wanted.clone();
-            d.name = name.to_string();
-            std::fs::read_to_string(super::job_path(&repo, name))
-                .is_ok_and(|t| t == super::format_job(&d))
-        };
-        if same(&base) || (2..10).any(|n| same(&format!("{base}-{n}"))) {
+            d.name = name.clone();
+            if std::fs::read_to_string(&path).is_ok_and(|t| t == super::format_job(&d)) {
+                already = true;
+                break;
+            }
+            if !path.exists() && !taken.contains(&path) {
+                free = Some((name, path));
+                break;
+            }
+        }
+        let Some((name, path)) = free.filter(|_| !already) else {
             plan.push(skip("already imported".to_string()));
             continue;
-        }
-        let (name, path) = (1..)
-            .map(|n| {
-                let name = if n == 1 {
-                    base.clone()
-                } else {
-                    format!("{base}-{n}")
-                };
-                let path = super::job_path(&repo, &name);
-                (name, path)
-            })
-            .find(|(_, p)| !p.exists() && !taken.contains(p))
-            .unwrap_or_default();
+        };
         taken.push(path.clone());
         wanted.name = name;
         plan.push(LegacyItem::Import {
@@ -896,10 +913,15 @@ mod tests {
         );
         assert!(s.claim("/r", "a", me, true).unwrap(), "overlap allowed");
         assert!(s.job("/r", "a").unwrap().running);
-        s.release("/r", "a", DEAD).unwrap();
-        assert!(s.job("/r", "a").unwrap().running, "only the owner releases");
-        s.release("/r", "a", me).unwrap();
+        s.release("/r", "a").unwrap();
+        assert!(
+            s.job("/r", "a").unwrap().running,
+            "the overlapping run still holds it"
+        );
+        s.release("/r", "a").unwrap();
         assert!(!s.job("/r", "a").unwrap().running);
+        s.release("/r", "a").unwrap();
+        assert!(!s.job("/r", "a").unwrap().running, "no underflow");
         // A dead owner's claim is taken over, and reaped.
         assert!(s.claim("/r", "b", DEAD, false).unwrap());
         assert!(s.claim("/r", "b", me, false).unwrap());
@@ -1098,6 +1120,52 @@ mod tests {
             "theirs"
         );
         assert!(legacy_done(&s).unwrap());
+    }
+
+    #[test]
+    fn approved_jobs_survive_a_missing_file() {
+        let (_t, s) = store();
+        s.set_approved("/r", "a", "def").unwrap();
+        s.put_job(&JobState::new("/r", "b")).unwrap();
+        s.prune_jobs("/r", &[]).unwrap();
+        assert_eq!(s.job("/r", "a").unwrap().approved.as_deref(), Some("def"));
+        assert_eq!(s.job("/r", "b").unwrap(), JobState::new("/r", "b"));
+    }
+
+    #[test]
+    fn imports_match_what_reads_back_and_any_earlier_copy() {
+        let (tmp, s) = store();
+        let repo = git_repo(tmp.path(), "repo");
+        let db = crate::db::Database::open(tmp.path().join("tasks.db")).unwrap();
+        // Untrimmed values, as older nibble stored them.
+        db.insert_cron_job(&crate::models::CronJob::new(
+            repo.to_string_lossy().to_string(),
+            "0 9 * * *".into(),
+            "  Audit deps \n".into(),
+            Some(" Deps ".into()),
+            Utc::now(),
+        ))
+        .unwrap();
+        // Ten unrelated files with the same slug sit before the free name.
+        std::fs::create_dir_all(super::super::jobs_dir(&repo)).unwrap();
+        std::fs::write(super::super::job_path(&repo, "deps"), "other").unwrap();
+        for n in 2..=11 {
+            std::fs::write(super::super::job_path(&repo, &format!("deps-{n}")), "other").unwrap();
+        }
+        let plan = plan_legacy(&db).unwrap();
+        apply_legacy(&s, &plan).unwrap();
+        let path = super::super::job_path(&repo, "deps-12");
+        let def = super::super::load_job_file(&path).unwrap();
+        let key = repo.to_string_lossy().to_string();
+        assert_eq!(
+            s.job(&key, "deps-12").unwrap().approved,
+            Some(super::super::format_job(&def)),
+            "approved exactly as it reads back"
+        );
+        let again = plan_legacy(&db).unwrap();
+        assert!(
+            matches!(&again[..], [LegacyItem::Skip { reason, .. }] if reason == "already imported")
+        );
     }
 
     #[test]

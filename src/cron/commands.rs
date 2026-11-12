@@ -31,14 +31,15 @@ pub(crate) fn cmd_import(db: &Database, store: &CronStore, yes: bool) -> Result<
     for item in &plan {
         match item {
             LegacyItem::Import { repo, path, def } => {
+                // In full: importing approves it, so you see what you approve.
                 println!(
-                    "  import  {} ({}) → {}{}",
-                    def.label,
-                    def.schedule,
+                    "\n── import → {} (registers {}){}\n{}",
                     path.display(),
-                    if def.enabled { "" } else { " [disabled]" }
+                    repo.display(),
+                    if def.enabled { "" } else { " [disabled]" },
+                    super::format_job(def)
                 );
-                println!("          and register {}", repo.display());
+                println!("It may edit files (read_only = false), as older jobs could.");
             }
             LegacyItem::Skip {
                 repo_path,
@@ -197,12 +198,15 @@ pub(crate) fn resolve_job_file(store: &CronStore, arg: &str) -> Result<(PathBuf,
     let as_path = Path::new(arg);
     if arg.ends_with(".md") && as_path.is_file() {
         let path = std::fs::canonicalize(as_path)?;
-        let repo = path
+        let dir = path.parent().context("job file has no directory")?;
+        if !dir.ends_with(super::JOBS_DIR) {
+            bail!("{arg} is not in a repo's {}", super::JOBS_DIR);
+        }
+        // `.nibble/cron` is two levels.
+        let repo = dir
             .parent()
             .and_then(Path::parent)
-            .and_then(Path::parent)
-            .filter(|_| path.parent().is_some_and(|d| d.ends_with(super::JOBS_DIR)))
-            .with_context(|| format!("{arg} is not in a repo's {}", super::JOBS_DIR))?
+            .context("job file is not under a repo")?
             .to_path_buf();
         let name = path
             .file_stem()
@@ -293,15 +297,14 @@ pub(crate) fn cmd_add(store: &CronStore, a: AddArgs) -> Result<()> {
             bail!("a new job needs both --schedule and --prompt");
         };
         super::validate_schedule(&schedule)?;
-        let label = a.label.clone().unwrap_or_else(|| {
-            prompt
-                .lines()
-                .next()
-                .unwrap_or("job")
-                .chars()
-                .take(40)
-                .collect()
-        });
+        // `--label`, when given, replaces this below.
+        let label: String = prompt
+            .lines()
+            .next()
+            .unwrap_or("job")
+            .chars()
+            .take(40)
+            .collect();
         new_def = Some(JobDef {
             name: super::slug(&label),
             label,
@@ -333,7 +336,6 @@ pub(crate) fn cmd_add(store: &CronStore, a: AddArgs) -> Result<()> {
             def.expires_at = Some(super::parse_expiry(&e, now)?);
         }
         let path = write_new(&repo, &def)?;
-        // You wrote it here: it is approved.
         // You wrote it here: approved, as read back from the file.
         let written = super::load_job_file(&path)?;
         store.set_approved(&key, &written.name, &super::format_job(&written))?;
@@ -620,19 +622,25 @@ pub(crate) fn cmd_kill(store: &CronStore, job: &str) -> Result<()> {
     Ok(())
 }
 
+/// The key a repo is stored under. A repo that was deleted cannot be
+/// canonicalised, yet what is stored for it must stay removable, so it is
+/// then matched as given (`~` expanded).
+fn repo_key(arg: &str) -> String {
+    canonical_repo(Some(arg))
+        .map(|r| repo_str(&r))
+        .unwrap_or_else(|_| {
+            expand_tilde(arg)
+                .map(|p| repo_str(&p))
+                .unwrap_or_else(|_| arg.to_string())
+                .trim_end_matches('/')
+                .to_string()
+        })
+}
+
 /// `nibble cron forget`: stop running a repo's jobs on this machine. Its
 /// files are left alone.
 pub(crate) fn cmd_forget(store: &CronStore, repo: &str) -> Result<()> {
-    // A repo that was deleted cannot be canonicalised: match it as given.
-    let key = canonical_repo(Some(repo))
-        .map(|r| repo_str(&r))
-        .unwrap_or_else(|_| {
-            expand_tilde(repo)
-                .map(|p| repo_str(&p))
-                .unwrap_or_else(|_| repo.to_string())
-                .trim_end_matches('/')
-                .to_string()
-        });
+    let key = repo_key(repo);
     if store.remove_repo(&key)? {
         println!("Forgot {key}: its jobs no longer run here.");
     } else {
@@ -703,14 +711,9 @@ pub(crate) fn cmd_secret_list(repo: Option<&str>) -> Result<()> {
 
 /// `nibble cron secret unset`.
 pub(crate) fn cmd_secret_unset(name: &str, repo: Option<&str>) -> Result<()> {
-    // A deleted repo cannot be canonicalised; its stored values must still
-    // be removable, so match the key as given.
-    let repo = match (canonical_repo(repo), repo) {
-        (Ok(r), _) => repo_str(&r),
-        (Err(_), Some(given)) => repo_str(&expand_tilde(given)?)
-            .trim_end_matches('/')
-            .to_string(),
-        (Err(e), None) => return Err(e),
+    let repo = match repo {
+        Some(given) => repo_key(given),
+        None => repo_str(&canonical_repo(None)?),
     };
     remove_secret(&secrets::path(), &repo, name)?;
     println!("Removed {name} for {repo}.");
@@ -734,7 +737,13 @@ pub(crate) fn cmd_run(db: &Database, store: &CronStore, job: &str) -> Result<()>
     if super::notify::after_run(store, &def, &record)? {
         println!("\nReported to Slack (nibble rc posts it).");
     }
-    Ok(())
+    // The run's own failure is this command's failure, for scripts.
+    match record.status {
+        super::store::RunStatus::Failed | super::store::RunStatus::TimedOut => {
+            bail!("run {} {}", record.id, record.status.as_str())
+        }
+        _ => Ok(()),
+    }
 }
 
 /// `nibble cron runs`: recent runs, newest first.

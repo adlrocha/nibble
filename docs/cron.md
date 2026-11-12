@@ -39,10 +39,6 @@ the repo's other jobs still run.
 | `notify` | `"slack"` | `"slack"` posts a report when the run finds something; `"none"` keeps it local |
 | `read_only` | `true` | Withholds Claude Code's file-editing tools (Edit, Write, NotebookEdit). The run keeps Bash and is only asked not to change anything, so this guards against slips, not against a run set on changing files |
 
-For now `nibble cron run` types the prompt into the repo's running sandbox
-session, where `timeout`, `model`, `env`, `notify` and `read_only` do not
-apply yet.
-
 ## Commands
 
 ```bash
@@ -58,7 +54,7 @@ nibble cron edit deps-audit           # open the file in $EDITOR
 nibble cron edit deps-audit --schedule "0 9 * * *" --expires +30d
 nibble cron stop deps-audit           # pause on this machine only
 nibble cron start deps-audit          # resume
-nibble cron run deps-audit            # run now and print the report
+nibble cron run deps-audit            # run now and print the report (fails if the run did)
 nibble cron runs [deps-audit]         # recent runs
 nibble cron show 12                   # one run's full report
 nibble cron kill deps-audit           # delete the job file
@@ -161,12 +157,16 @@ state and runs the file only while it still matches.
 
 - `nibble cron add` shows each job file of the repo and asks. `--yes`
   approves them all.
-- A job you create or edit with `nibble cron add` or `nibble cron edit` is
-  approved, being yours.
+- A job you create with `nibble cron add` is approved, being yours. So is
+  one you edit with `nibble cron edit` while it is approved; editing a job
+  that is `changed` or `unapproved` leaves it for `nibble cron approve`.
+- `nibble cron import` shows each older job in full; importing approves it.
 - A file that changes (a `git pull`, an edit in the sandbox) shows as
   `changed` and stops running until `nibble cron approve <job>`. A new file
   shows as `unapproved`. Changes that leave the definition the same, such as
   a comment, keep the approval.
+- A file that goes away for a while (a branch without it) keeps its
+  approval, and is compared against it when it is back.
 
 ## Secrets
 
