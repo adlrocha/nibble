@@ -501,56 +501,65 @@ fn main() -> Result<()> {
             }
         }
 
-        Commands::Cron { action } => match action {
-            cli::CronAction::Add {
-                repo,
-                schedule,
-                prompt,
-                file,
-                label,
-                expires,
-            } => {
-                cron::commands::cmd_cron_add(&db, repo, schedule, prompt, file, label, expires)?;
+        Commands::Cron { action } => {
+            use cron::commands as cc;
+            let store = cc::open(&db)?;
+            match action {
+                cli::CronAction::Add {
+                    repo,
+                    schedule,
+                    prompt,
+                    file,
+                    label,
+                    expires,
+                } => cc::cmd_add(
+                    &store,
+                    cc::AddArgs {
+                        repo,
+                        schedule,
+                        prompt,
+                        file,
+                        label,
+                        expires,
+                    },
+                )?,
+                cli::CronAction::List { repo_path } => cc::cmd_list(&store, repo_path.as_deref())?,
+                cli::CronAction::Edit {
+                    id,
+                    schedule,
+                    prompt,
+                    label,
+                    enable,
+                    disable,
+                    expires,
+                } => cc::cmd_edit(
+                    &store,
+                    &id,
+                    cc::EditArgs {
+                        schedule,
+                        prompt,
+                        label,
+                        enable,
+                        disable,
+                        expires,
+                    },
+                )?,
+                cli::CronAction::Stop { id } => cc::cmd_pause(&store, &id, true)?,
+                cli::CronAction::Start { id } => cc::cmd_pause(&store, &id, false)?,
+                cli::CronAction::Kill { id } => cc::cmd_kill(&store, &id)?,
+                cli::CronAction::Run { id } => cc::cmd_run(&db, &store, &id)?,
+                cli::CronAction::Forget { repo } => cc::cmd_forget(&store, &repo)?,
+                cli::CronAction::Secret { action } => match action {
+                    cli::CronSecretAction::Set { name, repo } => {
+                        cc::cmd_secret_set(&name, repo.as_deref())?
+                    }
+                    cli::CronSecretAction::List { repo } => cc::cmd_secret_list(repo.as_deref())?,
+                    cli::CronSecretAction::Unset { name, repo } => {
+                        cc::cmd_secret_unset(&name, repo.as_deref())?
+                    }
+                },
             }
-            cli::CronAction::List { repo_path } => {
-                cron::commands::cmd_cron_list(&db, repo_path)?;
-            }
-            cli::CronAction::Edit {
-                id,
-                schedule,
-                prompt,
-                label,
-                enable,
-                disable,
-                expires,
-            } => {
-                let cron_id = cron::commands::resolve_cron_id(&db, &id)?;
-                cron::commands::cmd_cron_edit(
-                    &db, cron_id, schedule, prompt, label, enable, disable, expires,
-                )?;
-            }
-            cli::CronAction::Stop { id } => {
-                let cron_id = cron::commands::resolve_cron_id(&db, &id)?;
-                cron::commands::cmd_cron_edit(&db, cron_id, None, None, None, false, true, None)?;
-            }
-            cli::CronAction::Start { id } => {
-                let cron_id = cron::commands::resolve_cron_id(&db, &id)?;
-                cron::commands::cmd_cron_edit(&db, cron_id, None, None, None, true, false, None)?;
-            }
-            cli::CronAction::Kill { id } => {
-                let cron_id = cron::commands::resolve_cron_id(&db, &id)?;
-                let deleted = db.delete_cron_job(cron_id)?;
-                if deleted {
-                    println!("Deleted cron job {}", id);
-                } else {
-                    println!("Cron job {} not found", id);
-                }
-            }
-            cli::CronAction::Run { id } => {
-                let cron_id = cron::commands::resolve_cron_id(&db, &id)?;
-                cron::commands::cmd_cron_run(&db, cron_id)?;
-            }
-        },
+        }
         // ── Sandbox subcommands ────────────────────────────────────────────
         Commands::Sandbox { action } => match action {
             SandboxAction::Spawn {

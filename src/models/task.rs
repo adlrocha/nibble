@@ -350,6 +350,7 @@ impl Task {
 
 /// Cron job for scheduled prompts to sandboxes
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // legacy rows: read once, when cron exports them to job files
 pub struct CronJob {
     pub id: Option<i64>,
     /// Canonical absolute path of the repo this job targets.
@@ -372,6 +373,7 @@ pub struct CronJob {
 }
 
 impl CronJob {
+    #[cfg(test)]
     pub fn new(
         repo_path: String,
         schedule: String,

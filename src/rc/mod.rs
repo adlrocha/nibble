@@ -22,11 +22,11 @@ mod daemon;
 mod modal;
 mod pane;
 mod relay;
-mod secrets;
+pub(crate) mod secrets;
 mod slack;
 mod socket;
 mod spawn;
-mod store;
+pub(crate) mod store;
 mod transcript;
 
 use anyhow::{bail, Context, Result};
@@ -230,7 +230,7 @@ pub(crate) fn cmd_claude_hook(db: &Database) -> Result<()> {
 // ── setup / doctor ────────────────────────────────────────────────────────────
 
 /// Read one line from the terminal, optionally without echo (tokens).
-fn prompt_line(label: &str, secret: bool) -> Result<String> {
+pub(crate) fn prompt_line(label: &str, secret: bool) -> Result<String> {
     print!("{label}: ");
     std::io::stdout().flush()?;
     let _guard = if secret { EchoOff::new() } else { None };
