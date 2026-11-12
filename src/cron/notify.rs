@@ -4,7 +4,8 @@
 //! A problem is reported when it first appears, again when it gets worse
 //! (warn → critical), and again once a day while it lasts, unless it was
 //! snoozed from Slack. A run that fails or times out counts as a problem
-//! of its own, so a broken job is reported too, once.
+//! of its own (`run:failed`, `run:timeout`), reported the same way; it says
+//! nothing about the job's other findings, which are kept as they were.
 
 use super::run::{Finding, Severity};
 use super::store::{CronStore, FindingState, RunRecord, RunStatus};
@@ -81,8 +82,11 @@ pub fn new_findings(store: &CronStore, r: &RunRecord, now: DateTime<Utc>) -> Res
             },
         )?;
     }
-    let keep: Vec<String> = found.into_iter().map(|f| f.fingerprint).collect();
-    store.retain_findings(&r.repo_path, &r.name, &keep, now)?;
+    // A failed run did not look, so what it did not report is not gone.
+    if !matches!(r.status, RunStatus::Failed | RunStatus::TimedOut) {
+        let keep: Vec<String> = found.into_iter().map(|f| f.fingerprint).collect();
+        store.retain_findings(&r.repo_path, &r.name, &keep, now)?;
+    }
     Ok(new)
 }
 
@@ -95,8 +99,7 @@ pub fn after_run(store: &CronStore, def: &JobDef, r: &RunRecord) -> Result<bool>
         return Ok(false);
     }
     let card = crate::rc::reports::ReportCard::new(r, findings_of(r), new);
-    crate::rc::reports::queue(&card)?;
-    Ok(true)
+    crate::rc::reports::queue(&card)
 }
 
 #[cfg(test)]
@@ -209,6 +212,41 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_run_does_not_reset_the_other_findings() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let s = CronStore::open_in(tmp.path()).unwrap();
+        let t = Utc::now();
+        let bad = record(&s, RunStatus::Warn, &[("a", Severity::Warn)]);
+        assert_eq!(new_findings(&s, &bad, t).unwrap(), ["a"]);
+        let failed = record(&s, RunStatus::Failed, &[]);
+        new_findings(&s, &failed, t).unwrap();
+        assert!(
+            new_findings(&s, &bad, t).unwrap().is_empty(),
+            "a is still known"
+        );
+        assert!(
+            s.finding("/r", "j", "run:failed").unwrap().is_none(),
+            "the failure is over"
+        );
+    }
+
+    #[test]
+    fn severity_rises_report_each_time() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let s = CronStore::open_in(tmp.path()).unwrap();
+        let t = Utc::now();
+        let warn = record(&s, RunStatus::Warn, &[("a", Severity::Warn)]);
+        let crit = record(&s, RunStatus::Critical, &[("a", Severity::Critical)]);
+        assert_eq!(new_findings(&s, &warn, t).unwrap(), ["a"]);
+        assert_eq!(new_findings(&s, &crit, t).unwrap(), ["a"]);
+        assert!(
+            new_findings(&s, &warn, t).unwrap().is_empty(),
+            "a drop is quiet"
+        );
+        assert_eq!(new_findings(&s, &crit, t).unwrap(), ["a"]);
+    }
+
+    #[test]
     fn failures_are_problems_of_their_own() {
         let tmp = tempfile::TempDir::new().unwrap();
         let s = CronStore::open_in(tmp.path()).unwrap();
@@ -219,7 +257,15 @@ mod tests {
         assert_eq!(f[0].fingerprint, "run:failed");
         assert_eq!(f[0].details, "boom");
         assert_eq!(new_findings(&s, &failed, t).unwrap(), ["run:failed"]);
-        assert!(new_findings(&s, &failed, t).unwrap().is_empty(), "once");
+        assert!(
+            new_findings(&s, &failed, t).unwrap().is_empty(),
+            "once a day"
+        );
+        assert_eq!(
+            new_findings(&s, &failed, t + RENOTIFY + chrono::Duration::minutes(1)).unwrap(),
+            ["run:failed"],
+            "a job that keeps failing is reported daily"
+        );
         let timeout = record(&s, RunStatus::TimedOut, &[]);
         assert_eq!(findings_of(&timeout)[0].title, "The job timed out");
         let running = s

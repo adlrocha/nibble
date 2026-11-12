@@ -585,7 +585,8 @@ impl CronStore {
                                    snoozed_until, last_seen)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT (repo_path, name, fingerprint) DO UPDATE SET
-               severity = ?4, notified_at = ?5, snoozed_until = ?6, last_seen = ?7",
+               severity = ?4, notified_at = ?5, last_seen = ?7,
+               snoozed_until = NULLIF(MAX(COALESCE(snoozed_until, 0), COALESCE(?6, 0)), 0)",
             params![
                 repo,
                 name,
@@ -609,20 +610,14 @@ impl CronStore {
         keep: &[String],
         now: DateTime<Utc>,
     ) -> Result<()> {
-        let fps: Vec<String> = {
-            let mut stmt = self.conn.prepare(
-                "SELECT fingerprint FROM findings WHERE repo_path = ?1 AND name = ?2
-                   AND (snoozed_until IS NULL OR snoozed_until <= ?3)",
-            )?;
-            let rows = stmt.query_map(params![repo, name, now.timestamp()], |r| r.get(0))?;
-            rows.collect::<Result<_, _>>()?
-        };
-        for fp in fps.iter().filter(|f| !keep.contains(f)) {
-            self.conn.execute(
-                "DELETE FROM findings WHERE repo_path = ?1 AND name = ?2 AND fingerprint = ?3",
-                params![repo, name, fp],
-            )?;
-        }
+        // One statement, so a snooze set while it runs is honoured.
+        let keep = serde_json::to_string(keep)?;
+        self.conn.execute(
+            "DELETE FROM findings WHERE repo_path = ?1 AND name = ?2
+               AND fingerprint NOT IN (SELECT value FROM json_each(?3))
+               AND (snoozed_until IS NULL OR snoozed_until <= ?4)",
+            params![repo, name, keep, now.timestamp()],
+        )?;
         Ok(())
     }
 

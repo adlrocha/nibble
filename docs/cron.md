@@ -141,13 +141,16 @@ to check, since it was written from logs and tool output.
 
 A problem is reported when it first appears, again when it gets worse (warn
 → critical), and once a day while it lasts. A problem that goes away and
-comes back is reported again. A run that fails or times out is reported
-once, as a problem of its own. `notify = "none"` keeps a job's reports out
+comes back is reported again. A run that fails or times out is a problem of
+its own, reported the same way (so a job that keeps failing is reported
+daily); it leaves the job's other findings as they were. `notify = "none"` keeps a job's reports out
 of Slack; they stay in `nibble cron runs`.
 
 Cards wait in `nibble rc`'s private queue, so a report made while the Slack
 daemon is down is posted when it is back (cards older than 30 days are
-dropped). Without `nibble rc` set up, reports stay in `nibble cron runs`.
+dropped, and a card Slack keeps refusing is given up after five tries).
+Without `nibble rc` set up nothing is queued, and reports stay in `nibble
+cron runs`.
 
 ## Approving jobs
 
