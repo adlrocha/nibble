@@ -258,9 +258,12 @@ impl CronStore {
     /// either way: a file that vanishes for a while (a branch switch) must
     /// not come back unpaused.
     pub fn prune_jobs(&self, repo: &str, keep: &[String]) -> Result<()> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT name FROM jobs WHERE repo_path = ?1 AND paused = 0")?;
+        // A paused or approved job keeps its row: a file that is away for a
+        // while (a branch switch) must come back paused and approved, and a
+        // returning file is still compared against the approval.
+        let mut stmt = self.conn.prepare(
+            "SELECT name FROM jobs WHERE repo_path = ?1 AND paused = 0 AND approved IS NULL",
+        )?;
         let names: Vec<String> = stmt
             .query_map(params![repo], |r| r.get(0))?
             .collect::<Result<_, _>>()?;
@@ -364,29 +367,37 @@ pub fn plan_legacy(db: &crate::db::Database) -> Result<Vec<LegacyItem>> {
             read_only: false,
             prompt: job.prompt.clone(),
         };
-        // A retry after a partial import finds its own earlier files.
-        let same = |name: &str| {
+        // As the file will read back (titles and prompts are trimmed), so
+        // what is approved is exactly what is on disk.
+        if let Ok(p) = super::parse_job(&base, &super::format_job(&wanted)) {
+            wanted = p.def;
+        }
+        // Walk base, base-2, ... once: a file holding this very job means a
+        // retry after a partial import; the first free name is taken.
+        let mut already = false;
+        let mut free = None;
+        for n in 1.. {
+            let name = if n == 1 {
+                base.clone()
+            } else {
+                format!("{base}-{n}")
+            };
+            let path = super::job_path(&repo, &name);
             let mut d = wanted.clone();
-            d.name = name.to_string();
-            std::fs::read_to_string(super::job_path(&repo, name))
-                .is_ok_and(|t| t == super::format_job(&d))
-        };
-        if same(&base) || (2..10).any(|n| same(&format!("{base}-{n}"))) {
+            d.name = name.clone();
+            if std::fs::read_to_string(&path).is_ok_and(|t| t == super::format_job(&d)) {
+                already = true;
+                break;
+            }
+            if !path.exists() && !taken.contains(&path) {
+                free = Some((name, path));
+                break;
+            }
+        }
+        let Some((name, path)) = free.filter(|_| !already) else {
             plan.push(skip("already imported".to_string()));
             continue;
-        }
-        let (name, path) = (1..)
-            .map(|n| {
-                let name = if n == 1 {
-                    base.clone()
-                } else {
-                    format!("{base}-{n}")
-                };
-                let path = super::job_path(&repo, &name);
-                (name, path)
-            })
-            .find(|(_, p)| !p.exists() && !taken.contains(p))
-            .unwrap_or_default();
+        };
         taken.push(path.clone());
         wanted.name = name;
         plan.push(LegacyItem::Import {
@@ -626,6 +637,52 @@ mod tests {
             "theirs"
         );
         assert!(legacy_done(&s).unwrap());
+    }
+
+    #[test]
+    fn approved_jobs_survive_a_missing_file() {
+        let (_t, s) = store();
+        s.set_approved("/r", "a", "def").unwrap();
+        s.put_job(&JobState::new("/r", "b")).unwrap();
+        s.prune_jobs("/r", &[]).unwrap();
+        assert_eq!(s.job("/r", "a").unwrap().approved.as_deref(), Some("def"));
+        assert_eq!(s.job("/r", "b").unwrap(), JobState::new("/r", "b"));
+    }
+
+    #[test]
+    fn imports_match_what_reads_back_and_any_earlier_copy() {
+        let (tmp, s) = store();
+        let repo = git_repo(tmp.path(), "repo");
+        let db = crate::db::Database::open(tmp.path().join("tasks.db")).unwrap();
+        // Untrimmed values, as older nibble stored them.
+        db.insert_cron_job(&crate::models::CronJob::new(
+            repo.to_string_lossy().to_string(),
+            "0 9 * * *".into(),
+            "  Audit deps \n".into(),
+            Some(" Deps ".into()),
+            Utc::now(),
+        ))
+        .unwrap();
+        // Ten unrelated files with the same slug sit before the free name.
+        std::fs::create_dir_all(super::super::jobs_dir(&repo)).unwrap();
+        std::fs::write(super::super::job_path(&repo, "deps"), "other").unwrap();
+        for n in 2..=11 {
+            std::fs::write(super::super::job_path(&repo, &format!("deps-{n}")), "other").unwrap();
+        }
+        let plan = plan_legacy(&db).unwrap();
+        apply_legacy(&s, &plan).unwrap();
+        let path = super::super::job_path(&repo, "deps-12");
+        let def = super::super::load_job_file(&path).unwrap();
+        let key = repo.to_string_lossy().to_string();
+        assert_eq!(
+            s.job(&key, "deps-12").unwrap().approved,
+            Some(super::super::format_job(&def)),
+            "approved exactly as it reads back"
+        );
+        let again = plan_legacy(&db).unwrap();
+        assert!(
+            matches!(&again[..], [LegacyItem::Skip { reason, .. }] if reason == "already imported")
+        );
     }
 
     #[test]

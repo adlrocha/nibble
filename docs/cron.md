@@ -93,12 +93,16 @@ state and runs the file only while it still matches.
 
 - `nibble cron add` shows each job file of the repo and asks. `--yes`
   approves them all.
-- A job you create or edit with `nibble cron add` or `nibble cron edit` is
-  approved, being yours.
+- A job you create with `nibble cron add` is approved, being yours. So is
+  one you edit with `nibble cron edit` while it is approved; editing a job
+  that is `changed` or `unapproved` leaves it for `nibble cron approve`.
+- `nibble cron import` shows each older job in full; importing approves it.
 - A file that changes (a `git pull`, an edit in the sandbox) shows as
   `changed` and stops running until `nibble cron approve <job>`. A new file
   shows as `unapproved`. Changes that leave the definition the same, such as
   a comment, keep the approval.
+- A file that goes away for a while (a branch without it) keeps its
+  approval, and is compared against it when it is back.
 
 ## Secrets
 
