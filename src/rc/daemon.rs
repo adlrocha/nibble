@@ -559,12 +559,10 @@ impl Daemon {
         link.permalink = self.bot.permalink(&self.dm, &link.thread_ts).ok();
         // The card exists now: record the link before anything else can
         // fail, so its thread and Close button always have a session.
-        // Relaying continues after the newest text, so a turn that is still
-        // running streams from here on rather than replaying its start.
-        let turn = self.current_turn(&task);
-        link.last_reply_id = turn.newest_id();
+        let (cursor, shown) = relay::start_point(self.current_turn(&task), link.watch);
+        link.last_reply_id = cursor;
         store::put_link(&self.state, &link)?;
-        if let Some(reply) = relay::reply_to_show(turn, link.watch) {
+        if let Some(reply) = shown {
             if let Err(e) = self.post_reply(&link, &format!("*Last reply*\n\n{}", reply.text)) {
                 log(&format!("could not post the last reply: {e:#}"));
             }
@@ -643,6 +641,7 @@ impl Daemon {
 
     fn finish_link(&mut self, mut link: Link, why: &str, state: CardState) -> Result<()> {
         link.closed = true;
+        self.transcript_lens.remove(&link.task_id);
         store::put_link(&self.state, &link)?;
         let card = session_card(&link, None);
         if let Err(e) = self.bot.update(

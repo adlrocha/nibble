@@ -99,7 +99,8 @@ pub(crate) struct Link {
     /// Last relayed state.
     #[serde(default)]
     pub watch: Watch,
-    /// Transcript id of the last reply posted, so it is never posted twice.
+    /// Transcript id of the newest text the thread has (progress or reply),
+    /// or chose to skip: texts are relayed only after it, so none twice.
     #[serde(default)]
     pub last_reply_id: Option<String>,
     /// The permission prompt last posted to the thread, so a different
@@ -241,9 +242,9 @@ pub(crate) struct PendingSpawn {
     /// retried start never types one twice.
     #[serde(default)]
     pub typed: usize,
-    /// The transcript's last reply before anything was typed (`Some(None)`:
+    /// The transcript's newest text before anything was typed (`Some(None)`:
     /// none yet), taken once so a replayed start never mistakes the agent's
-    /// answer to the first message for an old reply.
+    /// answer to the first message for an old text.
     #[serde(default)]
     pub baseline_reply: Option<Option<String>>,
     /// The last transient failure, reported if the start times out.

@@ -4,7 +4,7 @@
 
 use anyhow::Result;
 
-use super::daemon::{log, Daemon};
+use super::daemon::Daemon;
 use super::slack::{self, SessionStatus};
 use super::store::{self, Link, Watch};
 use super::transcript;
@@ -81,7 +81,13 @@ impl Daemon {
                 }
                 Effect::Progress(text) => {
                     if let Err(e) = self.post_progress(&link, &text.text) {
-                        log(&format!("could not post progress: {e:#}"));
+                        self.note(
+                            &link.channel,
+                            &link.thread_ts,
+                            &format!(
+                                ":warning: Could not post a progress note ({e:#}); it is in the pane."
+                            ),
+                        );
                     }
                 }
                 Effect::Reply(reply) => {
@@ -170,8 +176,9 @@ impl Step {
 /// What to relay for a link whose task is now `observed` (`reason`: the
 /// task's attention reason when blocked). While a turn runs, each text it
 /// moves on from is posted as progress; once it is idle, the rest and its
-/// reply. The transcript is only read when a turn is running or may have
-/// just finished.
+/// reply. `turn` is only called when a turn is running or may have just
+/// finished; the caller may answer an empty turn when it skipped the read
+/// this poll (the transcript did not grow), which posts nothing.
 fn next_step(
     link: &Link,
     observed: Watch,
@@ -201,43 +208,66 @@ fn next_step(
     let new = turn().since(link.last_reply_id.as_deref());
     let mut reply_id = new.progress.last().map(|r| r.id.clone());
     let mut effects: Vec<Effect> = new.progress.into_iter().map(Effect::Progress).collect();
-    let step = |watch, idle_checks, reply_id, blocked_reason, effects| Step {
-        watch,
-        idle_checks,
-        reply_id,
-        blocked_reason,
-        effects,
-    };
     match observed {
         Watch::Working if prev != Watch::Working => {
             effects.push(Effect::Status(status_of(Watch::Working)));
-            step(observed, 0, reply_id, shown, effects)
+            Step {
+                watch: observed,
+                idle_checks: 0,
+                reply_id,
+                blocked_reason: shown,
+                effects,
+            }
         }
         // Still the prompt the thread shows: nothing new. A different
         // prompt in the same blocked spell is posted.
         Watch::Blocked if !(prev == Watch::Blocked && link.blocked_reason == shown) => {
             effects.extend([Effect::Blocked, Effect::Status(status_of(Watch::Blocked))]);
-            step(observed, 0, reply_id, shown, effects)
+            Step {
+                watch: observed,
+                idle_checks: 0,
+                reply_id,
+                blocked_reason: shown,
+                effects,
+            }
         }
-        Watch::Working | Watch::Blocked => step(observed, 0, reply_id, shown, effects),
+        Watch::Working | Watch::Blocked => Step {
+            watch: observed,
+            idle_checks: 0,
+            reply_id,
+            blocked_reason: shown,
+            effects,
+        },
         _ => match new.reply {
             Some(r) => {
                 reply_id = Some(r.id.clone());
                 effects.extend([Effect::Reply(r), Effect::Status(status_of(Watch::Idle))]);
-                step(Watch::Idle, 0, reply_id, None, effects)
+                Step {
+                    watch: Watch::Idle,
+                    idle_checks: 0,
+                    reply_id,
+                    blocked_reason: None,
+                    effects,
+                }
             }
             None if link.idle_checks + 1 >= IDLE_GIVE_UP => {
                 effects.extend([Effect::NoReply, Effect::Status(status_of(Watch::Idle))]);
-                step(Watch::Idle, 0, reply_id, None, effects)
+                Step {
+                    watch: Watch::Idle,
+                    idle_checks: 0,
+                    reply_id,
+                    blocked_reason: None,
+                    effects,
+                }
             }
             // Not yet: keep the previous state and count the miss.
-            None => step(
-                prev,
-                link.idle_checks + 1,
+            None => Step {
+                watch: prev,
+                idle_checks: link.idle_checks + 1,
                 reply_id,
-                link.blocked_reason.clone(),
+                blocked_reason: link.blocked_reason.clone(),
                 effects,
-            ),
+            },
         },
     }
 }
@@ -249,10 +279,21 @@ fn needs_read(observed: Watch, shown: Watch, len: Option<u64>, seen: Option<u64>
     observed != shown || len.is_none() || len != seen
 }
 
-/// What a new link shows as the session's last reply: the turn's reply, but
-/// only once the turn is over (mid-turn, the newest text may be progress).
-pub(super) fn reply_to_show(turn: transcript::Turn, watch: Watch) -> Option<transcript::Reply> {
-    turn.reply.filter(|_| watch == Watch::Idle)
+/// Where a new link starts: its cursor, and the last reply its card shows.
+/// Between turns that is the reply, and the cursor is on it. Mid-turn no
+/// reply is shown (the newest text may still become progress), and the
+/// cursor is on the newest progress text: the turn's earlier progress is
+/// skipped, but a reply still in flight is relayed when the turn ends.
+pub(super) fn start_point(
+    turn: transcript::Turn,
+    watch: Watch,
+) -> (Option<String>, Option<transcript::Reply>) {
+    let shown = turn.reply.filter(|_| watch == Watch::Idle);
+    let cursor = shown
+        .as_ref()
+        .or(turn.progress.last())
+        .map(|r| r.id.clone());
+    (cursor, shown)
 }
 
 /// The link state right after a thread reply was typed into the pane: a
@@ -377,10 +418,41 @@ mod tests {
 
     #[test]
     fn a_new_link_shows_a_reply_only_between_turns() {
-        assert_eq!(reply_to_show(done(&["a"], "b"), Watch::Idle), reply("b"));
-        assert_eq!(reply_to_show(done(&["a"], "b"), Watch::Working), None);
-        assert_eq!(reply_to_show(done(&["a"], "b"), Watch::Blocked), None);
-        assert_eq!(reply_to_show(done(&["a"], ""), Watch::Idle), None);
+        let at = |turn, watch| start_point(turn, watch);
+        assert_eq!(
+            at(done(&["a"], "b"), Watch::Idle),
+            (Some("b".into()), reply("b"))
+        );
+        assert_eq!(
+            at(done(&["a"], "b"), Watch::Working),
+            (Some("a".into()), None)
+        );
+        assert_eq!(
+            at(done(&["a"], "b"), Watch::Blocked),
+            (Some("a".into()), None)
+        );
+        assert_eq!(at(done(&["a"], ""), Watch::Idle), (Some("a".into()), None));
+        assert_eq!(at(done(&[], "b"), Watch::Working), (None, None));
+    }
+
+    #[test]
+    fn linking_mid_turn_still_relays_that_turn_s_reply() {
+        // Linked while "b" is the newest text and the turn is still running.
+        let (cursor, shown) = start_point(done(&["a"], "b"), Watch::Working);
+        assert_eq!(shown, None);
+        let l = link(Watch::Working, cursor.as_deref(), 0);
+        // The turn ends with "b" as its reply: posted, not skipped.
+        let s = next_step(&l, Watch::Idle, None, &|| done(&["a"], "b"));
+        assert_eq!(
+            s.effects,
+            vec![
+                Effect::Reply(reply("b").unwrap()),
+                Effect::Status(SessionStatus::Active)
+            ]
+        );
+        // Or the turn goes on and "b" becomes progress: streamed.
+        let s = next_step(&l, Watch::Working, None, &|| done(&["a", "b"], ""));
+        assert_eq!(s.effects, vec![Effect::Progress(reply("b").unwrap())]);
     }
 
     #[test]

@@ -13,7 +13,10 @@
 //! A turn's texts are every assistant text since the last real user
 //! prompt; tool results (user-role lines in Claude, `toolResult` in pi)
 //! belong to the same turn. A text with a tool call, a tool result or
-//! another message after it is progress: the turn went on. The newest text
+//! another message after it is progress: the turn went on. So is a Claude
+//! text whose line says `stop_reason: "tool_use"`, before its tool call is
+//! on disk (Claude Code stamps each line of a message with the message's
+//! stop reason). The newest text
 //! with nothing after it is the turn's reply once the turn is over. That
 //! final message may not be on disk yet (Claude Code can run the Stop hook
 //! that reports the turn idle before flushing it) or may never come (the
@@ -30,7 +33,8 @@ use crate::models::AgentType;
 /// How much of the transcript's tail is read; a reply is never further back.
 const TAIL_BYTES: u64 = 2 * 1024 * 1024;
 
-/// An assistant reply and the transcript id that identifies it.
+/// An assistant text (progress or a reply) and the transcript id that
+/// identifies it.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Reply {
     pub id: String,
