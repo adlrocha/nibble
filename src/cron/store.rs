@@ -95,7 +95,9 @@ CREATE TABLE runs (
     session_id TEXT,
     cost_usd REAL,
     error TEXT,
-    owner_pid INTEGER
+    owner_pid INTEGER,
+    container TEXT,
+    task_id TEXT
 );
 CREATE INDEX idx_runs_job ON runs(repo_path, name, id);
 ",
@@ -431,7 +433,9 @@ impl CronStore {
     /// Clear claims and close runs whose owning process is gone. Run by the
     /// daemon at start and on every pass, so a run killed with Ctrl-C does
     /// not block its job for good, while a live manual run is left alone.
-    pub fn reap_stale(&self) -> Result<()> {
+    /// Returns the (container, task id) of each closed run, whose session
+    /// may still be going inside the container.
+    pub fn reap_stale(&self) -> Result<Vec<(String, String)>> {
         let owners: Vec<(String, String, Option<u32>)> = {
             let mut stmt = self
                 .conn
@@ -448,14 +452,16 @@ impl CronStore {
                 )?;
             }
         }
-        let open: Vec<(i64, Option<u32>)> = {
-            let mut stmt = self
-                .conn
-                .prepare("SELECT id, owner_pid FROM runs WHERE status = 'running'")?;
-            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        type Open = (i64, Option<u32>, Option<String>, Option<String>);
+        let open: Vec<Open> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, owner_pid, container, task_id FROM runs WHERE status = 'running'",
+            )?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
             rows.collect::<Result<_, _>>()?
         };
-        for (id, owner) in open {
+        let mut orphans = Vec::new();
+        for (id, owner, container, task_id) in open {
             if !owner.is_some_and(alive) {
                 self.conn.execute(
                     "UPDATE runs SET status = 'failed', finished_at = ?2,
@@ -463,8 +469,21 @@ impl CronStore {
                      WHERE id = ?1 AND status = 'running'",
                     params![id, Utc::now().timestamp()],
                 )?;
+                if let (Some(c), Some(t)) = (container, task_id) {
+                    orphans.push((c, t));
+                }
             }
         }
+        Ok(orphans)
+    }
+
+    /// Where a run executes, so a run orphaned by its process dying can be
+    /// found and stopped inside the container.
+    pub fn set_run_target(&self, id: i64, container: &str, task_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE runs SET container = ?2, task_id = ?3 WHERE id = ?1",
+            params![id, container, task_id],
+        )?;
         Ok(())
     }
 
@@ -871,7 +890,13 @@ mod tests {
         assert!(s.run(999).unwrap().is_none());
         // A run whose process died is closed; a live one is not.
         let live = s.start_run("/r", "d", "D", "manual", me).unwrap();
-        s.reap_stale().unwrap();
+        s.set_run_target(b, "ctr", "task-b").unwrap();
+        assert_eq!(
+            s.reap_stale().unwrap(),
+            [("ctr".to_string(), "task-b".to_string())],
+            "the orphan is handed back to be killed"
+        );
+        assert!(s.reap_stale().unwrap().is_empty(), "once");
         let r = s.run(b).unwrap().unwrap();
         assert_eq!(r.status, RunStatus::Failed);
         assert!(r.error.unwrap().contains("stopped"));

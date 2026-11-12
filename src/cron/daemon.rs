@@ -78,6 +78,11 @@ pub fn due_jobs(
                 continue;
             }
         };
+        // Problems that are gone are forgotten, so their return is news.
+        warned.remove(&repo);
+        for def in &jobs {
+            warned.remove(&super::job_path(&path, &def.name).display().to_string());
+        }
         for b in bad {
             let key = b.path.display().to_string();
             warn_once(warned, &key, format!("{key} is invalid: {}", b.error));
@@ -148,8 +153,16 @@ pub fn run(db_path: PathBuf) -> Result<()> {
     let mut warned = Warned::new();
     loop {
         // Claims of runs whose process died (a killed `cron run`, a crash).
-        if let Err(e) = store.reap_stale() {
-            log(&format!("could not clear stale runs: {e:#}"));
+        match store.reap_stale() {
+            // Their process died (a restart, an upgrade), but the session
+            // inside the container may still run, holding the job's secrets.
+            Ok(orphans) => {
+                for (container, task_id) in orphans {
+                    log(&format!("stopping an orphaned run in {container}"));
+                    super::run::kill_in_container(&container, &task_id);
+                }
+            }
+            Err(e) => log(&format!("could not clear stale runs: {e:#}")),
         }
         let snapshot = active.lock().map(|a| a.clone()).unwrap_or_default();
         // Live claims count manual `nibble cron run`s too.

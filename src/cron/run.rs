@@ -120,7 +120,14 @@ pub fn prompt_for(def: &JobDef) -> String {
 }
 
 fn clip(s: &str) -> String {
-    let s = s.trim();
+    // No control characters but line breaks and tabs: report text is
+    // printed to terminals, and an escape sequence from a log excerpt must
+    // not drive the reader's terminal.
+    let cleaned: String = s
+        .chars()
+        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+        .collect();
+    let s = cleaned.trim();
     match s.char_indices().nth(MAX_FIELD) {
         Some((i, _)) => format!("{}…", &s[..i]),
         None => s.to_string(),
@@ -300,7 +307,7 @@ pub fn valid_container_ref(s: &str) -> bool {
 
 /// Kill whatever still runs in the container for this run (found by its
 /// AGENT_TASK_ID), after the host gave up on `podman exec`.
-fn kill_in_container(container: &str, task_id: &str) {
+pub fn kill_in_container(container: &str, task_id: &str) {
     let script = format!(
         "for p in /proc/[0-9]*; do grep -qz '^AGENT_TASK_ID={task_id}$' \"$p/environ\" 2>/dev/null && kill -9 \"${{p#/proc/}}\"; done; true"
     );
@@ -336,7 +343,7 @@ fn ensure_sandbox(db: &Database, repo: &Path) -> Result<Task> {
     let _one = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
     // Another job may have started it while this one waited.
     if let Some(t) = healthy(db)? {
-        return Ok(t);
+        return can_run_claude(t);
     }
     crate::commands::cmd_sandbox_spawn(
         db,
@@ -482,7 +489,7 @@ pub fn run_job(
         name: def.name.clone(),
     };
     let id = store.start_run(&key, &def.name, &def.label, trigger.as_str(), pid)?;
-    let parsed = execute(db, repo, def).unwrap_or_else(|e| Parsed {
+    let parsed = execute(db, store, id, repo, def).unwrap_or_else(|e| Parsed {
         status: RunStatus::Failed,
         report: None,
         session_id: None,
@@ -506,7 +513,13 @@ pub fn run_job(
         .map(Some)
 }
 
-fn execute(db: &Database, repo: &Path, def: &JobDef) -> Result<Parsed> {
+fn execute(
+    db: &Database,
+    store: &CronStore,
+    run_id: i64,
+    repo: &Path,
+    def: &JobDef,
+) -> Result<Parsed> {
     let key = repo.to_string_lossy().to_string();
     let table = super::secrets::load_from(&super::secrets::path())?;
     let env = super::secrets::resolve(&table, &key, &def.env)?;
@@ -518,6 +531,7 @@ fn execute(db: &Database, repo: &Path, def: &JobDef) -> Result<Parsed> {
     // a run going that nothing waits on.
     let task = run_task(&sandbox, def, std::process::id() as i32);
     db.insert_task(&task)?;
+    store.set_run_target(run_id, &container, &task.task_id)?;
     let started = Instant::now();
     let mut child = match command(&container, &cwd, &task.task_id, def, &env)
         .stdin(Stdio::piped())
@@ -649,6 +663,10 @@ mod tests {
         assert_eq!(blank.status, Severity::Warn);
         // Multibyte text is clipped on a character boundary.
         assert!(clip(&"é".repeat(MAX_FIELD + 3)).ends_with('…'));
+        assert_eq!(
+            clip("\u{1b}[31mred\u{1b}[0m\tok\nnext\u{7}"),
+            "[31mred[0m\tok\nnext"
+        );
     }
 
     fn result(extra: serde_json::Value) -> String {
