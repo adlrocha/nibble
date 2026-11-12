@@ -1,4 +1,4 @@
-//! The agent's last reply, read from its session transcript.
+//! The texts of an agent's current turn, read from its session transcript.
 //!
 //! Both agent families write JSONL transcripts that nibble can already
 //! locate for a task (host and sandbox sessions alike, since the agent
@@ -10,13 +10,15 @@
 //! - pi / omp: `{"type":"message","id":…,"message":{"role":"assistant",
 //!   "content":[{"type":"text","text":…}]}}`.
 //!
-//! The reply is the last assistant text since the last real user prompt;
-//! tool results (user-role lines in Claude, `toolResult` in pi) belong to
-//! the same turn, but a tool call or result after a text means that text
-//! is not the reply: the turn went on. The final message may not be on
-//! disk yet (Claude Code can run the Stop hook that reports the turn idle
-//! before flushing that message) or may never come (the turn really
-//! ended on a tool result), so `None` does not always mean "not yet".
+//! A turn's texts are every assistant text since the last real user
+//! prompt; tool results (user-role lines in Claude, `toolResult` in pi)
+//! belong to the same turn. A text with a tool call, a tool result or
+//! another message after it is progress: the turn went on. The newest text
+//! with nothing after it is the turn's reply once the turn is over. That
+//! final message may not be on disk yet (Claude Code can run the Stop hook
+//! that reports the turn idle before flushing it) or may never come (the
+//! turn really ended on a tool result), so a missing reply does not always
+//! mean "not yet".
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -35,8 +37,8 @@ pub(crate) struct Reply {
     pub text: String,
 }
 
-/// The last reply in the transcript at `path`.
-pub(crate) fn last_reply(path: &Path, agent: &AgentType) -> Result<Option<Reply>> {
+/// The current turn in the transcript at `path`.
+pub(crate) fn turn(path: &Path, agent: &AgentType) -> Result<Turn> {
     let mut f =
         std::fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let len = f.metadata()?.len();
@@ -52,20 +54,66 @@ pub(crate) fn last_reply(path: &Path, agent: &AgentType) -> Result<Option<Reply>
     } else {
         &text
     };
-    Ok(last_reply_in(text, agent))
+    Ok(turn_in(text, agent))
 }
 
-/// [`last_reply`] over transcript text.
-pub(crate) fn last_reply_in(text: &str, agent: &AgentType) -> Option<Reply> {
+/// The texts of the turn since the last real user prompt, oldest first.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct Turn {
+    /// Texts the turn has moved on from: a tool call, a tool result or
+    /// another message came after each.
+    pub progress: Vec<Reply>,
+    /// The newest text, when nothing but non-tool lines came after it: the
+    /// turn's reply once the turn is over.
+    pub reply: Option<Reply>,
+}
+
+impl Turn {
+    /// The id of the newest text in the turn.
+    pub(crate) fn newest_id(&self) -> Option<String> {
+        self.reply
+            .as_ref()
+            .or(self.progress.last())
+            .map(|r| r.id.clone())
+    }
+
+    /// The part of the turn after the text with id `cursor`; all of it when
+    /// `cursor` is not in this turn (a new turn, or nothing posted yet).
+    pub(crate) fn since(&self, cursor: Option<&str>) -> Turn {
+        let ids: Vec<&str> = self
+            .progress
+            .iter()
+            .chain(&self.reply)
+            .map(|r| r.id.as_str())
+            .collect();
+        match cursor.and_then(|c| ids.iter().rposition(|id| *id == c)) {
+            None => self.clone(),
+            Some(at) => Turn {
+                progress: self.progress.iter().skip(at + 1).cloned().collect(),
+                reply: self.reply.clone().filter(|_| at + 1 < ids.len()),
+            },
+        }
+    }
+}
+
+/// [`turn`] over transcript text.
+pub(crate) fn turn_in(text: &str, agent: &AgentType) -> Turn {
     let lines = text
         .lines()
         .rev()
         .filter_map(|l| serde_json::from_str::<Value>(l).ok());
-    match agent {
-        AgentType::ClaudeCode => claude_reply(lines),
-        AgentType::Pi | AgentType::Omp => pi_reply(lines),
-        _ => None,
-    }
+    let events = match agent {
+        AgentType::ClaudeCode => claude_events(lines),
+        AgentType::Pi | AgentType::Omp => pi_events(lines),
+        _ => Vec::new(),
+    };
+    turn_of(events)
+}
+
+/// The turn's reply as [`turn_in`] sees it.
+#[cfg(test)]
+fn last_reply_in(text: &str, agent: &AgentType) -> Option<Reply> {
+    turn_in(text, agent).reply
 }
 
 fn texts(content: &Value) -> Vec<String> {
@@ -100,68 +148,97 @@ fn calls_tool(content: &Value) -> bool {
     })
 }
 
-fn claude_reply(lines_rev: impl Iterator<Item = Value>) -> Option<Reply> {
-    // Walking backwards: find the newest assistant line with text, then
-    // gather earlier text lines of the same API message. Tool activity
-    // newer than any text means the final message is still to come.
-    let mut found: Option<(String, Vec<String>)> = None;
-    for line in lines_rev {
-        match line["type"].as_str() {
-            Some("assistant") if found.is_none() && calls_tool(&line["message"]["content"]) => {
-                return None;
-            }
-            Some("user") if found.is_none() && !is_claude_prompt(&line) => return None,
-            Some("assistant") => {
-                let msg_id = line["message"]["id"]
-                    .as_str()
-                    .or_else(|| line["uuid"].as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let t = texts(&line["message"]["content"]);
-                match &mut found {
-                    None if !t.is_empty() => found = Some((msg_id, t)),
-                    Some((id, acc)) if *id == msg_id => {
-                        let mut t = t;
-                        t.append(acc);
-                        *acc = t;
-                    }
-                    Some(_) => break,
-                    None => {}
-                }
-            }
-            Some("user") if is_claude_prompt(&line) => break,
-            _ => {}
-        }
-    }
-    found.map(|(id, parts)| Reply {
-        id,
-        text: parts.join("\n\n"),
-    })
+/// What happened in a turn, in order.
+#[derive(Debug)]
+enum Event {
+    /// Text of the message with this id.
+    Text(String, Vec<String>),
+    /// A tool call or tool result.
+    Tool,
 }
 
-fn pi_reply(lines_rev: impl Iterator<Item = Value>) -> Option<Reply> {
-    for line in lines_rev {
-        if line["type"] != "message" {
-            continue;
+/// Texts become replies: consecutive texts of one message (Claude writes a
+/// message's blocks on separate lines sharing `message.id`) are one; the
+/// newest is the reply unless a tool came after it.
+fn turn_of(events: Vec<Event>) -> Turn {
+    let mut texts: Vec<(String, Vec<String>)> = Vec::new();
+    let mut tool_last = false;
+    for event in events {
+        match event {
+            Event::Tool => tool_last = true,
+            Event::Text(id, mut t) => {
+                match texts.last_mut() {
+                    Some((last, acc)) if *last == id && !tool_last => acc.append(&mut t),
+                    _ => texts.push((id, t)),
+                }
+                tool_last = false;
+            }
         }
-        match line["message"]["role"].as_str() {
-            Some("assistant") if calls_tool(&line["message"]["content"]) => return None,
-            Some("toolResult") => return None,
+    }
+    let mut progress: Vec<Reply> = texts
+        .into_iter()
+        .map(|(id, parts)| Reply {
+            id,
+            text: parts.join("\n\n"),
+        })
+        .collect();
+    let reply = if tool_last { None } else { progress.pop() };
+    Turn { progress, reply }
+}
+
+/// Claude's turn: the lines after the newest real prompt, oldest first.
+fn claude_events(lines_rev: impl Iterator<Item = Value>) -> Vec<Event> {
+    let mut events = Vec::new();
+    for line in lines_rev {
+        match line["type"].as_str() {
+            Some("user") if is_claude_prompt(&line) => break,
+            Some("user") => events.push(Event::Tool),
             Some("assistant") => {
-                let t = texts(&line["message"]["content"]);
+                let content = &line["message"]["content"];
+                // Reversed later: a line's tool call comes after its text.
+                if calls_tool(content) {
+                    events.push(Event::Tool);
+                }
+                let t = texts(content);
                 if !t.is_empty() {
-                    let id = line["id"].as_str().unwrap_or_default().to_string();
-                    return Some(Reply {
-                        id,
-                        text: t.join("\n\n"),
-                    });
+                    let id = line["message"]["id"]
+                        .as_str()
+                        .or_else(|| line["uuid"].as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    events.push(Event::Text(id, t));
                 }
             }
-            Some("user") => return None,
             _ => {}
         }
     }
-    None
+    events.reverse();
+    events
+}
+
+/// pi / omp's turn: the messages after the newest user message, oldest first.
+fn pi_events(lines_rev: impl Iterator<Item = Value>) -> Vec<Event> {
+    let mut events = Vec::new();
+    for line in lines_rev.filter(|l| l["type"] == "message") {
+        let content = &line["message"]["content"];
+        match line["message"]["role"].as_str() {
+            Some("user") => break,
+            Some("toolResult") => events.push(Event::Tool),
+            Some("assistant") => {
+                if calls_tool(content) {
+                    events.push(Event::Tool);
+                }
+                let t = texts(content);
+                if !t.is_empty() {
+                    let id = line["id"].as_str().unwrap_or_default().to_string();
+                    events.push(Event::Text(id, t));
+                }
+            }
+            _ => {}
+        }
+    }
+    events.reverse();
+    events
 }
 
 #[cfg(test)]
@@ -280,6 +357,67 @@ mod tests {
         assert!(last_reply_in(&t, &AgentType::Pi).is_none());
     }
 
+    fn ids(replies: &[Reply]) -> Vec<&str> {
+        replies.iter().map(|r| r.id.as_str()).collect()
+    }
+
+    #[test]
+    fn texts_before_tools_are_progress_in_both_formats() {
+        let t = turn_in(CLAUDE, &AgentType::ClaudeCode);
+        assert_eq!(ids(&t.progress), ["m1"]);
+        assert_eq!(t.progress[0].text, "Looking.");
+        assert_eq!(t.reply.unwrap().id, "m2");
+
+        let t = turn_in(CLAUDE_UNFLUSHED, &AgentType::ClaudeCode);
+        assert_eq!(ids(&t.progress), ["m1"]);
+        assert_eq!(t.progress[0].text, "Logging the stats first.");
+        assert_eq!(t.reply, None);
+
+        for agent in [AgentType::Pi, AgentType::Omp] {
+            let t = turn_in(PI, &agent);
+            assert_eq!(ids(&t.progress), ["p2"]);
+            assert_eq!(t.progress[0].text, "Running tests");
+            assert_eq!(t.reply.unwrap().id, "p4");
+        }
+    }
+
+    #[test]
+    fn a_text_still_being_written_is_not_progress_yet() {
+        // Claude: the text line is on disk, its tool call is not.
+        let cut = through(CLAUDE_UNFLUSHED, r#""uuid":"a2""#);
+        let t = turn_in(&cut, &AgentType::ClaudeCode);
+        assert!(t.progress.is_empty());
+        assert_eq!(t.reply.unwrap().id, "m1");
+        // A later message moves an earlier text without tools to progress.
+        let t = format!(
+            "{cut}\n{}",
+            r#"{"type":"assistant","uuid":"b1","message":{"id":"m9","content":[{"type":"text","text":"More."}]}}"#
+        );
+        let t = turn_in(&t, &AgentType::ClaudeCode);
+        assert_eq!(ids(&t.progress), ["m1"]);
+        assert_eq!(t.reply.unwrap().id, "m9");
+    }
+
+    #[test]
+    fn since_skips_what_was_posted() {
+        let t = turn_in(CLAUDE, &AgentType::ClaudeCode);
+        assert_eq!(t.newest_id().as_deref(), Some("m2"));
+        // Nothing posted from this turn yet: all of it.
+        assert_eq!(t.since(None), t);
+        assert_eq!(t.since(Some("an older turn")), t);
+        // The progress text was posted: only the reply is left.
+        let rest = t.since(Some("m1"));
+        assert!(rest.progress.is_empty());
+        assert_eq!(rest.reply.unwrap().id, "m2");
+        // Everything posted.
+        assert_eq!(t.since(Some("m2")), Turn::default());
+
+        let t = turn_in(CLAUDE_UNFLUSHED, &AgentType::ClaudeCode);
+        assert_eq!(t.newest_id().as_deref(), Some("m1"));
+        assert_eq!(t.since(Some("m1")), Turn::default());
+        assert_eq!(Turn::default().newest_id(), None);
+    }
+
     #[test]
     fn garbage_and_unknown_agents_yield_nothing() {
         assert!(last_reply_in("{oops\n\n", &AgentType::ClaudeCode).is_none());
@@ -293,7 +431,7 @@ mod tests {
         let filler = format!("{}\n", r#"{"type":"custom","id":"f"}"#).repeat(80_000);
         std::fs::write(&path, format!("{filler}{PI}\n")).unwrap();
         assert!(std::fs::metadata(&path).unwrap().len() > TAIL_BYTES);
-        let r = last_reply(&path, &AgentType::Pi).unwrap().unwrap();
+        let r = turn(&path, &AgentType::Pi).unwrap().reply.unwrap();
         assert_eq!(r.id, "p4");
     }
 }

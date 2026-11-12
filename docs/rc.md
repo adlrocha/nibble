@@ -5,10 +5,12 @@ or start a new one from your phone.
 
 - **`/nibble-rc`** inside a Claude Code, pi or omp session (on the host or in
   a sandbox) posts the session to your DM with the nibble Slack app as a new
-  thread, with its last reply (if a turn is still running, its reply is
-  posted when it finishes). From then on:
+  thread, with its last reply (if a turn is still running, the rest of it
+  comes as it goes). From then on:
   - a message in that thread is typed into the session's zellij pane;
-  - each finished turn's reply comes back to the thread;
+  - what the agent writes during a turn comes back as it goes: each text it
+    moves on from (to run a tool, say) as a small grey note, and the turn's
+    final reply as a normal message, so the answer stands out;
   - a permission prompt is posted as a note (reply with a number to pick a
     menu option, or answer at the terminal);
   - Slack's stop button interrupts the turn (Escape in the pane).
@@ -47,7 +49,7 @@ zellij pane (claude | pi | omp, host or sandbox)
    ▲ typed in: zellij write-chars        │ hooks / pi extension:
    │ (bracketed paste for multi-line)     ▼ nibble report status …
  nibble rc daemon ◄──── nibble's database (tasks, rc:* records) ────► transcript
-   ▲  Socket Mode (outbound WebSocket, no public URL)                  (last reply)
+   ▲  Socket Mode (outbound WebSocket, no public URL)                  (turn texts)
    ▼
  Slack DM with the nibble app: one thread per session
 ```
@@ -55,7 +57,8 @@ zellij pane (claude | pi | omp, host or sandbox)
 - One daemon (`nibble-rc.service`) holds the Slack connection. It watches the
   task status agents already report: working → the thread shows Slack's
   "processing" state; a permission prompt → a note; a finished turn → the
-  reply, read from the agent's transcript.
+  reply. Texts come from the agent's transcript, which is read again
+  whenever it grows during a turn.
 - `/nibble-rc` never talks to Slack itself. It leaves a request in nibble's
   database and waits for the daemon's answer. The Slack tokens live in
   `$XDG_CONFIG_HOME/nibble/slack.env` (default `~/.config/nibble/slack.env`,

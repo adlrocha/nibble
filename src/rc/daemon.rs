@@ -8,8 +8,9 @@
 //! - **Pending spawns** (sessions started from Slack) wait for their agent to
 //!   register in its new zellij pane, then receive the first message.
 //! - **Links** relay status: working → Slack session `processing`, a
-//!   permission prompt → a note plus `suspended`, a finished turn → the
-//!   agent's last reply in the thread plus `active`.
+//!   permission prompt → a note plus `suspended`, each text a running turn
+//!   moves on from → a progress note, a finished turn → the agent's reply
+//!   in the thread plus `active`.
 //!
 //! Inbound, a reply in a session thread is typed into the agent's pane;
 //! Slack's stop button presses Escape there; the Close button ends the
@@ -18,7 +19,7 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use serde_json::{json, Value};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -74,6 +75,7 @@ pub(crate) fn run(cfg: RcConfig, db_path: PathBuf) -> Result<()> {
         seen: Seen::default(),
         last_beat: None,
         repos_cache: None,
+        transcript_lens: HashMap::new(),
     };
     // Warm the form's repo list so the first click opens it quickly.
     if let Err(e) = daemon.repos() {
@@ -130,6 +132,9 @@ pub(super) struct Daemon {
     pub(super) seen: Seen,
     pub(super) last_beat: Option<Instant>,
     pub(super) repos_cache: Option<(Instant, Vec<PathBuf>)>,
+    /// Each linked task's transcript size when it was last read, so a turn
+    /// that wrote nothing new is not read again.
+    pub(super) transcript_lens: HashMap<String, u64>,
 }
 
 impl Daemon {
@@ -554,10 +559,12 @@ impl Daemon {
         link.permalink = self.bot.permalink(&self.dm, &link.thread_ts).ok();
         // The card exists now: record the link before anything else can
         // fail, so its thread and Close button always have a session.
-        let reply = self.current_reply(&task);
-        link.last_reply_id = reply.as_ref().map(|r| r.id.clone());
+        // Relaying continues after the newest text, so a turn that is still
+        // running streams from here on rather than replaying its start.
+        let turn = self.current_turn(&task);
+        link.last_reply_id = turn.newest_id();
         store::put_link(&self.state, &link)?;
-        if let Some(reply) = reply {
+        if let Some(reply) = turn.reply {
             if let Err(e) = self.post_reply(&link, &format!("*Last reply*\n\n{}", reply.text)) {
                 log(&format!("could not post the last reply: {e:#}"));
             }
@@ -718,11 +725,27 @@ impl Daemon {
 
     // ── Slack helpers ─────────────────────────────────────────────────────
 
-    pub(super) fn current_reply(&self, task: &Task) -> Option<transcript::Reply> {
-        let path = crate::session::files::session_file_for(task)?;
-        transcript::last_reply(&path, &task.agent_type)
-            .ok()
-            .flatten()
+    /// The task's current turn; empty when its transcript can't be read.
+    pub(super) fn current_turn(&self, task: &Task) -> transcript::Turn {
+        crate::session::files::session_file_for(task)
+            .and_then(|path| transcript::turn(&path, &task.agent_type).ok())
+            .unwrap_or_default()
+    }
+
+    /// Post a text the turn went on from, set apart from replies.
+    pub(super) fn post_progress(&self, link: &Link, text: &str) -> Result<()> {
+        match slack::progress_blocks(text) {
+            Some(blocks) => self
+                .bot
+                .post(
+                    &link.channel,
+                    Some(&link.thread_ts),
+                    &slack::preview(text),
+                    &blocks,
+                )
+                .map(|_| ()),
+            None => self.post_reply(link, text),
+        }
     }
 
     pub(super) fn post_reply(&self, link: &Link, text: &str) -> Result<()> {
