@@ -36,7 +36,7 @@ the repo's other jobs still run.
 | `timeout` | `"30m"` | Longest a run may take (`s`, `m`, `h`, `d`; at most `6h`) |
 | `model` | Claude Code's default | Model for the run |
 | `env` | `[]` | Names of variables the run gets from this machine's [secrets](#secrets) |
-| `notify` | `"slack"` | `"slack"` posts a report when the run finds something; `"none"` keeps it local. Until Slack reports land (the next change), every report stays in `nibble cron runs` |
+| `notify` | `"slack"` | `"slack"` posts a report when the run finds something; `"none"` keeps it local (see [Reports in Slack](#reports-in-slack)) |
 | `read_only` | `true` | Withholds Claude Code's file-editing tools (Edit, Write, NotebookEdit). The run keeps Bash and is only asked not to change anything, so this guards against slips, not against a run set on changing files |
 
 ## Commands

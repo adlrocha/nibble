@@ -432,7 +432,12 @@ impl Daemon {
                 id @ (super::reports::INVESTIGATE_ACTION
                 | super::reports::FIX_ACTION
                 | super::reports::SNOOZE_ACTION),
-            ) => self.on_report_action(id, action["value"].as_str()),
+            ) => {
+                let clicked = payload["channel"]["id"]
+                    .as_str()
+                    .zip(payload["message"]["ts"].as_str());
+                self.on_report_action(id, action["value"].as_str(), clicked)
+            }
             Some(slack::END_ACTION) => action["value"]
                 .as_str()
                 .map_or(Ok(()), |task| self.end_link(task)),

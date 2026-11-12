@@ -620,8 +620,7 @@ impl CronStore {
                 |r| {
                     let sev: String = r.get(0)?;
                     Ok(FindingState {
-                        severity: serde_json::from_value(serde_json::Value::String(sev))
-                            .unwrap_or(super::run::Severity::Warn),
+                        severity: super::run::Severity::parse(&sev),
                         notified_at: ts(r.get(1)?),
                         snoozed_until: ts(r.get(2)?),
                         last_seen: ts(r.get(3)?).unwrap_or_default(),
@@ -633,7 +632,6 @@ impl CronStore {
     }
 
     pub fn put_finding(&self, repo: &str, name: &str, fp: &str, f: &FindingState) -> Result<()> {
-        let sev = serde_json::to_value(f.severity)?;
         self.conn.execute(
             "INSERT INTO findings (repo_path, name, fingerprint, severity, notified_at,
                                    snoozed_until, last_seen)
@@ -645,7 +643,7 @@ impl CronStore {
                 repo,
                 name,
                 fp,
-                sev.as_str().unwrap_or("warn"),
+                f.severity.as_str(),
                 f.notified_at.map(|t| t.timestamp()),
                 f.snoozed_until.map(|t| t.timestamp()),
                 f.last_seen.timestamp(),

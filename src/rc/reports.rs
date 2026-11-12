@@ -34,11 +34,11 @@ const SHOWN: usize = 8;
 /// Longest finding text on a card (a section takes 3000).
 const DETAIL_MAX: usize = 1200;
 
-/// Posting attempts before a card is given up: the first, and one after
-/// each wait in [`RETRY_AFTER_MINUTES`].
 /// Wait before each retry after a failed post: Slack or the network may be
 /// down for a while, so attempts are spread over hours, not poll passes.
 const RETRY_AFTER_MINUTES: [i64; 5] = [1, 5, 15, 60, 360];
+/// Posting attempts before a card is given up: the first, and one after
+/// each wait in [`RETRY_AFTER_MINUTES`].
 const MAX_ATTEMPTS: u32 = RETRY_AFTER_MINUTES.len() as u32 + 1;
 /// Longest text one section block takes.
 #[cfg(test)]
@@ -385,11 +385,31 @@ impl Daemon {
     }
 
     /// A click on a card's button.
-    pub(super) fn on_report_action(&mut self, action: &str, value: Option<&str>) -> Result<()> {
+    /// `clicked` is the (channel, ts) of the message clicked, to answer
+    /// there when the card itself is no longer known.
+    pub(super) fn on_report_action(
+        &mut self,
+        action: &str,
+        value: Option<&str>,
+        clicked: Option<(&str, &str)>,
+    ) -> Result<()> {
         let run_id: i64 = value
             .and_then(|v| v.parse().ok())
             .context("the button carries no run")?;
-        let mut c = card(&self.state, run_id)?.context("this report is no longer known")?;
+        let Some(mut c) = card(&self.state, run_id)? else {
+            // Cards are dropped after 30 days (or with rc's state): say so
+            // where the click happened instead of leaving it dead.
+            if let Some((channel, ts)) = clicked {
+                self.note(
+                    channel,
+                    ts,
+                    &format!(
+                        ":warning: This report is no longer kept; see `nibble cron show {run_id}` on the machine that ran it."
+                    ),
+                );
+            }
+            return Ok(());
+        };
         let (channel, ts) = c.posted.clone().context("this report was never posted")?;
         match action {
             SNOOZE_ACTION => {
