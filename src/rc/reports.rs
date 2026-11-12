@@ -34,11 +34,12 @@ const SHOWN: usize = 8;
 /// Longest finding text on a card (a section takes 3000).
 const DETAIL_MAX: usize = 1200;
 
-/// Posting attempts before a card is given up.
-const MAX_ATTEMPTS: u32 = 5;
+/// Posting attempts before a card is given up: the first, and one after
+/// each wait in [`RETRY_AFTER_MINUTES`].
 /// Wait before each retry after a failed post: Slack or the network may be
 /// down for a while, so attempts are spread over hours, not poll passes.
 const RETRY_AFTER_MINUTES: [i64; 5] = [1, 5, 15, 60, 360];
+const MAX_ATTEMPTS: u32 = RETRY_AFTER_MINUTES.len() as u32 + 1;
 /// Longest text one section block takes.
 #[cfg(test)]
 const SECTION_MAX: usize = 3000;
@@ -129,7 +130,8 @@ impl ReportCard {
 /// Queue a card for the daemon to post (opening its private state).
 /// Nothing is queued while `nibble rc` is not set up; false then.
 pub(crate) fn queue(card: &ReportCard) -> Result<bool> {
-    if !super::secrets::secrets_path().exists() {
+    // What the daemon itself needs: the file or its env overrides.
+    if super::secrets::load().is_err() {
         return Ok(false);
     }
     queue_in(&store::open_state()?, card)?;
@@ -321,9 +323,10 @@ pub(crate) fn remedy_prompt(c: &ReportCard, remedy: Remedy) -> String {
         &uuid::Uuid::new_v4().simple().to_string()[..12]
     );
     // The session runs in the sandbox, where the repo is mounted here.
-    let file = Path::new(&crate::sandbox::container_working_dir(Path::new(&c.repo)))
-        .join(crate::cron::JOBS_DIR)
-        .join(format!("{}.md", c.job));
+    let file = crate::cron::job_path(
+        Path::new(&crate::sandbox::container_working_dir(Path::new(&c.repo))),
+        &c.job,
+    );
     let ask = match remedy {
         Remedy::Investigate => {
             "Investigate these findings: confirm whether each is real, find the \
@@ -354,6 +357,14 @@ impl Daemon {
     /// after a few attempts.
     pub(super) fn post_reports(&mut self) -> Result<()> {
         let now = Utc::now();
+        // Expired cards go here too, so each pass reads a bounded history.
+        let cutoff = now - chrono::Duration::days(KEEP_DAYS);
+        for old in store::reports(&self.state)?
+            .iter()
+            .filter(|c| c.created_at < cutoff)
+        {
+            store::delete_report(&self.state, old.run_id)?;
+        }
         for mut c in pending(&self.state, now)? {
             match self
                 .bot
@@ -384,7 +395,12 @@ impl Daemon {
             SNOOZE_ACTION => {
                 let fps: Vec<String> = c.findings.iter().map(|f| f.fingerprint.clone()).collect();
                 let until = Utc::now() + chrono::Duration::days(SNOOZE_DAYS);
-                crate::cron::store::CronStore::open()?.snooze(&c.repo, &c.job, &fps, until)?;
+                let snoozed = crate::cron::store::CronStore::open()
+                    .and_then(|s| s.snooze(&c.repo, &c.job, &fps, until));
+                if let Err(e) = snoozed {
+                    self.note(&channel, &ts, &format!(":warning: Could not snooze: {e:#}"));
+                    return Ok(());
+                }
                 c.state = ReportState::Snoozed;
             }
             INVESTIGATE_ACTION | FIX_ACTION => {
@@ -395,7 +411,9 @@ impl Daemon {
                 };
                 let cwd = PathBuf::from(&c.repo);
                 if !cwd.is_dir() {
-                    anyhow::bail!("{} no longer exists", c.repo);
+                    let msg = format!(":warning: {} no longer exists on this machine.", c.repo);
+                    self.note(&channel, &ts, &msg);
+                    return Ok(());
                 }
                 let new = NewSession {
                     origin: Origin {
@@ -592,6 +610,16 @@ mod tests {
         assert_eq!(c.retry_at, Some(now + chrono::Duration::minutes(1)));
         failed_attempt(&mut c, now);
         assert_eq!(c.retry_at, Some(now + chrono::Duration::minutes(5)));
+        // Every wait is used: the 360-minute retry still happens.
+        let mut later = c.clone();
+        for _ in 0..3 {
+            failed_attempt(&mut later, now);
+        }
+        assert_eq!(later.retry_at, Some(now + chrono::Duration::minutes(360)));
+        assert!(later.attempts < MAX_ATTEMPTS, "one more try is left");
+        let mut spent = later.clone();
+        failed_attempt(&mut spent, now);
+        assert_eq!(spent.attempts, MAX_ATTEMPTS);
         let tmp = tempfile::TempDir::new().unwrap();
         let state = store::open_state_in(tmp.path()).unwrap();
         put(&state, &c).unwrap();
