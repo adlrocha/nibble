@@ -3,8 +3,9 @@
 //!
 //! It is kept out of `~/.nibble` on purpose: every sandbox mounts that
 //! directory read-write, and a sandboxed agent must not be able to register
-//! another repo, or change when or where jobs run. Job definitions are not
-//! stored here; they are read from each repo's files on every pass.
+//! another repo, or change when or where jobs run. Job definitions are
+//! read from each repo's files on every pass; what is kept here is the
+//! snapshot of each definition you approved, to tell when a file changed.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, TimeZone, Utc};
@@ -125,11 +126,19 @@ pub struct FindingState {
 /// Runs kept per job; older ones are deleted as new ones start.
 const RUNS_KEPT: i64 = 200;
 
-/// Whether process `pid` is a live nibble: a run's owner that died
-/// (Ctrl-C, a crash, a stopped service) leaves its claim behind.
+/// Whether process `pid` still exists: a run's owner that died (Ctrl-C,
+/// a crash, a stopped service) leaves its claim behind. A reused pid can
+/// keep a dead claim alive until that process ends; no worse than a skip.
 pub fn alive(pid: u32) -> bool {
-    std::fs::read(format!("/proc/{pid}/cmdline"))
-        .is_ok_and(|c| String::from_utf8_lossy(&c).contains("nibble"))
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: signal 0 sends nothing; it only checks the process exists.
+    let rc = unsafe { libc::kill(pid, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 /// How a run ended (or that it has not).
@@ -679,6 +688,7 @@ pub enum LegacyItem {
 }
 
 /// Whether `nibble cron import` already ran on this machine.
+#[cfg(test)]
 pub fn legacy_done(store: &CronStore) -> Result<bool> {
     Ok(store.meta(LEGACY_EXPORTED)?.is_some())
 }
