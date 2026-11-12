@@ -610,6 +610,8 @@ pub enum LegacyItem {
         repo: PathBuf,
         path: PathBuf,
         def: super::JobDef,
+        /// The legacy row, remembered once imported.
+        row: i64,
     },
     Skip {
         repo_path: String,
@@ -633,11 +635,12 @@ pub fn legacy_pending(store: &CronStore, db: &crate::db::Database) -> Result<boo
 /// come from `~/.nibble`, which sandboxes can write, so the user reviews
 /// the plan first. Each job gets a file name no other file or planned job
 /// has.
-pub fn plan_legacy(db: &crate::db::Database) -> Result<Vec<LegacyItem>> {
+pub fn plan_legacy(store: &CronStore, db: &crate::db::Database) -> Result<Vec<LegacyItem>> {
     let mut taken: Vec<PathBuf> = Vec::new();
     let mut plan = Vec::new();
     // Oldest first, so the original of two same-named jobs keeps the name.
     for job in db.list_cron_jobs(None)?.into_iter().rev() {
+        let row = job.id.unwrap_or_default();
         let label = job
             .label
             .clone()
@@ -649,6 +652,11 @@ pub fn plan_legacy(db: &crate::db::Database) -> Result<Vec<LegacyItem>> {
             label: label.clone(),
             reason,
         };
+        // Imported before, even if its file was edited since.
+        if store.meta(&imported_key(row))?.is_some() {
+            plan.push(skip("already imported".to_string()));
+            continue;
+        }
         let repo = match super::validate_repo(Path::new(&job.repo_path), true) {
             Ok(r) => r,
             Err(e) => {
@@ -699,7 +707,7 @@ pub fn plan_legacy(db: &crate::db::Database) -> Result<Vec<LegacyItem>> {
             if std::fs::read_to_string(&path).is_ok_and(|t| t == super::format_job(&d)) {
                 break;
             }
-            if !path.exists() && !taken.contains(&path) {
+            if super::nothing_at(&path) && !taken.contains(&path) {
                 free = Some((name, path));
                 break;
             }
@@ -714,6 +722,7 @@ pub fn plan_legacy(db: &crate::db::Database) -> Result<Vec<LegacyItem>> {
             repo,
             path,
             def: wanted,
+            row,
         });
     }
     Ok(plan)
@@ -723,12 +732,18 @@ pub fn plan_legacy(db: &crate::db::Database) -> Result<Vec<LegacyItem>> {
 /// remember that the import happened.
 pub fn apply_legacy(store: &CronStore, plan: &[LegacyItem]) -> Result<()> {
     for item in plan {
-        if let LegacyItem::Import { repo, path, def } = item {
+        if let LegacyItem::Import {
+            repo,
+            path,
+            def,
+            row,
+        } = item
+        {
             let key = repo.to_string_lossy();
             let text = super::format_job(def);
             // The plan was made before you were asked: a file that appeared
             // since is not replaced.
-            if path.exists() {
+            if !super::nothing_at(path) {
                 eprintln!("  skipped {}: it appeared after the plan", path.display());
                 continue;
             }
@@ -738,9 +753,14 @@ pub fn apply_legacy(store: &CronStore, plan: &[LegacyItem]) -> Result<()> {
             store.add_repo(&key)?;
             // You reviewed it in the plan.
             store.set_approved(&key, &def.name, &text)?;
+            store.set_meta(&imported_key(*row), &path.to_string_lossy())?;
         }
     }
     mark_legacy_done(store)
+}
+
+fn imported_key(row: i64) -> String {
+    format!("legacy_imported:{row}")
 }
 
 /// Remember that older nibble's jobs were dealt with.
@@ -959,7 +979,7 @@ mod tests {
         std::fs::write(super::super::job_path(&repo, "job"), "mine").unwrap();
         assert!(legacy_pending(&s, &db).unwrap());
 
-        let plan = plan_legacy(&db).unwrap();
+        let plan = plan_legacy(&s, &db).unwrap();
         let mut imported = Vec::new();
         let mut skipped = 0;
         for item in &plan {
@@ -968,6 +988,7 @@ mod tests {
                     repo: r2,
                     path,
                     def,
+                    ..
                 } => {
                     assert_eq!(r2, &repo, "registered by its canonical path");
                     imported.push((
@@ -1035,16 +1056,16 @@ mod tests {
             Utc::now(),
         ))
         .unwrap();
-        let plan = plan_legacy(&db).unwrap();
+        let plan = plan_legacy(&s, &db).unwrap();
         apply_legacy(&s, &plan).unwrap();
-        let again = plan_legacy(&db).unwrap();
+        let again = plan_legacy(&s, &db).unwrap();
         assert!(
             matches!(&again[..], [LegacyItem::Skip { reason, .. }] if reason == "already imported"),
             "{again:?}"
         );
         // A file appearing between plan and apply is not replaced.
         std::fs::remove_file(super::super::job_path(&repo, "daily")).unwrap();
-        let plan = plan_legacy(&db).unwrap();
+        let plan = plan_legacy(&s, &db).unwrap();
         std::fs::write(super::super::job_path(&repo, "daily"), "theirs").unwrap();
         apply_legacy(&s, &plan).unwrap();
         assert_eq!(
@@ -1052,6 +1073,39 @@ mod tests {
             "theirs"
         );
         assert!(legacy_done(&s).unwrap());
+    }
+
+    #[test]
+    fn an_edited_import_is_not_imported_again() {
+        let (tmp, s) = store();
+        let repo = git_repo(tmp.path(), "repo");
+        let db = crate::db::Database::open(tmp.path().join("tasks.db")).unwrap();
+        db.insert_cron_job(&crate::models::CronJob::new(
+            repo.to_string_lossy().to_string(),
+            "0 9 * * *".into(),
+            "Go".into(),
+            Some("Daily".into()),
+            Utc::now(),
+        ))
+        .unwrap();
+        apply_legacy(&s, &plan_legacy(&s, &db).unwrap()).unwrap();
+        let path = super::super::job_path(&repo, "daily");
+        let edited = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("0 9", "0 8");
+        std::fs::write(&path, edited).unwrap();
+        let again = plan_legacy(&s, &db).unwrap();
+        assert!(
+            matches!(&again[..], [LegacyItem::Skip { reason, .. }] if reason == "already imported")
+        );
+        assert!(!super::super::job_path(&repo, "daily-2").exists());
+        // A file appearing between plan and apply is not replaced.
+        let (_t2, fresh) = store();
+        let plan = plan_legacy(&fresh, &db).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, "theirs").unwrap();
+        apply_legacy(&fresh, &plan).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "theirs");
     }
 
     #[test]
@@ -1070,7 +1124,7 @@ mod tests {
             ))
             .unwrap();
         }
-        apply_legacy(&s, &plan_legacy(&db).unwrap()).unwrap();
+        apply_legacy(&s, &plan_legacy(&s, &db).unwrap()).unwrap();
         let (jobs, bad) = super::super::load_repo_jobs(&repo).unwrap();
         assert_eq!((jobs.len(), bad.len()), (2, 0), "{bad:?}");
     }
@@ -1122,7 +1176,7 @@ mod tests {
         for n in 2..=11 {
             std::fs::write(super::super::job_path(&repo, &format!("deps-{n}")), "other").unwrap();
         }
-        let plan = plan_legacy(&db).unwrap();
+        let plan = plan_legacy(&s, &db).unwrap();
         apply_legacy(&s, &plan).unwrap();
         let path = super::super::job_path(&repo, "deps-12");
         let def = super::super::load_job_file(&path).unwrap();
@@ -1132,7 +1186,7 @@ mod tests {
             Some(super::super::format_job(&def)),
             "approved exactly as it reads back"
         );
-        let again = plan_legacy(&db).unwrap();
+        let again = plan_legacy(&s, &db).unwrap();
         assert!(
             matches!(&again[..], [LegacyItem::Skip { reason, .. }] if reason == "already imported")
         );

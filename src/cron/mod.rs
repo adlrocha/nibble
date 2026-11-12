@@ -409,6 +409,12 @@ pub fn real_jobs_dir(repo: &Path) -> Result<PathBuf> {
     Ok(real)
 }
 
+/// Nothing at `path`, not even a dangling symlink (which `exists()` calls
+/// absent, yet a write would follow).
+pub fn nothing_at(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_err()
+}
+
 /// `<repo>/.nibble/cron/<name>.md`.
 pub fn job_path(repo: &Path, name: &str) -> PathBuf {
     jobs_dir(repo).join(format!("{name}.md"))
