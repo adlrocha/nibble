@@ -382,6 +382,8 @@ impl CronStore {
     /// Claim the job for a run by process `pid`. False when a live run
     /// holds it and overlapping is not allowed. A claim whose owner died is
     /// taken over. Compare-and-swap, so two claimers never both win.
+    /// `running` counts the job's runs in flight, so with overlapping runs
+    /// the first to finish does not clear the others'.
     pub fn claim(&self, repo: &str, name: &str, pid: u32, overlap: bool) -> Result<bool> {
         self.conn.execute(
             "INSERT OR IGNORE INTO jobs (repo_path, name) VALUES (?1, ?2)",
@@ -392,23 +394,26 @@ impl CronStore {
             params![repo, name],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
-        if running != 0 && owner.is_some_and(alive) && !overlap {
+        let live = running > 0 && owner.is_some_and(alive);
+        if live && !overlap {
             return Ok(false);
         }
+        let count = if live { running + 1 } else { 1 };
         let n = self.conn.execute(
-            "UPDATE jobs SET running = 1, owner_pid = ?3
+            "UPDATE jobs SET running = ?6, owner_pid = ?3
              WHERE repo_path = ?1 AND name = ?2 AND running = ?4 AND owner_pid IS ?5",
-            params![repo, name, pid, running, owner],
+            params![repo, name, pid, running, owner, count],
         )?;
         Ok(n == 1)
     }
 
-    /// Give up a claim made by `pid` (a newer overlapping run keeps its own).
-    pub fn release(&self, repo: &str, name: &str, pid: u32) -> Result<()> {
+    /// End one run's claim; the job is free once none is left.
+    pub fn release(&self, repo: &str, name: &str) -> Result<()> {
         self.conn.execute(
-            "UPDATE jobs SET running = 0, owner_pid = NULL
-             WHERE repo_path = ?1 AND name = ?2 AND owner_pid = ?3",
-            params![repo, name, pid],
+            "UPDATE jobs SET running = MAX(running - 1, 0),
+               owner_pid = CASE WHEN running <= 1 THEN NULL ELSE owner_pid END
+             WHERE repo_path = ?1 AND name = ?2 AND running > 0",
+            params![repo, name],
         )?;
         Ok(())
     }
@@ -420,7 +425,7 @@ impl CronStore {
         let owners: Vec<(String, String, Option<u32>)> = {
             let mut stmt = self
                 .conn
-                .prepare("SELECT repo_path, name, owner_pid FROM jobs WHERE running = 1")?;
+                .prepare("SELECT repo_path, name, owner_pid FROM jobs WHERE running > 0")?;
             let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
             rows.collect::<Result<_, _>>()?
         };
@@ -498,6 +503,10 @@ impl CronStore {
         Ok(())
     }
 
+    /// The columns [`Self::row_to_run`] reads, in its order.
+    const RUN_COLUMNS: &'static str = "id, repo_path, name, label, trigger, started_at, \
+        finished_at, status, summary, report, session_id, cost_usd, error";
+
     fn row_to_run(r: &rusqlite::Row) -> rusqlite::Result<RunRecord> {
         let report: Option<String> = r.get(9)?;
         Ok(RunRecord {
@@ -521,12 +530,11 @@ impl CronStore {
     /// The newest runs first; of one job when `job` is given.
     pub fn runs(&self, job: Option<(&str, &str)>, limit: usize) -> Result<Vec<RunRecord>> {
         let (repo, name) = job.unwrap_or_default();
-        let mut stmt = self.conn.prepare(
-            "SELECT id, repo_path, name, label, trigger, started_at, finished_at, status,
-                    summary, report, session_id, cost_usd, error
-             FROM runs WHERE ?1 = 0 OR (repo_path = ?2 AND name = ?3)
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {} FROM runs WHERE ?1 = 0 OR (repo_path = ?2 AND name = ?3)
              ORDER BY id DESC LIMIT ?4",
-        )?;
+            Self::RUN_COLUMNS
+        ))?;
         let rows = stmt.query_map(
             params![job.is_some() as i64, repo, name, limit as i64],
             Self::row_to_run,
@@ -537,9 +545,7 @@ impl CronStore {
     pub fn run(&self, id: i64) -> Result<Option<RunRecord>> {
         self.conn
             .query_row(
-                "SELECT id, repo_path, name, label, trigger, started_at, finished_at, status,
-                        summary, report, session_id, cost_usd, error
-                 FROM runs WHERE id = ?1",
+                &format!("SELECT {} FROM runs WHERE id = ?1", Self::RUN_COLUMNS),
                 params![id],
                 Self::row_to_run,
             )
@@ -800,10 +806,15 @@ mod tests {
         );
         assert!(s.claim("/r", "a", me, true).unwrap(), "overlap allowed");
         assert!(s.job("/r", "a").unwrap().running);
-        s.release("/r", "a", DEAD).unwrap();
-        assert!(s.job("/r", "a").unwrap().running, "only the owner releases");
-        s.release("/r", "a", me).unwrap();
+        s.release("/r", "a").unwrap();
+        assert!(
+            s.job("/r", "a").unwrap().running,
+            "the overlapping run still holds it"
+        );
+        s.release("/r", "a").unwrap();
         assert!(!s.job("/r", "a").unwrap().running);
+        s.release("/r", "a").unwrap();
+        assert!(!s.job("/r", "a").unwrap().running, "no underflow");
         // A dead owner's claim is taken over, and reaped.
         assert!(s.claim("/r", "b", DEAD, false).unwrap());
         assert!(s.claim("/r", "b", me, false).unwrap());

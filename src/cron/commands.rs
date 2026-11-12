@@ -734,7 +734,13 @@ pub(crate) fn cmd_run(db: &Database, store: &CronStore, job: &str) -> Result<()>
     let record = super::run::run_job(db, store, &repo, &def, super::run::Trigger::Manual)?
         .with_context(|| format!("{} is already running", def.name))?;
     print_record(&record);
-    Ok(())
+    // The run's own failure is this command's failure, for scripts.
+    match record.status {
+        super::store::RunStatus::Failed | super::store::RunStatus::TimedOut => {
+            bail!("run {} {}", record.id, record.status.as_str())
+        }
+        _ => Ok(()),
+    }
 }
 
 /// `nibble cron runs`: recent runs, newest first.

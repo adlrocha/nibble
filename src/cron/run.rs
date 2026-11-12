@@ -369,15 +369,10 @@ pub fn command(
         cmd.arg("-e").arg(k);
         cmd.env(k, v);
     }
-    let secs = def.timeout.as_secs();
-    // The timeout runs in the container, so it stops Claude itself and not
-    // only the podman client.
-    let script = format!(
-        "{}; exec timeout -k 30 {secs} \"$0\" {} \"$@\"",
-        crate::sandbox::context::sandbox_prompt_setup(),
-        crate::sandbox::context::SANDBOX_PROMPT_ARGS
+    cmd.args(["-w", cwd, container]);
+    cmd.args(
+        crate::sandbox::context::exec_with_sandbox_prompt_under_timeout(def.timeout.as_secs()),
     );
-    cmd.args(["-w", cwd, container, "/bin/bash", "-c", &script]);
     cmd.arg("/home/node/.local/bin/claude");
     cmd.args([
         "-p",
@@ -433,12 +428,11 @@ struct Claim<'a> {
     store: &'a CronStore,
     repo: String,
     name: String,
-    pid: u32,
 }
 
 impl Drop for Claim<'_> {
     fn drop(&mut self) {
-        let _ = self.store.release(&self.repo, &self.name, self.pid);
+        let _ = self.store.release(&self.repo, &self.name);
     }
 }
 
@@ -462,7 +456,6 @@ pub fn run_job(
         store,
         repo: key.clone(),
         name: def.name.clone(),
-        pid,
     };
     let id = store.start_run(&key, &def.name, &def.label, trigger.as_str(), pid)?;
     let parsed = execute(db, repo, def).unwrap_or_else(|e| Parsed {
@@ -499,7 +492,7 @@ fn execute(db: &Database, repo: &Path, def: &JobDef) -> Result<Parsed> {
     let cwd = crate::sandbox::container_working_dir(repo);
     // The row goes in before the process starts, so no failure can leave
     // a run going that nothing waits on.
-    let mut task = run_task(&sandbox, def, std::process::id() as i32);
+    let task = run_task(&sandbox, def, std::process::id() as i32);
     db.insert_task(&task)?;
     let started = Instant::now();
     let mut child = match command(&container, &cwd, &task.task_id, def, &env)
@@ -510,8 +503,7 @@ fn execute(db: &Database, repo: &Path, def: &JobDef) -> Result<Parsed> {
     {
         Ok(c) => c,
         Err(e) => {
-            task.set_exited(None);
-            let _ = db.update_task(&task);
+            let _ = db.delete_task_by_id(&task.task_id);
             return Err(e).context("failed to start podman exec");
         }
     };
@@ -550,10 +542,10 @@ fn execute(db: &Database, repo: &Path, def: &JobDef) -> Result<Parsed> {
         err.join().unwrap_or_default(),
     );
     let code = status.and_then(|s| s.code());
-    task.set_exited(code);
-    // The sidebar row is cosmetic: losing it must not lose the report.
-    if let Err(e) = db.update_task(&task) {
-        eprintln!("nibble cron: could not close the run's sidebar row: {e:#}");
+    // The row only shows the run while it goes; the run's record keeps the
+    // rest. Losing it must not lose the report.
+    if let Err(e) = db.delete_task_by_id(&task.task_id) {
+        eprintln!("nibble cron: could not remove the run's sidebar row: {e:#}");
     }
     Ok(parse_output(
         code,
@@ -731,7 +723,7 @@ mod tests {
             .unwrap()
             .is_none());
         assert!(store.runs(None, 10).unwrap().is_empty(), "nothing recorded");
-        store.release(&key, &d.name, std::process::id()).unwrap();
+        store.release(&key, &d.name).unwrap();
         // Unclaimed: it runs, and without a sandbox the failure is recorded.
         let r = run_job(&db, &store, &repo, &d, Trigger::Manual)
             .unwrap()
