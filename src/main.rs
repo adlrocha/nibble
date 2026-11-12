@@ -549,6 +549,7 @@ fn main() -> Result<()> {
                 cli::CronAction::Kill { id } => cc::cmd_kill(&store, &id)?,
                 cli::CronAction::Run { id } => cc::cmd_run(&db, &store, &id)?,
                 cli::CronAction::Forget { repo } => cc::cmd_forget(&store, &repo)?,
+                cli::CronAction::Import { yes } => cc::cmd_import(&db, &store, yes)?,
                 cli::CronAction::Secret { action } => match action {
                     cli::CronSecretAction::Set { name, repo } => {
                         cc::cmd_secret_set(&name, repo.as_deref())?

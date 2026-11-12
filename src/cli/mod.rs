@@ -902,6 +902,14 @@ pub enum CronAction {
         repo: String,
     },
 
+    /// Move jobs an older nibble kept in ~/.nibble/tasks.db into their repos,
+    /// after showing what would happen
+    Import {
+        /// Import without asking
+        #[arg(long)]
+        yes: bool,
+    },
+
     /// Values jobs get as environment variables (`env = [...]` in the file),
     /// kept per repo outside every sandbox
     Secret {

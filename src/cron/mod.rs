@@ -173,6 +173,9 @@ pub fn parse_job(name: &str, content: &str) -> Result<Parsed> {
             header.push('\n');
         }
     }
+    if let Some(l) = &label {
+        validate_label(l)?;
+    }
     let prompt = prompt
         .context("missing the `## Prompt` section")?
         .join("\n")
@@ -221,6 +224,15 @@ pub fn parse_job(name: &str, content: &str) -> Result<Parsed> {
         },
         repo_path: h.repo_path,
     })
+}
+
+/// A title fits on its `# ` line: no line breaks or other control
+/// characters, which would spill into the settings.
+pub fn validate_label(label: &str) -> Result<()> {
+    if label.trim().is_empty() || label.chars().any(char::is_control) {
+        bail!("a job title must be one non-empty line without control characters");
+    }
+    Ok(())
 }
 
 /// A job file name: lowercase letters, digits, `-` and `_`.
@@ -278,13 +290,14 @@ pub fn parse_duration(s: &str) -> Result<Duration> {
         .context("needs a unit: s, m, h or d")?;
     let (n, unit) = s.split_at(split);
     let n: u64 = n.parse().context("needs a number before the unit")?;
-    let secs = match unit {
-        "s" => n,
-        "m" => n * 60,
-        "h" => n * 3600,
-        "d" => n * 86_400,
+    let per = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        "d" => 86_400,
         _ => bail!("unknown unit {unit:?}: use s, m, h or d"),
     };
+    let secs = n.checked_mul(per).context("is too large")?;
     if secs == 0 {
         bail!("must be more than zero");
     }
@@ -296,7 +309,10 @@ pub fn parse_expiry(s: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>> {
     if let Some(rel) = s.strip_prefix('+') {
         let d = parse_duration(rel).with_context(|| format!("relative expiry {s:?}"))?;
         // Whole seconds, so the time reads cleanly in the file.
-        let at = now + chrono::Duration::from_std(d)?;
+        let at = chrono::Duration::from_std(d)
+            .ok()
+            .and_then(|d| now.checked_add_signed(d))
+            .with_context(|| format!("relative expiry {s:?} is too far away"))?;
         return Ok(at.with_nanosecond(0).unwrap_or(at));
     }
     DateTime::parse_from_rfc3339(s)
@@ -367,6 +383,46 @@ pub fn job_path(repo: &Path, name: &str) -> PathBuf {
     jobs_dir(repo).join(format!("{name}.md"))
 }
 
+/// `~/.nibble`, which every sandbox mounts read-write.
+pub fn sandbox_mount() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".nibble"))
+}
+
+/// Refuse a path that resolves into `~/.nibble`: any sandbox could write
+/// jobs there.
+pub fn check_outside_sandbox_mount(path: &Path) -> Result<()> {
+    let real = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mount = sandbox_mount().map(|m| std::fs::canonicalize(&m).unwrap_or(m));
+    if mount.is_some_and(|m| real.starts_with(m)) {
+        bail!(
+            "{} is inside ~/.nibble, which sandboxes can write; jobs cannot live there",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+/// A directory jobs may be registered for, canonicalised. Your home
+/// directory is refused (its job directory would be `~/.nibble/cron`), and
+/// so is anything inside `~/.nibble`. With `require_git`, it must be a git
+/// repository.
+pub fn validate_repo(path: &Path, require_git: bool) -> Result<PathBuf> {
+    let repo = std::fs::canonicalize(path)
+        .with_context(|| format!("repo {} does not exist", path.display()))?;
+    if !repo.is_dir() {
+        bail!("repo {} is not a directory", repo.display());
+    }
+    let home = dirs::home_dir().and_then(|h| std::fs::canonicalize(h).ok());
+    if home.as_deref() == Some(repo.as_path()) {
+        bail!("your home directory cannot hold jobs; register a repository");
+    }
+    check_outside_sandbox_mount(&repo)?;
+    if require_git && !repo.join(".git").exists() {
+        bail!("{} is not a git repository", repo.display());
+    }
+    Ok(repo)
+}
+
 /// A job file that could not be read or parsed.
 #[derive(Debug)]
 pub struct BadFile {
@@ -378,6 +434,9 @@ pub struct BadFile {
 /// returned apart, so one broken file does not stop the others.
 pub fn load_repo_jobs(repo: &Path) -> Result<(Vec<JobDef>, Vec<BadFile>)> {
     let dir = jobs_dir(repo);
+    if dir.exists() {
+        check_outside_sandbox_mount(&dir)?;
+    }
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((vec![], vec![])),
@@ -409,6 +468,18 @@ pub fn load_job_file(path: &Path) -> Result<JobDef> {
         .file_stem()
         .and_then(|s| s.to_str())
         .context("job file name is not UTF-8")?;
+    // A link could make edits write outside the repo, or read from where a
+    // sandbox can write.
+    if std::fs::symlink_metadata(path)
+        .with_context(|| format!("failed to read {}", path.display()))?
+        .file_type()
+        .is_symlink()
+    {
+        bail!(
+            "{} is a symlink; job files must be regular files",
+            path.display()
+        );
+    }
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
     let parsed = parse_job(name, &text)?;
@@ -553,6 +624,42 @@ enabled = false is prompt text, not a setting.
     }
 
     #[test]
+    fn titles_stay_on_one_line() {
+        assert!(validate_label("Prod logs").is_ok());
+        assert!(validate_label("a\nread_only = false").is_err());
+        assert!(validate_label("tab\there").is_err());
+        assert!(validate_label("  ").is_err());
+    }
+
+    #[test]
+    fn symlinked_job_files_are_refused() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = jobs_dir(tmp.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = tmp.path().join("elsewhere.md");
+        std::fs::write(&real, "schedule = \"0 9 * * *\"\n## Prompt\nx").unwrap();
+        std::os::unix::fs::symlink(&real, dir.join("link.md")).unwrap();
+        let (jobs, bad) = load_repo_jobs(tmp.path()).unwrap();
+        assert!(jobs.is_empty());
+        assert!(bad[0].error.contains("symlink"), "{:?}", bad);
+    }
+
+    #[test]
+    fn the_sandbox_mount_is_refused() {
+        let home = dirs::home_dir().unwrap();
+        assert!(validate_repo(&home, false).is_err(), "home is refused");
+        let tmp = tempfile::TempDir::new().unwrap();
+        assert!(validate_repo(tmp.path(), false).is_ok());
+        assert!(validate_repo(tmp.path(), true).is_err(), "not a git repo");
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+        assert!(validate_repo(tmp.path(), true).is_ok());
+        assert!(validate_repo(&tmp.path().join("nope"), false).is_err());
+        let mount = sandbox_mount().unwrap();
+        assert!(check_outside_sandbox_mount(&mount.join("cron")).is_err());
+        assert!(check_outside_sandbox_mount(Path::new("/tmp")).is_ok());
+    }
+
+    #[test]
     fn slugs() {
         assert_eq!(slug("Daily Standup!"), "daily-standup");
         assert_eq!(slug("  --Ünïcode  "), "n-code");
@@ -582,6 +689,14 @@ enabled = false is prompt text, not a setting.
             Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap() + chrono::Duration::nanoseconds(5);
         assert_eq!(parse_expiry("+1s", odd).unwrap().nanosecond(), 0);
         assert!(parse_expiry("tomorrow", now).is_err());
+        assert!(
+            parse_expiry("+100000000000d", now).is_err(),
+            "no panic past chrono's range"
+        );
+        assert!(
+            parse_duration("99999999999999999d").is_err(),
+            "overflow is an error"
+        );
         assert_eq!(format_duration(Duration::from_secs(90)), "90s");
         assert_eq!(format_duration(Duration::from_secs(86_400)), "1d");
     }

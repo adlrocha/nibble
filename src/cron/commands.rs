@@ -7,41 +7,92 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use std::path::{Path, PathBuf};
 
-/// Open this machine's cron state, writing out (once) any jobs an older
-/// nibble kept in `~/.nibble/tasks.db`.
+/// Open this machine's cron state. Reminds you on each command while an
+/// older nibble's jobs are waiting for `nibble cron import`.
 pub(crate) fn open(db: &Database) -> Result<CronStore> {
     let store = CronStore::open()?;
-    for path in super::store::export_legacy(&store, db)? {
+    if super::store::legacy_pending(&store, db)? {
         eprintln!(
-            "Moved a cron job from nibble's database into {} (commit it to keep it).",
-            path.display()
+            "Older cron jobs are still in ~/.nibble/tasks.db; review and move them into their repos with `nibble cron import`."
         );
     }
     Ok(store)
 }
 
-/// `~` expanded, canonical, and a directory. With no argument: the git
-/// repo around the current directory, or the directory itself.
+/// `nibble cron import`: show what would happen to older nibble's jobs,
+/// and do it once confirmed.
+pub(crate) fn cmd_import(db: &Database, store: &CronStore, yes: bool) -> Result<()> {
+    use super::store::LegacyItem;
+    let plan = super::store::plan_legacy(db)?;
+    if plan.is_empty() {
+        println!("No older cron jobs to import.");
+        return super::store::mark_legacy_done(store);
+    }
+    for item in &plan {
+        match item {
+            LegacyItem::Import { repo, path, def } => {
+                println!(
+                    "  import  {} ({}) → {}{}",
+                    def.label,
+                    def.schedule,
+                    path.display(),
+                    if def.enabled { "" } else { " [disabled]" }
+                );
+                println!("          and register {}", repo.display());
+            }
+            LegacyItem::Skip {
+                repo_path,
+                label,
+                reason,
+            } => println!("  skip    {label} in {repo_path}: {reason}"),
+        }
+    }
+    println!("These come from ~/.nibble/tasks.db, which sandboxes can write: check each one.");
+    if !yes && !confirm("Import them?")? {
+        println!("Nothing imported. Run `nibble cron import` again when ready.");
+        return Ok(());
+    }
+    super::store::apply_legacy(store, &plan)?;
+    println!("Imported. Commit the new files to keep them; the old rows stay in tasks.db.");
+    Ok(())
+}
+
+/// Ask y/N on the terminal; no terminal counts as no.
+fn confirm(question: &str) -> Result<bool> {
+    use std::io::{BufRead, IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        return Ok(false);
+    }
+    print!("{question} [y/N] ");
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    Ok(matches!(line.trim(), "y" | "Y" | "yes"))
+}
+
+fn expand_tilde(a: &str) -> Result<PathBuf> {
+    Ok(match a.strip_prefix("~/") {
+        Some(rest) => dirs::home_dir().context("no home directory")?.join(rest),
+        None if a == "~" => dirs::home_dir().context("no home directory")?,
+        None => PathBuf::from(a),
+    })
+}
+
+/// `~` expanded, canonical, and allowed to hold jobs (see
+/// [`super::validate_repo`]). With no argument: the git repo around the
+/// current directory.
 pub(crate) fn canonical_repo(arg: Option<&str>) -> Result<PathBuf> {
     let raw = match arg {
-        Some(a) => match a.strip_prefix("~/") {
-            Some(rest) => dirs::home_dir().context("no home directory")?.join(rest),
-            None => PathBuf::from(a),
-        },
+        Some(a) => expand_tilde(a)?,
         None => {
             let cwd = std::env::current_dir().context("no current directory")?;
             cwd.ancestors()
                 .find(|d| d.join(".git").exists())
                 .map(Path::to_path_buf)
-                .unwrap_or(cwd)
+                .context("not inside a git repository; pass --repo <path>")?
         }
     };
-    let repo = std::fs::canonicalize(&raw)
-        .with_context(|| format!("repo {} does not exist", raw.display()))?;
-    if !repo.is_dir() {
-        bail!("repo {} is not a directory", repo.display());
-    }
-    Ok(repo)
+    super::validate_repo(&raw, false)
 }
 
 fn repo_str(repo: &Path) -> String {
@@ -117,12 +168,7 @@ pub(crate) fn resolve_job(store: &CronStore, arg: &str) -> Result<(PathBuf, JobD
         many => {
             let names: Vec<String> = many
                 .iter()
-                .map(|r| {
-                    format!(
-                        "{}/{name}",
-                        r.file_name().unwrap_or_default().to_string_lossy()
-                    )
-                })
+                .map(|r| super::job_path(r, name).display().to_string())
                 .collect();
             bail!("{arg:?} is ambiguous: {}", names.join(", "))
         }
@@ -139,9 +185,11 @@ fn write_new(repo: &Path, def: &JobDef) -> Result<PathBuf> {
             def.name
         );
     }
+    let text = super::format_job(def);
+    // Never write a file that would not load.
+    super::parse_job(&def.name, &text).context("the new job is invalid")?;
     std::fs::create_dir_all(super::jobs_dir(repo))?;
-    std::fs::write(&path, super::format_job(def))
-        .with_context(|| format!("failed to write {}", path.display()))?;
+    std::fs::write(&path, text).with_context(|| format!("failed to write {}", path.display()))?;
     Ok(path)
 }
 
@@ -206,6 +254,7 @@ pub(crate) fn cmd_add(store: &CronStore, a: AddArgs) -> Result<()> {
     let repo = canonical_repo(repo_arg.as_deref())?;
     if let Some(mut def) = new_def {
         if let Some(l) = a.label {
+            super::validate_label(&l)?;
             def.name = super::slug(&l);
             def.label = l;
         }
@@ -256,7 +305,16 @@ pub(crate) fn cmd_list(store: &CronStore, repo_filter: Option<&str>) -> Result<(
         .filter(|r| filter.as_ref().is_none_or(|f| f == r))
         .collect();
     if repos.is_empty() {
-        println!("No registered repos. Register one with: nibble cron add --repo <path>");
+        match filter {
+            Some(f) => println!(
+                "{} is not registered. Register it with: nibble cron add --repo {}",
+                f.display(),
+                f.display()
+            ),
+            None => {
+                println!("No registered repos. Register one with: nibble cron add --repo <path>")
+            }
+        }
         return Ok(());
     }
     let now = Utc::now();
@@ -273,8 +331,21 @@ pub(crate) fn cmd_list(store: &CronStore, repo_filter: Option<&str>) -> Result<(
             );
             continue;
         }
-        let (jobs, bad) = super::load_repo_jobs(&repo)?;
-        let names: Vec<String> = jobs.iter().map(|j| j.name.clone()).collect();
+        let (jobs, bad) = match super::load_repo_jobs(&repo) {
+            Ok(x) => x,
+            Err(e) => {
+                println!("{short}: {e:#}");
+                continue;
+            }
+        };
+        let names: Vec<String> = jobs
+            .iter()
+            .map(|j| j.name.clone())
+            .chain(
+                bad.iter()
+                    .filter_map(|b| b.path.file_stem()?.to_str().map(str::to_string)),
+            )
+            .collect();
         store.prune_jobs(&repo_str(&repo), &names)?;
         if jobs.is_empty() && bad.is_empty() {
             println!("{short}: no jobs in {}", super::jobs_dir(&repo).display());
@@ -320,11 +391,15 @@ fn apply_edit(def: &mut JobDef, e: EditArgs, now: DateTime<Utc>) -> Result<bool>
         def.schedule = s;
         changed = true;
     }
-    if let Some(p) = e.prompt.filter(|p| !p.trim().is_empty()) {
+    if let Some(p) = e.prompt {
+        if p.trim().is_empty() {
+            bail!("--prompt cannot be empty");
+        }
         def.prompt = p;
         changed = true;
     }
     if let Some(l) = e.label {
+        super::validate_label(&l)?;
         def.label = l;
         changed = true;
     }
@@ -403,7 +478,13 @@ pub(crate) fn cmd_forget(store: &CronStore, repo: &str) -> Result<()> {
     // A repo that was deleted cannot be canonicalised: match it as given.
     let key = canonical_repo(Some(repo))
         .map(|r| repo_str(&r))
-        .unwrap_or_else(|_| repo.trim_end_matches('/').to_string());
+        .unwrap_or_else(|_| {
+            expand_tilde(repo)
+                .map(|p| repo_str(&p))
+                .unwrap_or_else(|_| repo.to_string())
+                .trim_end_matches('/')
+                .to_string()
+        });
     if store.remove_repo(&key)? {
         println!("Forgot {key}: its jobs no longer run here.");
     } else {
@@ -509,6 +590,7 @@ pub(crate) fn cmd_run(db: &Database, store: &CronStore, job: &str) -> Result<()>
             )
         })?;
     println!("Running {} in sandbox {}…", def.name, task.task_id);
+    println!("Note: this types into the sandbox's session; timeout, model, env, notify and read_only do not apply yet.");
     crate::agent_input::inject(&task, &def.prompt)?;
     let mut s = store.job(&repo_str(&repo), &def.name)?;
     s.last_run = Some(Utc::now());
@@ -728,6 +810,64 @@ mod tests {
             expires: None,
         };
         assert!(cmd_add(&store, half).is_err());
+    }
+
+    #[test]
+    fn edge_cases_are_refused() {
+        let (tmp, store, repo) = setup();
+        assert!(canonical_repo(Some("~")).is_err(), "home is refused");
+        assert!(canonical_repo(Some(&tmp.path().join("nope").to_string_lossy())).is_err());
+        let bad_label = AddArgs {
+            repo: Some(repo_str(&repo)),
+            schedule: Some("0 1 * * *".into()),
+            prompt: Some("p".into()),
+            file: None,
+            label: Some("a\nread_only = false".into()),
+            expires: None,
+        };
+        assert!(cmd_add(&store, bad_label).is_err());
+        let empty_prompt = AddArgs {
+            repo: Some(repo_str(&repo)),
+            schedule: Some("0 1 * * *".into()),
+            prompt: Some("  ".into()),
+            file: None,
+            label: Some("Empty".into()),
+            expires: None,
+        };
+        assert!(cmd_add(&store, empty_prompt).is_err());
+        assert!(
+            !super::super::job_path(&repo, "empty").exists(),
+            "nothing written"
+        );
+        let e = EditArgs {
+            prompt: Some(String::new()),
+            ..no_flags()
+        };
+        assert!(cmd_edit(&store, "logs", e).is_err());
+        // Listing an unregistered repo, or a repo that is gone, does not fail.
+        let other = tmp.path().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        cmd_list(&store, Some(&other.to_string_lossy())).unwrap();
+        let gone = tmp.path().join("gone");
+        store.add_repo(&gone.to_string_lossy()).unwrap();
+        cmd_list(&store, None).unwrap();
+        cmd_forget(&store, &gone.to_string_lossy()).unwrap();
+    }
+
+    #[test]
+    fn listing_keeps_state_of_invalid_files() {
+        let (_tmp, store, repo) = setup();
+        let key = repo_str(&repo);
+        cmd_pause(&store, "logs", true).unwrap();
+        let mut other = store.job(&key, "other").unwrap();
+        other.last_run = Some(Utc::now());
+        store.put_job(&other).unwrap();
+        // A broken edit must not reset the job's state.
+        std::fs::write(super::super::job_path(&repo, "logs"), "## Prompt\nbroken").unwrap();
+        std::fs::write(super::super::job_path(&repo, "other"), "## Prompt\nbroken").unwrap();
+        cmd_list(&store, None).unwrap();
+        assert!(store.job(&key, "logs").unwrap().paused);
+        assert!(store.job(&key, "other").unwrap().last_run.is_some());
     }
 
     #[test]

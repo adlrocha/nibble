@@ -176,11 +176,14 @@ impl CronStore {
         Ok(())
     }
 
-    /// Drop the state of `repo`'s jobs whose files are gone.
+    /// Drop the state of `repo`'s jobs whose files are gone. `keep` is
+    /// every job file present, valid or not. A paused job keeps its state
+    /// either way: a file that vanishes for a while (a branch switch) must
+    /// not come back unpaused.
     pub fn prune_jobs(&self, repo: &str, keep: &[String]) -> Result<()> {
         let mut stmt = self
             .conn
-            .prepare("SELECT name FROM jobs WHERE repo_path = ?1")?;
+            .prepare("SELECT name FROM jobs WHERE repo_path = ?1 AND paused = 0")?;
         let names: Vec<String> = stmt
             .query_map(params![repo], |r| r.get(0))?
             .collect::<Result<_, _>>()?;
@@ -209,23 +212,75 @@ impl CronStore {
     }
 }
 
-/// Write the jobs an older nibble stored in `~/.nibble/tasks.db` out as job
-/// files in their repos, once, and register those repos. A file that
-/// already exists is left alone. Returns what was written, for the caller
-/// to report.
-pub fn export_legacy(store: &CronStore, db: &crate::db::Database) -> Result<Vec<PathBuf>> {
-    if store.meta(LEGACY_EXPORTED)?.is_some() {
-        return Ok(vec![]);
-    }
-    let mut written = Vec::new();
-    for job in db.list_cron_jobs(None)? {
-        let repo = Path::new(&job.repo_path);
-        if !repo.is_dir() {
+/// What `nibble cron import` would do with one job an older nibble kept
+/// in `~/.nibble/tasks.db`.
+#[derive(Debug, PartialEq)]
+pub enum LegacyItem {
+    /// Write `def` to `path` and register `repo`.
+    Import {
+        repo: PathBuf,
+        path: PathBuf,
+        def: super::JobDef,
+    },
+    Skip {
+        repo_path: String,
+        label: String,
+        reason: String,
+    },
+}
+
+/// Whether the jobs in `~/.nibble/tasks.db` are still to be imported.
+pub fn legacy_pending(store: &CronStore, db: &crate::db::Database) -> Result<bool> {
+    Ok(store.meta(LEGACY_EXPORTED)?.is_none() && !db.list_cron_jobs(None)?.is_empty())
+}
+
+/// Plan the import of older nibble's jobs. Nothing is written: the rows
+/// come from `~/.nibble`, which sandboxes can write, so the user reviews
+/// the plan first. Each job gets a file name no other file or planned job
+/// has.
+pub fn plan_legacy(db: &crate::db::Database) -> Result<Vec<LegacyItem>> {
+    let mut taken: Vec<PathBuf> = Vec::new();
+    let mut plan = Vec::new();
+    // Oldest first, so the original of two same-named jobs keeps the name.
+    for job in db.list_cron_jobs(None)?.into_iter().rev() {
+        let label = job
+            .label
+            .clone()
+            .map(|l| l.chars().filter(|c| !c.is_control()).collect::<String>())
+            .filter(|l| !l.trim().is_empty())
+            .unwrap_or_else(|| "job".to_string());
+        let skip = |reason: String| LegacyItem::Skip {
+            repo_path: job.repo_path.clone(),
+            label: label.clone(),
+            reason,
+        };
+        let repo = match super::validate_repo(Path::new(&job.repo_path), true) {
+            Ok(r) => r,
+            Err(e) => {
+                plan.push(skip(format!("{e:#}")));
+                continue;
+            }
+        };
+        if job.prompt.trim().is_empty() || super::validate_schedule(&job.schedule).is_err() {
+            plan.push(skip("empty prompt or invalid schedule".to_string()));
             continue;
         }
-        let label = job.label.clone().unwrap_or_else(|| "job".to_string());
+        let base = super::slug(&label);
+        let (name, path) = (1..)
+            .map(|n| {
+                let name = if n == 1 {
+                    base.clone()
+                } else {
+                    format!("{base}-{n}")
+                };
+                let path = super::job_path(&repo, &name);
+                (name, path)
+            })
+            .find(|(_, p)| !p.exists() && !taken.contains(p))
+            .unwrap_or_default();
+        taken.push(path.clone());
         let def = super::JobDef {
-            name: super::slug(&label),
+            name,
             label,
             schedule: job.schedule.clone(),
             enabled: job.enabled,
@@ -239,18 +294,28 @@ pub fn export_legacy(store: &CronStore, db: &crate::db::Database) -> Result<Vec<
             read_only: false,
             prompt: job.prompt.clone(),
         };
-        let path = super::job_path(repo, &def.name);
-        store.add_repo(&job.repo_path)?;
-        if path.exists() {
-            continue;
-        }
-        std::fs::create_dir_all(super::jobs_dir(repo))?;
-        std::fs::write(&path, super::format_job(&def))
-            .with_context(|| format!("failed to write {}", path.display()))?;
-        written.push(path);
+        plan.push(LegacyItem::Import { repo, path, def });
     }
-    store.set_meta(LEGACY_EXPORTED, &Utc::now().to_rfc3339())?;
-    Ok(written)
+    Ok(plan)
+}
+
+/// Carry out a reviewed plan: write the files, register the repos, and
+/// remember that the import happened.
+pub fn apply_legacy(store: &CronStore, plan: &[LegacyItem]) -> Result<()> {
+    for item in plan {
+        if let LegacyItem::Import { repo, path, def } = item {
+            std::fs::create_dir_all(super::jobs_dir(repo))?;
+            std::fs::write(path, super::format_job(def))
+                .with_context(|| format!("failed to write {}", path.display()))?;
+            store.add_repo(&repo.to_string_lossy())?;
+        }
+    }
+    mark_legacy_done(store)
+}
+
+/// Remember that older nibble's jobs were dealt with.
+pub fn mark_legacy_done(store: &CronStore) -> Result<()> {
+    store.set_meta(LEGACY_EXPORTED, &Utc::now().to_rfc3339())
 }
 
 #[cfg(test)]
@@ -302,7 +367,7 @@ mod tests {
             schedule: Some("0 9 * * *".into()),
             next_run: Some(t),
             last_run: Some(t),
-            paused: true,
+            paused: false,
             running: true,
             ..fresh
         };
@@ -319,43 +384,106 @@ mod tests {
         );
     }
 
-    #[test]
-    fn legacy_jobs_become_files_once() {
-        let (tmp, s) = store();
-        let repo = tmp.path().join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        let repo_s = repo.to_string_lossy().to_string();
-        let db = crate::db::Database::open(tmp.path().join("tasks.db")).unwrap();
-        let next = Utc::now();
-        let mut job = crate::models::CronJob::new(
-            repo_s.clone(),
-            "0 9 * * *".into(),
-            "Do the thing.".into(),
-            Some("Malone Daily Tasks".into()),
-            next,
-        );
-        job.enabled = false;
-        db.insert_cron_job(&job).unwrap();
-        // A job for a repo that no longer exists is skipped.
-        db.insert_cron_job(&crate::models::CronJob::new(
-            "/gone".into(),
-            "0 9 * * *".into(),
-            "x".into(),
-            None,
-            next,
-        ))
-        .unwrap();
+    fn git_repo(tmp: &Path, name: &str) -> PathBuf {
+        let repo = tmp.join(name);
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::canonicalize(repo).unwrap()
+    }
 
-        let written = export_legacy(&s, &db).unwrap();
-        assert_eq!(written, [repo.join(".nibble/cron/malone-daily-tasks.md")]);
-        let def = super::super::load_job_file(&written[0]).unwrap();
-        assert_eq!(def.label, "Malone Daily Tasks");
-        assert!(!def.enabled, "a disabled job stays disabled");
-        assert!(!def.read_only);
+    #[test]
+    fn legacy_jobs_are_planned_then_imported() {
+        let (tmp, s) = store();
+        let repo = git_repo(tmp.path(), "repo");
+        let plain = tmp.path().join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        let db = crate::db::Database::open(tmp.path().join("tasks.db")).unwrap();
+        let add = |repo: &str, label: Option<&str>, enabled: bool| {
+            let mut job = crate::models::CronJob::new(
+                repo.to_string(),
+                "0 9 * * *".into(),
+                "Do the thing.".into(),
+                label.map(str::to_string),
+                Utc::now(),
+            );
+            job.enabled = enabled;
+            db.insert_cron_job(&job).unwrap();
+        };
+        let r = repo.to_string_lossy().to_string();
+        assert!(
+            !legacy_pending(&s, &db).unwrap(),
+            "no rows: nothing pending"
+        );
+        add(&r, Some("Malone Daily Tasks"), false);
+        add(&r, Some("malone daily tasks!"), true); // same slug
+        add(&r, None, true);
+        add(&format!("{r}/../repo"), Some("Line\nbreak"), true); // not canonical
+        add("/gone", None, true);
+        add(&plain.to_string_lossy(), None, true); // not a git repo
+                                                   // An existing file is never replaced.
+        std::fs::create_dir_all(super::super::jobs_dir(&repo)).unwrap();
+        std::fs::write(super::super::job_path(&repo, "job"), "mine").unwrap();
+        assert!(legacy_pending(&s, &db).unwrap());
+
+        let plan = plan_legacy(&db).unwrap();
+        let mut imported = Vec::new();
+        let mut skipped = 0;
+        for item in &plan {
+            match item {
+                LegacyItem::Import {
+                    repo: r2,
+                    path,
+                    def,
+                } => {
+                    assert_eq!(r2, &repo, "registered by its canonical path");
+                    imported.push((
+                        path.file_name().unwrap().to_string_lossy().to_string(),
+                        def.clone(),
+                    ));
+                }
+                LegacyItem::Skip { .. } => skipped += 1,
+            }
+        }
+        let mut names: Vec<&str> = imported.iter().map(|(n, _)| n.as_str()).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "job-2.md",
+                "linebreak.md",
+                "malone-daily-tasks-2.md",
+                "malone-daily-tasks.md"
+            ]
+        );
+        assert_eq!(skipped, 2, "{plan:?}");
+        assert!(s.repos().unwrap().is_empty(), "planning writes nothing");
+
+        apply_legacy(&s, &plan).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(super::super::job_path(&repo, "job")).unwrap(),
+            "mine"
+        );
+        let def = super::super::load_job_file(&super::super::job_path(&repo, "malone-daily-tasks"))
+            .unwrap();
+        assert!(!def.enabled && !def.read_only);
         assert_eq!(def.prompt, "Do the thing.");
-        assert_eq!(s.repos().unwrap(), [repo_s]);
-        // Second time: nothing, even after the file is deleted.
-        std::fs::remove_file(&written[0]).unwrap();
-        assert!(export_legacy(&s, &db).unwrap().is_empty());
+        assert_eq!(s.repos().unwrap(), [r]);
+        assert!(!legacy_pending(&s, &db).unwrap(), "done once");
+    }
+
+    #[test]
+    fn paused_and_present_jobs_survive_pruning() {
+        let (_t, s) = store();
+        let mut p = JobState::new("/r", "paused");
+        p.paused = true;
+        s.put_job(&p).unwrap();
+        s.put_job(&JobState::new("/r", "gone")).unwrap();
+        s.put_job(&JobState::new("/r", "broken")).unwrap();
+        s.prune_jobs("/r", &["broken".to_string()]).unwrap();
+        assert!(s.job("/r", "paused").unwrap().paused);
+        let n: i64 = s
+            .conn
+            .query_row("SELECT COUNT(*) FROM jobs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 2, "only the unpaused job without a file went");
     }
 }
