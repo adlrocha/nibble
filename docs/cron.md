@@ -121,6 +121,34 @@ then runs in that same container by id.
 The daemon logs to `$XDG_STATE_HOME/nibble/cron/daemon.log`
 (`~/.local/state/nibble/cron/daemon.log` by default).
 
+## Reports in Slack
+
+With [`nibble rc`](rc.md) set up, a run that finds something posts a card
+to your DM with the Slack app: the job, the summary, each finding (new ones
+marked) and three buttons.
+
+- **Investigate** starts a sandbox session in the card's thread, given the
+  report, to confirm the cause and propose a fix without changing anything.
+  Reply in the thread to steer it, or ask it to fix.
+- **Fix → PR** starts one told to fix the findings and open a pull request
+  through the repo's delivery flow (the `nibble-sdlc` skill where
+  `.nibble/sdlc.toml` exists). It stops at the PR; merging stays yours.
+- **Snooze 7d** silences the card's findings on this machine for a week.
+
+Both sessions run like any other started from Slack: in a new tab of the
+`nibble mux` session, relayed to the thread. The report is passed as data
+to check, since it was written from logs and tool output.
+
+A problem is reported when it first appears, again when it gets worse (warn
+→ critical), and once a day while it lasts. A problem that goes away and
+comes back is reported again. A run that fails or times out is reported
+once, as a problem of its own. `notify = "none"` keeps a job's reports out
+of Slack; they stay in `nibble cron runs`.
+
+Cards wait in `nibble rc`'s private queue, so a report made while the Slack
+daemon is down is posted when it is back (cards older than 30 days are
+dropped). Without `nibble rc` set up, reports stay in `nibble cron runs`.
+
 ## Approving jobs
 
 A job file can be written by anyone who can write the repo, including an

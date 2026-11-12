@@ -22,6 +22,7 @@ mod daemon;
 mod modal;
 mod pane;
 mod relay;
+pub(crate) mod reports;
 pub(crate) mod secrets;
 mod slack;
 mod socket;

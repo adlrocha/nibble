@@ -98,7 +98,29 @@ CREATE TABLE runs (
 );
 CREATE INDEX idx_runs_job ON runs(repo_path, name, id);
 ",
+    "
+CREATE TABLE findings (
+    repo_path TEXT NOT NULL,
+    name TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    notified_at INTEGER,
+    snoozed_until INTEGER,
+    last_seen INTEGER NOT NULL,
+    PRIMARY KEY (repo_path, name, fingerprint)
+);
+",
 ];
+
+/// What is remembered about a problem a job keeps finding, so it is
+/// reported once rather than on every run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FindingState {
+    pub severity: super::run::Severity,
+    pub notified_at: Option<DateTime<Utc>>,
+    pub snoozed_until: Option<DateTime<Utc>>,
+    pub last_seen: DateTime<Utc>,
+}
 
 /// Runs kept per job; older ones are deleted as new ones start.
 const RUNS_KEPT: i64 = 200;
@@ -533,6 +555,96 @@ impl CronStore {
             )
             .optional()
             .map_err(Into::into)
+    }
+
+    pub fn finding(&self, repo: &str, name: &str, fp: &str) -> Result<Option<FindingState>> {
+        self.conn
+            .query_row(
+                "SELECT severity, notified_at, snoozed_until, last_seen FROM findings
+                 WHERE repo_path = ?1 AND name = ?2 AND fingerprint = ?3",
+                params![repo, name, fp],
+                |r| {
+                    let sev: String = r.get(0)?;
+                    Ok(FindingState {
+                        severity: serde_json::from_value(serde_json::Value::String(sev))
+                            .unwrap_or(super::run::Severity::Warn),
+                        notified_at: ts(r.get(1)?),
+                        snoozed_until: ts(r.get(2)?),
+                        last_seen: ts(r.get(3)?).unwrap_or_default(),
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn put_finding(&self, repo: &str, name: &str, fp: &str, f: &FindingState) -> Result<()> {
+        let sev = serde_json::to_value(f.severity)?;
+        self.conn.execute(
+            "INSERT INTO findings (repo_path, name, fingerprint, severity, notified_at,
+                                   snoozed_until, last_seen)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT (repo_path, name, fingerprint) DO UPDATE SET
+               severity = ?4, notified_at = ?5, snoozed_until = ?6, last_seen = ?7",
+            params![
+                repo,
+                name,
+                fp,
+                sev.as_str().unwrap_or("warn"),
+                f.notified_at.map(|t| t.timestamp()),
+                f.snoozed_until.map(|t| t.timestamp()),
+                f.last_seen.timestamp(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Forget the job's findings that its latest run no longer reports, so
+    /// a problem that comes back is reported again. Snoozed ones are kept
+    /// until their snooze ends.
+    pub fn retain_findings(
+        &self,
+        repo: &str,
+        name: &str,
+        keep: &[String],
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let fps: Vec<String> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT fingerprint FROM findings WHERE repo_path = ?1 AND name = ?2
+                   AND (snoozed_until IS NULL OR snoozed_until <= ?3)",
+            )?;
+            let rows = stmt.query_map(params![repo, name, now.timestamp()], |r| r.get(0))?;
+            rows.collect::<Result<_, _>>()?
+        };
+        for fp in fps.iter().filter(|f| !keep.contains(f)) {
+            self.conn.execute(
+                "DELETE FROM findings WHERE repo_path = ?1 AND name = ?2 AND fingerprint = ?3",
+                params![repo, name, fp],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Stop reporting these findings until `until`.
+    pub fn snooze(
+        &self,
+        repo: &str,
+        name: &str,
+        fps: &[String],
+        until: DateTime<Utc>,
+    ) -> Result<()> {
+        for fp in fps {
+            let mut f = self.finding(repo, name, fp)?.unwrap_or(FindingState {
+                severity: super::run::Severity::Warn,
+                notified_at: None,
+                snoozed_until: None,
+                last_seen: Utc::now(),
+            });
+            f.snoozed_until = Some(until);
+            self.put_finding(repo, name, fp, &f)?;
+        }
+        Ok(())
     }
 
     fn meta(&self, key: &str) -> Result<Option<String>> {

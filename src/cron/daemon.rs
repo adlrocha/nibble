@@ -197,7 +197,15 @@ fn start(db_path: &Path, dir: &Path, repo: PathBuf, def: JobDef, active: Arc<Mut
             .context("failed to open nibble's database")
             .and_then(|db| {
                 let store = CronStore::open_in(&dir)?;
-                run_job(&db, &store, &repo, &def, Trigger::Schedule)
+                let run = run_job(&db, &store, &repo, &def, Trigger::Schedule)?;
+                if let Some(r) = &run {
+                    match super::notify::after_run(&store, &def, r) {
+                        Ok(true) => log(&format!("{id}: reported to Slack")),
+                        Ok(false) => {}
+                        Err(e) => log(&format!("{id}: could not queue the report: {e:#}")),
+                    }
+                }
+                Ok(run)
             });
         match result {
             Ok(None) => log(&format!("{id}: already running; skipped")),

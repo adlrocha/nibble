@@ -45,6 +45,13 @@ pub(crate) fn state_dir() -> std::path::PathBuf {
 /// written to the database sandboxes can write.
 pub(crate) struct StateDb(Database);
 
+impl StateDb {
+    /// The underlying database, for records kept by other rc modules.
+    pub(super) fn db(&self) -> &Database {
+        &self.0
+    }
+}
+
 /// Open (creating, mode 0700) the daemon's private state database.
 pub(crate) fn open_state() -> Result<StateDb> {
     open_state_in(&state_dir())

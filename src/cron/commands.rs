@@ -718,6 +718,9 @@ pub(crate) fn cmd_run(db: &Database, store: &CronStore, job: &str) -> Result<()>
     let record = super::run::run_job(db, store, &repo, &def, super::run::Trigger::Manual)?
         .with_context(|| format!("{} is already running", def.name))?;
     print_record(&record);
+    if super::notify::after_run(store, &def, &record)? {
+        println!("\nReported to Slack (nibble rc posts it).");
+    }
     Ok(())
 }
 
