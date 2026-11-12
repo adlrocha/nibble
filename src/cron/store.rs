@@ -436,6 +436,16 @@ impl CronStore {
         Ok(n == 1)
     }
 
+    /// Runs claimed across all jobs (by the daemon or `nibble cron run`).
+    pub fn runs_in_flight(&self) -> Result<usize> {
+        let n: i64 =
+            self.conn
+                .query_row("SELECT COALESCE(SUM(running), 0) FROM jobs", [], |r| {
+                    r.get(0)
+                })?;
+        Ok(usize::try_from(n).unwrap_or(0))
+    }
+
     /// End one run's claim; the job is free once none is left.
     pub fn release(&self, repo: &str, name: &str) -> Result<()> {
         self.conn.execute(
@@ -731,7 +741,7 @@ pub fn legacy_done(store: &CronStore) -> Result<bool> {
 
 /// Whether the jobs in `~/.nibble/tasks.db` are still to be imported.
 pub fn legacy_pending(store: &CronStore, db: &crate::db::Database) -> Result<bool> {
-    Ok(store.meta(LEGACY_EXPORTED)?.is_none() && !db.list_cron_jobs(None)?.is_empty())
+    Ok(store.meta(LEGACY_EXPORTED)?.is_none() && db.has_cron_jobs()?)
 }
 
 /// Plan the import of older nibble's jobs. Nothing is written: the rows
@@ -788,19 +798,20 @@ pub fn plan_legacy(db: &crate::db::Database) -> Result<Vec<LegacyItem>> {
         }
         // Walk base, base-2, ... once: a file holding this very job means a
         // retry after a partial import; the first free name is taken.
-        let mut already = false;
         let mut free = None;
         for n in 1.. {
             let name = if n == 1 {
                 base.clone()
             } else {
-                format!("{base}-{n}")
+                // Shortened so the suffix keeps the name within 64.
+                let suffix = format!("-{n}");
+                let keep: String = base.chars().take(64 - suffix.len()).collect();
+                format!("{}{suffix}", keep.trim_end_matches('-'))
             };
             let path = super::job_path(&repo, &name);
             let mut d = wanted.clone();
             d.name = name.clone();
             if std::fs::read_to_string(&path).is_ok_and(|t| t == super::format_job(&d)) {
-                already = true;
                 break;
             }
             if !path.exists() && !taken.contains(&path) {
@@ -808,7 +819,7 @@ pub fn plan_legacy(db: &crate::db::Database) -> Result<Vec<LegacyItem>> {
                 break;
             }
         }
-        let Some((name, path)) = free.filter(|_| !already) else {
+        let Some((name, path)) = free else {
             plan.push(skip("already imported".to_string()));
             continue;
         };
@@ -836,7 +847,7 @@ pub fn apply_legacy(store: &CronStore, plan: &[LegacyItem]) -> Result<()> {
                 eprintln!("  skipped {}: it appeared after the plan", path.display());
                 continue;
             }
-            std::fs::create_dir_all(super::jobs_dir(repo))?;
+            super::real_jobs_dir(repo)?;
             std::fs::write(path, &text)
                 .with_context(|| format!("failed to write {}", path.display()))?;
             store.add_repo(&key)?;
@@ -949,6 +960,9 @@ mod tests {
         assert!(!s.job("/r", "a").unwrap().running);
         s.release("/r", "a").unwrap();
         assert!(!s.job("/r", "a").unwrap().running, "no underflow");
+        assert!(s.claim("/r", "x", me, false).unwrap());
+        assert!(s.claim("/r", "y", me, false).unwrap());
+        assert_eq!(s.runs_in_flight().unwrap(), 2, "counts every job's claims");
         // A dead owner's claim is taken over, and reaped.
         assert!(s.claim("/r", "b", DEAD, false).unwrap());
         assert!(s.claim("/r", "b", me, false).unwrap());
@@ -1147,6 +1161,44 @@ mod tests {
             "theirs"
         );
         assert!(legacy_done(&s).unwrap());
+    }
+
+    #[test]
+    fn numbered_names_stay_valid() {
+        let (tmp, s) = store();
+        let repo = git_repo(tmp.path(), "repo");
+        let db = crate::db::Database::open(tmp.path().join("tasks.db")).unwrap();
+        let long = "x".repeat(80);
+        for p in ["a", "b"] {
+            db.insert_cron_job(&crate::models::CronJob::new(
+                repo.to_string_lossy().to_string(),
+                "0 9 * * *".into(),
+                p.into(),
+                Some(long.clone()),
+                Utc::now(),
+            ))
+            .unwrap();
+        }
+        apply_legacy(&s, &plan_legacy(&db).unwrap()).unwrap();
+        let (jobs, bad) = super::super::load_repo_jobs(&repo).unwrap();
+        assert_eq!((jobs.len(), bad.len()), (2, 0), "{bad:?}");
+    }
+
+    #[test]
+    fn a_bad_legacy_time_does_not_panic() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = crate::db::Database::open(tmp.path().join("tasks.db")).unwrap();
+        let job = crate::models::CronJob::new(
+            "/r".into(),
+            "0 9 * * *".into(),
+            "p".into(),
+            None,
+            Utc::now(),
+        );
+        db.insert_cron_job(&job).unwrap();
+        db.set_cron_next_run_for_test(i64::MAX).unwrap();
+        assert!(db.has_cron_jobs().unwrap());
+        assert_eq!(db.list_cron_jobs(None).unwrap().len(), 1);
     }
 
     #[test]
