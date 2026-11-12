@@ -106,7 +106,8 @@ pub(crate) fn refresh_state(mut s: JobState, def: &JobDef, now: DateTime<Utc>) -
 }
 
 /// Read a registered repo's job files and drop the state of jobs whose
-/// files are gone (an invalid file keeps its state).
+/// files are gone. An invalid file, and a paused or approved job, keep
+/// their state (see [`CronStore::prune_jobs`]).
 pub(crate) fn sync_repo(
     store: &CronStore,
     repo: &Path,
