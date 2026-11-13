@@ -714,18 +714,16 @@ impl CronStore {
 
     /// Run `f` in one write transaction (`BEGIN IMMEDIATE`): another
     /// process's writes cannot interleave with what `f` reads and writes.
+    /// The guard rolls back on an error or a panic, like `db`'s
+    /// `with_write_tx`.
     pub fn atomically<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
-        match f() {
-            Ok(v) => {
-                self.conn.execute_batch("COMMIT")?;
-                Ok(v)
-            }
-            Err(e) => {
-                let _ = self.conn.execute_batch("ROLLBACK");
-                Err(e)
-            }
-        }
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let out = f()?;
+        tx.commit()?;
+        Ok(out)
     }
 
     /// Stop reporting these findings until `until`.

@@ -5,7 +5,9 @@
 //! (warn → critical), and again once a day while it lasts, unless it was
 //! snoozed from Slack. A run that fails or times out counts as a problem
 //! of its own (`run:failed`, `run:timeout`), reported the same way; it says
-//! nothing about the job's other findings, which are kept as they were.
+//! nothing about the job's other findings, which are kept as they were. So
+//! does a `warn` or `critical` report that lists no findings (`run:warn`,
+//! `run:critical`): it is a problem, just not an itemized one.
 
 use super::run::{Finding, Severity};
 use super::store::{CronStore, FindingState, RunRecord, RunStatus};
@@ -14,10 +16,39 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 
 /// How long a lasting problem stays quiet after it was reported.
-pub const RENOTIFY: chrono::Duration = chrono::Duration::hours(24);
+const RENOTIFY: chrono::Duration = chrono::Duration::hours(24);
 
-/// The problems a run stands for: its findings, or the failure itself.
-pub fn findings_of(r: &RunRecord) -> Vec<Finding> {
+/// Whether the run listed its findings one by one, so what it did not list
+/// is gone. A failed run did not look; a warn or critical report without
+/// findings did not say which.
+fn itemized(r: &RunRecord) -> bool {
+    match r.status {
+        RunStatus::Failed | RunStatus::TimedOut => false,
+        RunStatus::Warn | RunStatus::Critical => r
+            .report
+            .as_ref()
+            .is_some_and(|rep| !rep.findings.is_empty()),
+        _ => true,
+    }
+}
+
+/// The problems a run stands for: its findings, or the run itself when it
+/// failed or reported a problem without listing any.
+fn findings_of(r: &RunRecord) -> Vec<Finding> {
+    if !itemized(r) && matches!(r.status, RunStatus::Warn | RunStatus::Critical) {
+        let summary = r.report.as_ref().map(|rep| rep.summary.clone());
+        return vec![Finding {
+            fingerprint: format!("run:{}", r.status.as_str()),
+            severity: if r.status == RunStatus::Critical {
+                Severity::Critical
+            } else {
+                Severity::Warn
+            },
+            title: format!("The job reported {} without findings", r.status.as_str()),
+            details: summary.unwrap_or_default(),
+            suggested_action: format!("See `nibble cron show {}`.", r.id),
+        }];
+    }
     match r.status {
         RunStatus::Failed | RunStatus::TimedOut => vec![Finding {
             fingerprint: format!("run:{}", r.status.as_str()),
@@ -39,7 +70,7 @@ pub fn findings_of(r: &RunRecord) -> Vec<Finding> {
 }
 
 /// Record what the run found and return the fingerprints to report now.
-pub fn new_findings(store: &CronStore, r: &RunRecord, now: DateTime<Utc>) -> Result<Vec<String>> {
+fn new_findings(store: &CronStore, r: &RunRecord, now: DateTime<Utc>) -> Result<Vec<String>> {
     store.atomically(|| decide(store, r, now))
 }
 
@@ -86,8 +117,8 @@ fn decide(store: &CronStore, r: &RunRecord, now: DateTime<Utc>) -> Result<Vec<St
             },
         )?;
     }
-    // A failed run did not look, so what it did not report is not gone.
-    if !matches!(r.status, RunStatus::Failed | RunStatus::TimedOut) {
+    // A run that did not list its findings says nothing about the others.
+    if itemized(r) {
         let keep: Vec<String> = found.into_iter().map(|f| f.fingerprint).collect();
         store.retain_findings(&r.repo_path, &r.name, &keep, now, r.started_at)?;
     }
@@ -220,6 +251,25 @@ mod tests {
             new_findings(&s, &bad, until + chrono::Duration::minutes(1)).unwrap(),
             ["a"]
         );
+    }
+
+    #[test]
+    fn a_problem_without_findings_is_reported_and_keeps_the_others() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let s = CronStore::open_in(tmp.path()).unwrap();
+        // Findings recorded well before the runs that follow start.
+        let t = Utc::now() - chrono::Duration::hours(1);
+        let bad = record(&s, RunStatus::Warn, &[("a", Severity::Warn)]);
+        assert_eq!(new_findings(&s, &bad, t).unwrap(), ["a"]);
+        let vague = record(&s, RunStatus::Warn, &[]);
+        assert_eq!(new_findings(&s, &vague, t).unwrap(), ["run:warn"]);
+        assert!(s.finding("/r", "j", "a").unwrap().is_some(), "kept");
+        assert!(
+            new_findings(&s, &bad, t).unwrap().is_empty(),
+            "a stays on its daily cadence"
+        );
+        let card = findings_of(&vague);
+        assert_eq!(card[0].details, "s", "the summary says what was wrong");
     }
 
     #[test]

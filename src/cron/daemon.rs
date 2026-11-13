@@ -194,17 +194,29 @@ fn report_reaped(store: &CronStore, run_id: i64) {
     let Ok(Some(r)) = store.run(run_id) else {
         return;
     };
-    let path = super::job_path(Path::new(&r.repo_path), &r.name);
-    match super::load_job_file(&path) {
-        Ok(def) => {
+    match approved_def(store, &r.repo_path, &r.name) {
+        Ok(Some(def)) => {
             if let Err(e) = super::notify::after_run(store, &def, &r) {
                 log(&format!("run {run_id}: could not queue the report: {e:#}"));
             }
         }
+        Ok(None) => log(&format!(
+            "run {run_id}: not reported, its job has no approval on this machine"
+        )),
         Err(e) => log(&format!(
-            "run {run_id}: not reported, its job file is unreadable: {e:#}"
+            "run {run_id}: not reported, its approved definition is unreadable: {e:#}"
         )),
     }
+}
+
+/// The job as you approved it here, not as its file reads now: the repo's
+/// sandbox can write that file, and the run ran under the approval.
+fn approved_def(store: &CronStore, repo: &str, name: &str) -> Result<Option<super::JobDef>> {
+    store
+        .job(repo, name)?
+        .approved
+        .map(|text| super::parse_job(name, &text).map(|p| p.def))
+        .transpose()
 }
 
 /// Counts a run in `active` while it lives, panics included.
@@ -303,6 +315,23 @@ mod tests {
 
     fn none() -> Active {
         Active::new()
+    }
+
+    #[test]
+    fn a_reaped_run_reports_with_its_approved_definition() {
+        let (_tmp, store, key) = setup(&[("a", "")]);
+        let path = super::super::job_path(Path::new(&key), "a");
+        // An unapproved edit in the repo does not change how it is reported.
+        std::fs::write(
+            &path,
+            "schedule = \"* * * * *\"\nnotify = \"none\"\n## Prompt\nx",
+        )
+        .unwrap();
+        let def = approved_def(&store, &key, "a").unwrap().unwrap();
+        assert_eq!(def.notify, super::super::Notify::Slack);
+        std::fs::remove_file(&path).unwrap();
+        assert!(approved_def(&store, &key, "a").unwrap().is_some());
+        assert!(approved_def(&store, &key, "never").unwrap().is_none());
     }
 
     #[test]
