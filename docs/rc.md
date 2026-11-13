@@ -139,9 +139,10 @@ nibble rc manifest --name nibble-desktop   # on the desktop
   events between them at random. Never copy `slack.env` between machines.
 
 To fix an app that already declares `/nibble`: on its page at
-<https://api.slack.com/apps>, open *App Manifest*, change `command: /nibble`
-(and the names) to the machine's own, save, and reinstall if Slack asks. If
-the bot token changes, run `nibble rc setup` again and
+<https://api.slack.com/apps>, open *App Manifest*, replace it with the output
+of `nibble rc manifest --name <name>` (this renames the command everywhere it
+appears, the agent description included), save, and reinstall if Slack asks.
+If the bot token changes, run `nibble rc setup` again on that machine and
 `systemctl --user restart nibble-rc`. The daemon answers whatever the
 command is called, and its replies name the command you typed.
 
