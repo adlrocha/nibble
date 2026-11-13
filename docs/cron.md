@@ -61,7 +61,11 @@ nibble cron show 12                   # one run's full report
 nibble cron kill deps-audit           # delete the job file
 nibble cron forget ~/src/shop         # stop running the repo's jobs here
 nibble cron import                    # move jobs from older nibble versions (see below)
+nibble cron daemon                    # the scheduler itself; nibble-cron.service runs it
 ```
+
+To stop the scheduler, `systemctl --user stop nibble-cron` (`disable` keeps
+it off after a reboot). Without systemd, run `nibble cron daemon` yourself.
 
 Your home directory, anything inside `~/.nibble`, and symlinked job files
 are refused: sandboxes can write `~/.nibble`, and a link could point a job

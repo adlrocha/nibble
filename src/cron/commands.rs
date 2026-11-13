@@ -734,8 +734,10 @@ pub(crate) fn cmd_run(db: &Database, store: &CronStore, job: &str) -> Result<()>
 pub(crate) fn cmd_runs(store: &CronStore, job: Option<&str>, limit: usize) -> Result<()> {
     // Not parsed: a broken file must not hide its own history.
     let resolved = job.map(|j| resolve_job_file(store, j)).transpose()?;
-    let key = resolved.as_ref().map(|(r, n)| (repo_str(r), n.clone()));
-    let runs = store.runs(key.as_ref().map(|(r, n)| (r.as_str(), n.as_str())), limit)?;
+    let runs = match &resolved {
+        Some((repo, name)) => store.runs_of(&repo_str(repo), name, limit)?,
+        None => store.runs(limit)?,
+    };
     if runs.is_empty() {
         println!("No runs yet.");
         return Ok(());

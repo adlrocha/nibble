@@ -473,13 +473,12 @@ impl Trigger {
 /// Releases a job's claim when the run ends, panics included.
 struct Claim<'a> {
     store: &'a CronStore,
-    repo: String,
-    name: String,
+    id: i64,
 }
 
 impl Drop for Claim<'_> {
     fn drop(&mut self) {
-        let _ = self.store.release(&self.repo, &self.name);
+        let _ = self.store.release(self.id);
     }
 }
 
@@ -496,14 +495,10 @@ pub fn run_job(
 ) -> Result<Option<RunRecord>> {
     let key = repo.to_string_lossy().to_string();
     let pid = std::process::id();
-    if !store.claim(&key, &def.name, pid, !def.skip_if_running)? {
+    let Some(claim) = store.claim(&key, &def.name, pid, !def.skip_if_running)? else {
         return Ok(None);
-    }
-    let _claim = Claim {
-        store,
-        repo: key.clone(),
-        name: def.name.clone(),
     };
+    let _claim = Claim { store, id: claim };
     let id = store.start_run(&key, &def.name, &def.label, trigger.as_str(), pid)?;
     let parsed = execute(db, store, id, repo, def)
         .unwrap_or_else(|e| Parsed::failed(RunStatus::Failed, &format!("{e:#}"), None, None));
@@ -774,14 +769,15 @@ mod tests {
         let d = def();
         let key = repo.to_string_lossy().to_string();
         // A live owner (this test process) holds it.
-        assert!(store
+        let held = store
             .claim(&key, &d.name, std::process::id(), false)
-            .unwrap());
+            .unwrap()
+            .unwrap();
         assert!(run_job(&db, &store, &repo, &d, Trigger::Manual)
             .unwrap()
             .is_none());
-        assert!(store.runs(None, 10).unwrap().is_empty(), "nothing recorded");
-        store.release(&key, &d.name).unwrap();
+        assert!(store.runs(10).unwrap().is_empty(), "nothing recorded");
+        store.release(held).unwrap();
         // Unclaimed: it runs, and without a sandbox the failure is recorded.
         let r = run_job(&db, &store, &repo, &d, Trigger::Manual)
             .unwrap()
