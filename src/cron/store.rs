@@ -478,8 +478,9 @@ impl CronStore {
         Ok(Some(id))
     }
 
-    /// Drop the claims (of one job, or all) whose owner is gone.
-    fn drop_dead_claims(&self, job: Option<(&str, &str)>) -> Result<()> {
+    /// Drop the claims (of one job, or all) whose owner is gone, such as a
+    /// `nibble cron run` stopped with Ctrl-C.
+    pub fn drop_dead_claims(&self, job: Option<(&str, &str)>) -> Result<()> {
         type Row = (i64, u32, i64, String, String);
         let claims: Vec<Row> = {
             let mut stmt = self

@@ -39,10 +39,15 @@ pub(crate) fn cmd_import(db: &Database, store: &CronStore, yes: bool) -> Result<
                     path.display(),
                     repo.display(),
                     if def.enabled { "" } else { " [disabled]" },
-                    super::format_job(def)
+                    shown(&super::format_job(def))
                 );
                 println!("It may edit files (read_only = false), as older jobs could.");
             }
+            LegacyItem::Register { repo, path, .. } => println!(
+                "  register {}: {} already holds this job; approve it with `nibble cron approve`",
+                repo.display(),
+                path.display()
+            ),
             LegacyItem::Skip {
                 repo_path,
                 label,
@@ -58,6 +63,21 @@ pub(crate) fn cmd_import(db: &Database, store: &CronStore, yes: bool) -> Result<
     super::legacy::apply_legacy(store, &plan)?;
     println!("Imported. Commit the new files to keep them; the old rows stay in tasks.db.");
     Ok(())
+}
+
+/// Untrusted job text as shown for review: control characters (but line
+/// breaks and tabs) escaped, so an escape sequence in a sandbox-written
+/// prompt cannot redraw the settings you are approving.
+fn shown(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() && !matches!(c, '\n' | '\t') {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
 }
 
 /// Ask y/N on the terminal; no terminal counts as no.
@@ -229,7 +249,11 @@ pub(crate) fn resolve_job_file(store: &CronStore, arg: &str) -> Result<(PathBuf,
         .repos()?
         .into_iter()
         .map(PathBuf::from)
-        .filter(|r| super::job_path(r, name).is_file())
+        .filter(|r| {
+            // Only a job dir that really is the repo's, as listing reads it.
+            super::inside_repo(r, &super::jobs_dir(r), "read jobs").is_ok()
+                && super::job_path(r, name).is_file()
+        })
         .filter(|r| repo_name.is_none_or(|want| r.file_name().is_some_and(|f| f == want)))
         .collect();
     if matches.len() > 1 {
@@ -285,11 +309,14 @@ pub(crate) fn cmd_add(store: &CronStore, a: AddArgs) -> Result<()> {
         };
         super::validate_schedule(&schedule)?;
         // `--label`, when given, replaces this below.
+        // The first line with something on it, as one clean line.
         let label: String = prompt
             .lines()
-            .next()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
             .unwrap_or("job")
             .chars()
+            .filter(|c| !c.is_control())
             .take(40)
             .collect();
         new_def = Some(JobDef {
@@ -364,7 +391,7 @@ fn approve_pending(store: &CronStore, repo: &Path, only: Option<&str>, yes: bool
         if a == Approval::Approved {
             continue;
         }
-        let text = super::format_job(def);
+        let text = shown(&super::format_job(def));
         println!(
             "\n── {} ({}) ──\n{text}",
             super::job_path(repo, &def.name).display(),
@@ -440,6 +467,9 @@ pub(crate) fn cmd_list(store: &CronStore, repo_filter: Option<&str>) -> Result<(
     // Matched as `forget` matches, so a repo that is gone is still listed
     // (as missing) instead of refused.
     let filter = repo_filter.map(|r| PathBuf::from(repo_key(r)));
+    // A run stopped with Ctrl-C leaves its claim; without the daemon to
+    // reap it, the job would read `running` until its next run.
+    store.drop_dead_claims(None)?;
     let repos: Vec<PathBuf> = store
         .repos()?
         .into_iter()
@@ -543,18 +573,30 @@ fn apply_edit(def: &mut JobDef, e: EditArgs, now: DateTime<Utc>) -> Result<bool>
     Ok(changed)
 }
 
+/// Replace `path` (in `dir`) with `text` through a new file in `dir` that
+/// is renamed over it: a rename replaces a symlink put there meanwhile
+/// instead of writing through it.
+fn replace_in(dir: &Path, path: &Path, text: &str) -> Result<()> {
+    use std::io::Write;
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)
+        .with_context(|| format!("failed to write in {}", dir.display()))?;
+    tmp.write_all(text.as_bytes())?;
+    tmp.persist(path)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
+}
+
 /// `nibble cron edit`: change the job file, with flags or in `$EDITOR`.
 pub(crate) fn cmd_edit(store: &CronStore, job: &str, e: EditArgs) -> Result<()> {
     let (repo, mut def) = resolve_job(store, job)?;
-    super::real_jobs_dir(&repo)?;
+    let dir = super::real_jobs_dir(&repo)?;
     let path = super::job_path(&repo, &def.name);
     // Only a job you had approved stays approved: editing one that changed
     // under you (from the sandbox, say) must not approve what you never saw.
     let was_approved =
         approval(&def, &store.job(&repo_str(&repo), &def.name)?) == Approval::Approved;
     if apply_edit(&mut def, e, Utc::now())? {
-        std::fs::write(&path, super::format_job(&def))
-            .with_context(|| format!("failed to write {}", path.display()))?;
+        replace_in(&dir, &path, &super::format_job(&def))?;
     } else {
         let editor = std::env::var("VISUAL")
             .or_else(|_| std::env::var("EDITOR"))
@@ -1081,6 +1123,57 @@ mod tests {
     }
 
     #[test]
+    fn review_text_escapes_control_characters() {
+        let t = shown("# T\n\nenv = [\"X\"]\n\n## Prompt\n\n\u{1b}[2J\u{1b}[8Aok\tthen");
+        assert!(!t.contains('\u{1b}'), "{t}");
+        assert!(
+            t.contains("\\u{1b}[2J") && t.contains("env = [\"X\"]\n") && t.contains("ok\tthen")
+        );
+    }
+
+    #[test]
+    fn edits_replace_a_symlink_instead_of_writing_through_it() {
+        let (tmp, _store, repo) = setup();
+        let dir = super::super::jobs_dir(&repo);
+        let outside = tmp.path().join("outside");
+        std::fs::write(&outside, "keep").unwrap();
+        let path = super::super::job_path(&repo, "logs");
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&outside, &path).unwrap();
+        replace_in(&dir, &path, "new").unwrap();
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep");
+        assert!(!std::fs::symlink_metadata(&path).unwrap().is_symlink());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+    }
+
+    #[test]
+    fn a_new_jobs_title_is_its_first_line_with_text() {
+        let (_tmp, store, repo) = setup();
+        let a = AddArgs {
+            repo: Some(repo_str(&repo)),
+            schedule: Some("0 1 * * *".into()),
+            prompt: Some("\n\t  Check deps\nmore".into()),
+            file: None,
+            label: None,
+            expires: None,
+            yes: true,
+        };
+        cmd_add(&store, a).unwrap();
+        let def =
+            super::super::load_job_file(&super::super::job_path(&repo, "check-deps")).unwrap();
+        assert_eq!(def.label, "Check deps");
+    }
+
+    #[test]
+    fn bare_names_ignore_a_symlinked_job_dir() {
+        let (tmp, store, repo) = setup();
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::rename(super::super::jobs_dir(&repo), &elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, super::super::jobs_dir(&repo)).unwrap();
+        assert!(resolve_job_file(&store, "logs").is_err());
+    }
+
+    #[test]
     fn resolves_jobs_by_name_repo_and_path() {
         let (tmp, store, repo) = setup();
         assert_eq!(resolve_job(&store, "logs").unwrap().0, repo);
@@ -1234,6 +1327,19 @@ mod tests {
         std::os::unix::fs::symlink(&elsewhere, repo.join(".nibble/cron")).unwrap();
         let err = super::super::load_repo_jobs(&repo).unwrap_err().to_string();
         assert!(err.contains("outside the repo"), "{err}");
+    }
+
+    #[test]
+    fn listing_drops_the_claim_of_a_run_that_died() {
+        let (_tmp, store, repo) = setup();
+        let key = repo_str(&repo);
+        store
+            .claim(&key, "logs", u32::MAX - 1, false)
+            .unwrap()
+            .unwrap();
+        assert!(store.job(&key, "logs").unwrap().running);
+        cmd_list(&store, None).unwrap();
+        assert!(!store.job(&key, "logs").unwrap().running);
     }
 
     #[test]
