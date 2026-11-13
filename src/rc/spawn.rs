@@ -27,7 +27,9 @@ impl Daemon {
                 store::spawn_for_thread(&self.state, ts)?.is_some(),
                 store::link_by_thread(&self.state, &channel, ts)?.as_ref(),
             ) {
-                anyhow::bail!("this thread already has a session; start another from a new message or `/nibble`");
+                anyhow::bail!(
+                    "this thread already has a session; start another from a new message"
+                );
             }
         }
         let thread_ts = match &new.origin.thread_ts {

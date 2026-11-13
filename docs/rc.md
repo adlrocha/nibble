@@ -76,7 +76,8 @@ zellij pane (claude | pi | omp, host or sandbox)
 
 1. **Create the Slack app.** At <https://api.slack.com/apps>: *Create New
    App* → *From a manifest* → pick your workspace → paste the output of
-   `nibble rc manifest` (the file is `docs/rc-slack-manifest.yml`) → *Create*.
+   `nibble rc manifest` (the file is `docs/rc-slack-manifest.yml`; with more
+   than one machine, see [below](#more-than-one-machine)) → *Create*.
    Leave *OAuth & Permissions* alone otherwise: no redirect URLs, PKCE or
    token rotation (the daemon needs a token that does not expire).
 2. **Install it.** *Install App* → *Install to Workspace*. Copy the *Bot User
@@ -116,11 +117,33 @@ top bar), and send `/nibble-rc` from any agent running in zellij.
 
 ## More than one machine
 
-Create one Slack app per machine (for example *nibble-laptop* and
-*nibble-desktop*, each from `nibble rc manifest` with a different
-`display_information.name`), and run `nibble rc setup` with that app's
-tokens on each. Two daemons sharing one app's tokens would split Slack's
-events between them at random.
+Create one Slack app per machine, each with its own name and slash command,
+and run `nibble rc setup` with that app's tokens on that machine:
+
+```sh
+nibble rc manifest --name nibble-laptop    # on the laptop
+nibble rc manifest --name nibble-desktop   # on the desktop
+```
+
+`--name` names the app, its bot and its slash command (`/nibble-laptop`,
+`/nibble-desktop`). It has to be up to 32 lowercase letters, digits, `-` or
+`_`. Two things go wrong otherwise:
+
+- **Same slash command.** Slash commands are workspace-wide: if both apps
+  declare `/nibble`, Slack sends it to only one of them, no matter which
+  DM you type it in. The other machine's daemon opens the form, so you see its
+  repos and the session starts there. Use each machine's own command
+  (`/nibble-laptop list`, and so on). A plain message in an app's DM always
+  goes to that app.
+- **Same tokens.** Two daemons sharing one app's tokens would split Slack's
+  events between them at random. Never copy `slack.env` between machines.
+
+To fix an app that already declares `/nibble`: on its page at
+<https://api.slack.com/apps>, open *App Manifest*, change `command: /nibble`
+(and the names) to the machine's own, save, and reinstall if Slack asks. If
+the bot token changes, run `nibble rc setup` again and
+`systemctl --user restart nibble-rc`. The daemon answers to any command
+name, and its replies to a command name the one you typed.
 
 ## Configuration
 

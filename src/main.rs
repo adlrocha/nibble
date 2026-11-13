@@ -832,7 +832,7 @@ fn main() -> Result<()> {
             match action {
                 cli::RcAction::Setup => rc::cmd_setup()?,
                 cli::RcAction::Doctor => rc::cmd_doctor(&db, &cfg)?,
-                cli::RcAction::Manifest => rc::cmd_manifest(),
+                cli::RcAction::Manifest { name } => rc::cmd_manifest(name.as_deref())?,
                 cli::RcAction::Daemon => rc::cmd_daemon(cfg, db_path)?,
                 cli::RcAction::Start { task_id } => {
                     rc::cmd_request(&db, task_id.as_deref(), false)?

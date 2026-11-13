@@ -252,7 +252,12 @@ pub enum RcAction {
     /// Check credentials, Socket Mode, zellij and the daemon
     Doctor,
     /// Print the Slack app manifest to create the app from
-    Manifest,
+    Manifest {
+        /// Name the app, its bot and its slash command (`/<name>`), so each
+        /// machine's app is told apart in Slack, e.g. `nibble-laptop`
+        #[arg(long)]
+        name: Option<String>,
+    },
     /// Run the Slack daemon (normally nibble-rc.service)
     Daemon,
     /// Send a session to Slack (default: this agent's, from AGENT_TASK_ID)

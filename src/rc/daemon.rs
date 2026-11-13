@@ -337,12 +337,12 @@ impl Daemon {
             self.note(
                 channel,
                 thread_ts,
-                "No session here yet. Use *Start session…* above, or `/nibble`.",
+                "No session here yet. Use *Start session…* above, or send a new message.",
             );
             return Ok(());
         };
         if link.closed {
-            self.note(channel, thread_ts, "This session is closed. Start a new one with `/nibble`, or send `/nibble-rc` from the agent again.");
+            self.note(channel, thread_ts, "This session is closed. Start a new one with a new message, or send `/nibble-rc` from the agent again.");
             return Ok(());
         }
         let task = self.db.get_task_by_id(&link.task_id)?;
@@ -487,6 +487,9 @@ impl Daemon {
                 After::Nothing,
             );
         }
+        // Each machine's app can have its own command (`nibble rc manifest
+        // --name`), so replies name the one that was typed.
+        let command = payload["command"].as_str().unwrap_or("/nibble");
         match payload["text"].as_str().unwrap_or_default().trim() {
             "" | "new" => match payload["trigger_id"].as_str() {
                 Some(trigger) => (None, After::OpenForm(trigger.to_string())),
@@ -495,12 +498,15 @@ impl Daemon {
                     After::Nothing,
                 ),
             },
-            "list" => (Some(json!({ "text": self.list_text() })), After::Nothing),
-            _ => (Some(json!({ "text": SLASH_HELP })), After::Nothing),
+            "list" => (
+                Some(json!({ "text": self.list_text(command) })),
+                After::Nothing,
+            ),
+            _ => (Some(json!({ "text": slash_help(command) })), After::Nothing),
         }
     }
 
-    fn list_text(&self) -> String {
+    fn list_text(&self, command: &str) -> String {
         let links = store::links(&self.state).unwrap_or_default();
         let open: Vec<String> = links
             .iter()
@@ -520,8 +526,7 @@ impl Daemon {
             })
             .collect();
         if open.is_empty() {
-            "No sessions in Slack. Send `/nibble-rc` from an agent, or `/nibble` to start one."
-                .to_string()
+            format!("No sessions in Slack. Send `/nibble-rc` from an agent, or `{command}` to start one.")
         } else {
             open.join("\n")
         }
@@ -820,9 +825,13 @@ fn sessions_api_unavailable(code: Option<&str>) -> bool {
     )
 }
 
-const SLASH_HELP: &str =
-    "`/nibble` opens the new-session form · `/nibble list` shows sessions in Slack.\n\
-From a running agent, `/nibble-rc` sends its session here; `/nibble-rc stop` takes it back.";
+/// The reply to an unknown slash-command argument, naming `command` as typed.
+fn slash_help(command: &str) -> String {
+    format!(
+        "`{command}` opens the new-session form · `{command} list` shows sessions in Slack.\n\
+From a running agent, `/nibble-rc` sends its session here; `/nibble-rc stop` takes it back."
+    )
+}
 
 // ── Pure helpers ──────────────────────────────────────────────────────────────
 
@@ -986,6 +995,14 @@ pub(super) fn session_card(link: &Link, topic: Option<&str>) -> SessionCard {
 mod tests {
     use super::super::test_support::task;
     use super::*;
+
+    #[test]
+    fn slash_help_names_the_command_that_was_typed() {
+        let help = slash_help("/nibble-laptop");
+        assert!(help.contains("`/nibble-laptop` opens the new-session form"));
+        assert!(help.contains("`/nibble-laptop list`"));
+        assert!(!help.contains("`/nibble` "));
+    }
 
     #[test]
     fn only_open_sessions_started_from_slack_can_be_ended() {
