@@ -77,6 +77,10 @@ are read every time, with nothing to reload. Commit them to share them.
 
 `stop` and `start` only affect this machine. To turn a job off everywhere,
 set `enabled = false` in its file (`nibble cron edit <job> --disable`).
+These switches, and `expires_at`, are for the schedule: `nibble cron run`
+is a run you asked for, so it runs a disabled, expired or stopped job too.
+It only needs the job approved here, and still skips while a run is going
+(unless `skip_if_running = false`).
 
 ## How a job runs
 
@@ -118,6 +122,13 @@ then runs in that same container by id.
 
 The daemon logs to `$XDG_STATE_HOME/nibble/cron/daemon.log`
 (`~/.local/state/nibble/cron/daemon.log` by default).
+
+The service gets none of your shell's exports. When it has to start a
+repo's sandbox (after a reboot, or `nibble sandbox kill`), that sandbox
+only has the keys the service has, so put any your sandboxes need, such as
+`ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL` or `GITHUB_TOKEN`, in
+`~/.config/nibble/cron.env` (`NAME=value` lines, mode 0600) and run
+`systemctl --user restart nibble-cron`.
 
 ## Approving jobs
 

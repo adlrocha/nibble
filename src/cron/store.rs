@@ -539,7 +539,7 @@ impl CronStore {
         )?;
         let id = self.conn.last_insert_rowid();
         self.conn.execute(
-            "DELETE FROM runs WHERE repo_path = ?1 AND name = ?2
+            "DELETE FROM runs WHERE repo_path = ?1 AND name = ?2 AND status != 'running'
                AND id NOT IN (SELECT id FROM runs WHERE repo_path = ?1 AND name = ?2
                               ORDER BY id DESC LIMIT ?3)",
             params![repo, name, RUNS_KEPT],
@@ -800,14 +800,25 @@ mod tests {
         assert_eq!(r.status, RunStatus::Failed);
         assert!(r.error.unwrap().contains("stopped"));
         assert_eq!(s.run(live).unwrap().unwrap().status, RunStatus::Running);
-        // Only the newest RUNS_KEPT per job survive.
+        // Only the newest RUNS_KEPT finished runs per job survive; one still
+        // going is never pruned, however many started after it.
+        let hung = s.start_run("/r", "c", "C", "schedule", me).unwrap();
+        let done = RunEnd {
+            status: RunStatus::Ok,
+            report: None,
+            session_id: None,
+            cost_usd: None,
+            error: None,
+        };
         for _ in 0..RUNS_KEPT + 5 {
-            s.start_run("/r", "c", "C", "schedule", me).unwrap();
+            let id = s.start_run("/r", "c", "C", "schedule", me).unwrap();
+            s.finish_run(id, &done).unwrap();
         }
         assert_eq!(
             s.runs(Some(("/r", "c")), 1000).unwrap().len() as i64,
-            RUNS_KEPT
+            RUNS_KEPT + 1
         );
+        assert_eq!(s.run(hung).unwrap().unwrap().status, RunStatus::Running);
         assert_eq!(
             s.runs(Some(("/r", "a")), 10).unwrap().len(),
             1,

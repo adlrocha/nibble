@@ -331,9 +331,10 @@ pub fn kill_in_container(container: &str, task_id: &str) {
         .output();
 }
 
-/// One sandbox spawn at a time in this process: two jobs of a repo due
-/// together must not start two sandboxes.
-static SPAWN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// One sandbox spawn at a time on this machine (the daemon's threads and
+/// any `nibble cron run`): two jobs of a repo due together must not start
+/// two sandboxes. A file lock in cron's private state dir.
+const SPAWN_LOCK: &str = "spawn";
 
 fn container_of(task: &Task) -> Option<&str> {
     task.container_name
@@ -355,7 +356,7 @@ fn ensure_sandbox(db: &Database, repo: &Path) -> Result<Task> {
     if let Some(t) = healthy(db)? {
         return can_run_claude(t);
     }
-    let _one = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+    let _one = crate::lock::lock_in(&super::store::state_dir(), SPAWN_LOCK)?;
     // Another job may have started it while this one waited.
     if let Some(t) = healthy(db)? {
         return can_run_claude(t);
