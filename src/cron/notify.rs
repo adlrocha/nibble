@@ -135,12 +135,26 @@ pub fn after_run(store: &CronStore, def: &JobDef, r: &RunRecord) -> Result<bool>
     if def.notify == Notify::None || !crate::rc::reports::configured() {
         return Ok(false);
     }
-    let new = new_findings(store, r, Utc::now())?;
+    deliver(store, r, Utc::now(), crate::rc::reports::queue)
+}
+
+/// Record the run's findings, and queue a card for the new ones with
+/// `queue`. When queueing fails, what was just stamped as reported is
+/// unstamped, so the next run reports it instead of waiting out a day.
+fn deliver(
+    store: &CronStore,
+    r: &RunRecord,
+    now: DateTime<Utc>,
+    queue: impl FnOnce(&crate::rc::reports::ReportCard) -> Result<bool>,
+) -> Result<bool> {
+    let new = new_findings(store, r, now)?;
     if new.is_empty() {
         return Ok(false);
     }
-    let card = crate::rc::reports::ReportCard::new(r, findings_of(r), new);
-    crate::rc::reports::queue(&card)
+    let card = crate::rc::reports::ReportCard::new(r, findings_of(r), new.clone());
+    queue(&card).inspect_err(|_| {
+        let _ = store.unstamp(&r.repo_path, &r.name, &new);
+    })
 }
 
 #[cfg(test)]
@@ -270,6 +284,19 @@ mod tests {
         );
         let card = findings_of(&vague);
         assert_eq!(card[0].details, "s", "the summary says what was wrong");
+    }
+
+    #[test]
+    fn a_card_that_could_not_be_queued_is_reported_next_time() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let s = CronStore::open_in(tmp.path()).unwrap();
+        let t = Utc::now();
+        let bad = record(&s, RunStatus::Warn, &[("a", Severity::Warn)]);
+        let failed = deliver(&s, &bad, t, |_| anyhow::bail!("rc.db is read-only"));
+        assert!(failed.is_err());
+        let queued = deliver(&s, &bad, t, |c| Ok(c.new == ["a"])).unwrap();
+        assert!(queued, "reported again, not stamped by the failed queue");
+        assert!(!deliver(&s, &bad, t, |_| Ok(true)).unwrap(), "then quiet");
     }
 
     #[test]

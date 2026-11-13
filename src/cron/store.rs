@@ -181,8 +181,9 @@ pub fn alive(pid: u32) -> bool {
     rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
-/// How a run ended (or that it has not).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How a run ended (or that it has not). Serialized as [`Self::as_str`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum RunStatus {
     Running,
     /// The report found nothing wrong.
@@ -191,6 +192,7 @@ pub enum RunStatus {
     Critical,
     /// The run broke before reporting (no sandbox, bad output, ...).
     Failed,
+    #[serde(rename = "timeout")]
     TimedOut,
 }
 
@@ -690,6 +692,8 @@ impl CronStore {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT (repo_path, name, fingerprint) DO UPDATE SET
                severity = ?4, notified_at = ?5, last_seen = ?7,
+               -- the later snooze end wins: a run's stale read must not
+               -- shorten a snooze set while it ran.
                snoozed_until = NULLIF(MAX(COALESCE(snoozed_until, 0), COALESCE(?6, 0)), 0)",
             params![
                 repo,
@@ -741,6 +745,18 @@ impl CronStore {
         let out = f()?;
         tx.commit()?;
         Ok(out)
+    }
+
+    /// Forget that these findings were reported (their card never made it
+    /// to the queue), so the next run reports them.
+    pub fn unstamp(&self, repo: &str, name: &str, fps: &[String]) -> Result<()> {
+        self.conn.execute(
+            "UPDATE findings SET notified_at = NULL
+             WHERE repo_path = ?1 AND name = ?2
+               AND fingerprint IN (SELECT value FROM json_each(?3))",
+            params![repo, name, serde_json::to_string(fps)?],
+        )?;
+        Ok(())
     }
 
     /// Stop reporting these findings until `until`.

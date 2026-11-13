@@ -148,8 +148,9 @@ to your DM with the Slack app: the job, the summary, up to eight findings
   through the repo's delivery flow (the `nibble-sdlc` skill where
   `.nibble/sdlc.toml` exists). It stops at the PR; merging stays yours.
   The sandbox has no `~/.config/gh` or SSH keys: it can push and open the
-  PR only with a `GITHUB_TOKEN` it got when it was created (from your shell,
-  or from `cron.env` when the service started it).
+  PR only with a `GITHUB_TOKEN` in the environment of whatever created it,
+  your shell, `nibble-rc.service` or `nibble-cron.service` (`cron.env`),
+  so set it wherever your sandboxes get started.
 - **Snooze 7d** silences the card's findings on this machine for a week.
 
 Both sessions run like any other started from Slack: in a new tab of the
