@@ -14,7 +14,7 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
@@ -22,6 +22,7 @@ use super::daemon::{log, Daemon};
 use super::modal::{NewSession, Origin};
 use super::slack;
 use super::store::{self, Location, SpawnAgent, StateDb};
+pub(crate) use super::store::{ReportCard, ReportState};
 use crate::cron::run::Finding;
 use crate::cron::store::{RunRecord, RunStatus};
 
@@ -52,43 +53,12 @@ const PROMPT_MAX: usize = 30_000;
 /// Longest a job title may be in a remedy prompt.
 const PROMPT_LABEL_MAX: usize = 200;
 
+/// Cards posted in one poll pass at most; the rest wait for the next.
+const POSTS_PER_PASS: usize = 3;
+
 pub(crate) const INVESTIGATE_ACTION: &str = "cron_investigate";
 pub(crate) const FIX_ACTION: &str = "cron_fix";
 pub(crate) const SNOOZE_ACTION: &str = "cron_snooze";
-
-/// What has been done from a card.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ReportState {
-    Open,
-    Investigating,
-    Fixing,
-    Snoozed,
-}
-
-/// One run's report, as queued, posted and acted on.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) struct ReportCard {
-    pub run_id: i64,
-    pub repo: String,
-    pub job: String,
-    pub label: String,
-    pub status: RunStatus,
-    pub summary: String,
-    pub findings: Vec<Finding>,
-    /// Fingerprints reported for the first time (or again) by this card.
-    pub new: Vec<String>,
-    pub created_at: DateTime<Utc>,
-    /// Where it was posted: (channel, ts).
-    pub posted: Option<(String, String)>,
-    pub state: ReportState,
-    /// Failed posting attempts; the card is given up after [`MAX_ATTEMPTS`].
-    #[serde(default)]
-    pub attempts: u32,
-    /// No posting attempt before this time (after a failed one).
-    #[serde(default)]
-    pub retry_at: Option<DateTime<Utc>>,
-}
 
 impl ReportCard {
     pub(crate) fn new(r: &RunRecord, findings: Vec<Finding>, new: Vec<String>) -> Self {
@@ -139,18 +109,13 @@ pub(crate) fn configured() -> bool {
     super::secrets::load().is_ok()
 }
 
-/// Queue a card for the daemon to post (opening its private state).
-/// Nothing is queued while `nibble rc` is not set up; false then.
-pub(crate) fn queue(card: &ReportCard) -> Result<bool> {
-    // What the daemon itself needs: the file or its env overrides.
-    if super::secrets::load().is_err() {
-        return Ok(false);
-    }
-    queue_in(&store::open_state()?, card)?;
-    Ok(true)
+/// Queue a card for the daemon to post (opening its private state). The
+/// caller checks [`configured`] first, before stamping what it reports.
+pub(crate) fn queue(card: &ReportCard) -> Result<()> {
+    queue_in(&store::open_state()?, card)
 }
 
-pub(crate) fn queue_in(state: &StateDb, card: &ReportCard) -> Result<()> {
+fn queue_in(state: &StateDb, card: &ReportCard) -> Result<()> {
     store::put_report(state, card)?;
     // Keep the queue bounded.
     expire(state, Utc::now())
@@ -173,13 +138,13 @@ fn put(state: &StateDb, card: &ReportCard) -> Result<()> {
     store::put_report(state, card)
 }
 
-pub(crate) fn card(state: &StateDb, run_id: i64) -> Result<Option<ReportCard>> {
+fn card(state: &StateDb, run_id: i64) -> Result<Option<ReportCard>> {
     store::report(state, run_id)
 }
 
 /// Cards to post now, oldest first: not posted, not given up, not
 /// expired, and not waiting out a retry delay.
-pub(crate) fn pending(state: &StateDb, now: DateTime<Utc>) -> Result<Vec<ReportCard>> {
+fn pending(state: &StateDb, now: DateTime<Utc>) -> Result<Vec<ReportCard>> {
     Ok(store::reports(state)?
         .into_iter()
         .filter(|c| {
@@ -226,7 +191,7 @@ fn mrkdwn(s: &str, max: usize) -> String {
 
 /// The fallback text: notifications and screen readers show it, and Slack
 /// parses it, so it is escaped like the blocks.
-pub(crate) fn card_text(c: &ReportCard) -> String {
+fn card_text(c: &ReportCard) -> String {
     format!(
         "{}: {}/{} — {}",
         c.status.as_str(),
@@ -237,7 +202,7 @@ pub(crate) fn card_text(c: &ReportCard) -> String {
 }
 
 /// The card's blocks.
-pub(crate) fn card_blocks(c: &ReportCard) -> Value {
+fn card_blocks(c: &ReportCard) -> Value {
     let mut blocks = vec![
         json!({"type": "header", "text": {"type": "plain_text", "emoji": true,
             "text": clip(&format!("{} {} · {}", c.icon(), c.repo_name(), c.label), 140)}}),
@@ -310,13 +275,13 @@ fn button(text: &str, action: &str, run_id: i64, style: Option<&str>) -> Value {
 
 /// What a button asks the new session to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Remedy {
+enum Remedy {
     Investigate,
     Fix,
 }
 
 /// The first message of a session started from a card.
-pub(crate) fn remedy_prompt(c: &ReportCard, remedy: Remedy) -> String {
+fn remedy_prompt(c: &ReportCard, remedy: Remedy) -> String {
     let field = |s: &str| clip(s, PROMPT_FIELD_MAX);
     let mut report = format!(
         "Status: {}\nSummary: {}\n",
@@ -371,31 +336,46 @@ pub(crate) fn remedy_prompt(c: &ReportCard, remedy: Remedy) -> String {
     )
 }
 
+/// Post up to [`POSTS_PER_PASS`] due cards with `post`, stopping at the
+/// first failure (counted on that card). Each outcome is saved.
+fn post_some(
+    state: &StateDb,
+    now: DateTime<Utc>,
+    mut post: impl FnMut(&ReportCard) -> Result<(String, String)>,
+) -> Result<()> {
+    for mut c in pending(state, now)?.into_iter().take(POSTS_PER_PASS) {
+        match post(&c) {
+            Ok(at) => c.posted = Some(at),
+            Err(e) => {
+                failed_attempt(&mut c, now);
+                log(&format!(
+                    "could not post the report of run {} (attempt {}/{MAX_ATTEMPTS}): {e:#}",
+                    c.run_id, c.attempts
+                ));
+                put(state, &c)?;
+                break;
+            }
+        }
+        put(state, &c)?;
+    }
+    Ok(())
+}
+
 impl Daemon {
-    /// Post queued cards to your DM.
-    /// A card that fails does not hold up the others, and is given up
-    /// after a few attempts.
+    /// Post queued cards to your DM, a few per pass: a post can take up to
+    /// 30 s (timeouts, `Retry-After`), and the same pass advances spawns and
+    /// relays. The first failure ends the pass, so a backlog does not spend
+    /// its attempts on one outage or on our own burst; a failed card is
+    /// given up after a few attempts.
     pub(super) fn post_reports(&mut self) -> Result<()> {
         let now = Utc::now();
         // Expired cards go here too, so each pass reads a bounded history.
         expire(&self.state, now)?;
-        for mut c in pending(&self.state, now)? {
-            match self
-                .bot
-                .post(&self.dm, None, &card_text(&c), &card_blocks(&c))
-            {
-                Ok(ts) => c.posted = Some((self.dm.clone(), ts)),
-                Err(e) => {
-                    failed_attempt(&mut c, now);
-                    log(&format!(
-                        "could not post the report of run {} (attempt {}/{MAX_ATTEMPTS}): {e:#}",
-                        c.run_id, c.attempts
-                    ));
-                }
-            }
-            put(&self.state, &c)?;
-        }
-        Ok(())
+        let (bot, dm) = (&self.bot, self.dm.clone());
+        post_some(&self.state, now, |c| {
+            bot.post(&dm, None, &card_text(c), &card_blocks(c))
+                .map(|ts| (dm.clone(), ts))
+        })
     }
 
     /// A click on a card's button.
@@ -669,6 +649,36 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn a_pass_posts_a_few_cards_and_stops_at_a_failure() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = store::open_state_in(tmp.path()).unwrap();
+        for id in 1..=5 {
+            let mut c = card_of(1, ReportState::Open);
+            c.run_id = id;
+            put(&state, &c).unwrap();
+        }
+        let now = Utc::now();
+        let mut tried = 0;
+        post_some(&state, now, |c| {
+            tried += 1;
+            Ok(("D".into(), c.run_id.to_string()))
+        })
+        .unwrap();
+        assert_eq!(tried, POSTS_PER_PASS);
+        assert_eq!(pending(&state, now).unwrap().len(), 5 - POSTS_PER_PASS);
+        let mut tried = 0;
+        post_some(&state, now, |_| {
+            tried += 1;
+            anyhow::bail!("ratelimited")
+        })
+        .unwrap();
+        assert_eq!(tried, 1, "the first failure ends the pass");
+        let left = pending(&state, now).unwrap();
+        assert_eq!(left.len(), 1, "the failed card waits out its retry");
+        assert_eq!(left[0].attempts, 0, "the one after it spent nothing");
     }
 
     #[test]

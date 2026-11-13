@@ -33,40 +33,43 @@ fn itemized(r: &RunRecord) -> bool {
 }
 
 /// The problems a run stands for: its findings, or the run itself when it
-/// failed or reported a problem without listing any.
+/// failed or reported a problem without listing any (`run:<status>`).
 fn findings_of(r: &RunRecord) -> Vec<Finding> {
-    if !itemized(r) && matches!(r.status, RunStatus::Warn | RunStatus::Critical) {
-        let summary = r.report.as_ref().map(|rep| rep.summary.clone());
-        return vec![Finding {
-            fingerprint: format!("run:{}", r.status.as_str()),
-            severity: if r.status == RunStatus::Critical {
+    if itemized(r) {
+        return r
+            .report
+            .as_ref()
+            .map(|rep| rep.findings.clone())
+            .unwrap_or_default();
+    }
+    let (severity, title, details) = match r.status {
+        RunStatus::TimedOut => (
+            Severity::Warn,
+            "The job timed out".to_string(),
+            r.error.clone(),
+        ),
+        RunStatus::Critical | RunStatus::Warn => (
+            if r.status == RunStatus::Critical {
                 Severity::Critical
             } else {
                 Severity::Warn
             },
-            title: format!("The job reported {} without findings", r.status.as_str()),
-            details: summary.unwrap_or_default(),
-            suggested_action: format!("See `nibble cron show {}`.", r.id),
-        }];
-    }
-    match r.status {
-        RunStatus::Failed | RunStatus::TimedOut => vec![Finding {
-            fingerprint: format!("run:{}", r.status.as_str()),
-            severity: Severity::Warn,
-            title: if r.status == RunStatus::TimedOut {
-                "The job timed out".to_string()
-            } else {
-                "The job failed".to_string()
-            },
-            details: r.error.clone().unwrap_or_default(),
-            suggested_action: format!("See `nibble cron show {}`.", r.id),
-        }],
-        _ => r
-            .report
-            .as_ref()
-            .map(|rep| rep.findings.clone())
-            .unwrap_or_default(),
-    }
+            format!("The job reported {} without findings", r.status.as_str()),
+            r.report.as_ref().map(|rep| rep.summary.clone()),
+        ),
+        _ => (
+            Severity::Warn,
+            "The job failed".to_string(),
+            r.error.clone(),
+        ),
+    };
+    vec![Finding {
+        fingerprint: format!("run:{}", r.status.as_str()),
+        severity,
+        title,
+        details: details.unwrap_or_default(),
+        suggested_action: format!("See `nibble cron show {}`.", r.id),
+    }]
 }
 
 /// Record what the run found and return the fingerprints to report now.
@@ -98,12 +101,15 @@ fn decide(store: &CronStore, r: &RunRecord, now: DateTime<Utc>) -> Result<Vec<St
         if report {
             new.push(f.fingerprint.clone());
         }
+        // A run that started before the row was last written is older news:
+        // it may not lower the severity a newer run recorded.
+        let newer = old.as_ref().filter(|o| o.last_seen > r.started_at);
         store.put_finding(
             &r.repo_path,
             &r.name,
             &f.fingerprint,
             &FindingState {
-                severity: f.severity,
+                severity: newer.map_or(f.severity, |o| o.severity.max(f.severity)),
                 notified_at: if report {
                     Some(now)
                 } else {
@@ -145,16 +151,18 @@ fn deliver(
     store: &CronStore,
     r: &RunRecord,
     now: DateTime<Utc>,
-    queue: impl FnOnce(&crate::rc::reports::ReportCard) -> Result<bool>,
+    queue: impl FnOnce(&crate::rc::reports::ReportCard) -> Result<()>,
 ) -> Result<bool> {
     let new = new_findings(store, r, now)?;
     if new.is_empty() {
         return Ok(false);
     }
     let card = crate::rc::reports::ReportCard::new(r, findings_of(r), new.clone());
-    queue(&card).inspect_err(|_| {
-        let _ = store.unstamp(&r.repo_path, &r.name, &new);
-    })
+    queue(&card)
+        .inspect_err(|_| {
+            let _ = store.unstamp(&r.repo_path, &r.name, &new);
+        })
+        .map(|()| true)
 }
 
 #[cfg(test)]
@@ -294,9 +302,36 @@ mod tests {
         let bad = record(&s, RunStatus::Warn, &[("a", Severity::Warn)]);
         let failed = deliver(&s, &bad, t, |_| anyhow::bail!("rc.db is read-only"));
         assert!(failed.is_err());
-        let queued = deliver(&s, &bad, t, |c| Ok(c.new == ["a"])).unwrap();
+        let mut seen = vec![];
+        let queued = deliver(&s, &bad, t, |c| {
+            seen = c.new.clone();
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(seen, ["a"]);
         assert!(queued, "reported again, not stamped by the failed queue");
-        assert!(!deliver(&s, &bad, t, |_| Ok(true)).unwrap(), "then quiet");
+        assert!(!deliver(&s, &bad, t, |_| Ok(())).unwrap(), "then quiet");
+    }
+
+    #[test]
+    fn an_older_run_does_not_lower_a_newer_severity() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let s = CronStore::open_in(tmp.path()).unwrap();
+        // A (warn) starts first; B (critical) starts later and ends first.
+        let a = record(&s, RunStatus::Warn, &[("x", Severity::Warn)]);
+        let b = record(&s, RunStatus::Critical, &[("x", Severity::Critical)]);
+        let t = b.started_at + chrono::Duration::seconds(5);
+        assert_eq!(new_findings(&s, &b, t).unwrap(), ["x"]);
+        assert!(new_findings(&s, &a, t).unwrap().is_empty());
+        assert_eq!(
+            s.finding("/r", "j", "x").unwrap().unwrap().severity,
+            Severity::Critical
+        );
+        let c = record(&s, RunStatus::Critical, &[("x", Severity::Critical)]);
+        assert!(
+            new_findings(&s, &c, t).unwrap().is_empty(),
+            "no second escalation card"
+        );
     }
 
     #[test]
