@@ -391,11 +391,13 @@ fn approve_pending(store: &CronStore, repo: &Path, only: Option<&str>, yes: bool
         if a == Approval::Approved {
             continue;
         }
-        let text = shown(&super::format_job(def));
+        // Approved as the raw definition; only the display is escaped.
+        let text = super::format_job(def);
         println!(
-            "\n── {} ({}) ──\n{text}",
+            "\n── {} ({}) ──\n{}",
             super::job_path(repo, &def.name).display(),
-            if a == Approval::New { "new" } else { "changed" }
+            if a == Approval::New { "new" } else { "changed" },
+            shown(&text)
         );
         if !def.env.is_empty() {
             println!("It gets these secrets: {}", def.env.join(", "));
@@ -1121,6 +1123,22 @@ mod tests {
         assert!(!t.contains('\u{1b}'), "{t}");
         assert!(
             t.contains("\\u{1b}[2J") && t.contains("env = [\"X\"]\n") && t.contains("ok\tthen")
+        );
+    }
+
+    #[test]
+    fn a_prompt_with_control_characters_stays_approved() {
+        let (_tmp, store, repo) = setup();
+        std::fs::write(
+            super::super::job_path(&repo, "logs"),
+            "schedule = \"0 9 * * *\"\n## Prompt\ncolour \u{1b}[31mred",
+        )
+        .unwrap();
+        assert_eq!(approve_pending(&store, &repo, None, true).unwrap(), 1);
+        let (_, def) = resolve_job(&store, "logs").unwrap();
+        assert_eq!(
+            approval(&def, &store.job(&repo_str(&repo), "logs").unwrap()),
+            Approval::Approved
         );
     }
 
