@@ -52,9 +52,50 @@ pub(crate) fn cmd_daemon(cfg: RcConfig, db_path: std::path::PathBuf) -> Result<(
     daemon::run(cfg, db_path)
 }
 
-/// Print the Slack app manifest.
-pub(crate) fn cmd_manifest() {
-    print!("{MANIFEST}");
+/// Print the Slack app manifest (`nibble rc manifest [--name <name>]`).
+pub(crate) fn cmd_manifest(name: Option<&str>) -> Result<()> {
+    print!("{}", manifest(name)?);
+    Ok(())
+}
+
+/// The manifest, with the app, bot and slash command renamed to `name`
+/// when given. Slash commands are workspace-wide, so two apps that both
+/// declare `/nibble` collide: Slack sends it to only one of them.
+fn manifest(name: Option<&str>) -> Result<String> {
+    let Some(name) = name else {
+        return Ok(MANIFEST.to_string());
+    };
+    // Slack: a command, its leading `/` included, is at most 32 characters,
+    // lowercase, without spaces.
+    let valid = !name.is_empty()
+        && name.len() < 32
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
+    if !valid {
+        bail!("invalid --name '{name}': use up to 31 lowercase letters, digits, '-' or '_', since it becomes the slash command");
+    }
+    // Each anchor must match exactly once, so a manifest edit that moves
+    // one fails loudly instead of silently leaving a field unrenamed.
+    [
+        ("\n  name: nibble\n", format!("\n  name: \"{name}\"\n")),
+        (
+            "display_name: nibble\n",
+            format!("display_name: \"{name}\"\n"),
+        ),
+        ("command: /nibble\n", format!("command: \"/{name}\"\n")),
+        ("new one with /nibble.", format!("new one with /{name}.")),
+    ]
+    .iter()
+    .try_fold(MANIFEST.to_string(), |m, (from, to)| rename(&m, from, to))
+}
+
+/// `text` with its one occurrence of `from` replaced by `to`.
+fn rename(text: &str, from: &str, to: &str) -> Result<String> {
+    match text.matches(from).count() {
+        1 => Ok(text.replacen(from, to, 1)),
+        n => bail!("manifest template has {n} matches for {from:?}, expected 1"),
+    }
 }
 
 /// The task a command targets: the explicit id, else the agent's own
@@ -539,6 +580,56 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn manifest_without_name_is_the_shipped_file() {
+        assert_eq!(manifest(None).unwrap(), MANIFEST);
+    }
+
+    #[test]
+    fn manifest_name_renames_app_bot_and_command() {
+        let m = manifest(Some("nibble-lily")).unwrap();
+        assert!(m.contains("\n  name: \"nibble-lily\"\n"));
+        assert!(m.contains("display_name: \"nibble-lily\"\n"));
+        assert!(m.contains("- command: \"/nibble-lily\"\n"));
+        assert!(m.contains("new one with /nibble-lily."));
+        for old in [
+            "\n  name: nibble\n",
+            "display_name: nibble\n",
+            "command: /nibble\n",
+            "with /nibble.",
+        ] {
+            assert!(!m.contains(old), "{old:?} left in");
+        }
+        // /nibble-rc is typed in the agent, not a Slack command: untouched.
+        assert!(m.contains("Send /nibble-rc from"));
+    }
+
+    #[test]
+    fn manifest_rejects_names_slack_would_refuse() {
+        for bad in ["", "Nibble", "my nibble", "/nibble", &"a".repeat(32)] {
+            assert!(manifest(Some(bad)).is_err(), "{bad:?} accepted");
+        }
+        // 31 characters plus the leading `/` is Slack's 32.
+        assert!(manifest(Some(&"a".repeat(31))).is_ok());
+    }
+
+    #[test]
+    fn rename_requires_exactly_one_match() {
+        assert_eq!(rename("a b", "b", "c").unwrap(), "a c");
+        assert!(rename("a b", "x", "c").is_err());
+        assert!(rename("b b", "b", "c").is_err());
+    }
+
+    #[test]
+    fn manifest_quotes_names_yaml_would_read_as_other_types() {
+        // Unquoted, `name: true` or `name: 2024` is a bool or a number.
+        for name in ["true", "null", "2024"] {
+            let m = manifest(Some(name)).unwrap();
+            assert!(m.contains(&format!("\n  name: \"{name}\"\n")), "{name}");
+            assert!(m.contains(&format!("display_name: \"{name}\"\n")), "{name}");
+        }
+    }
 
     #[test]
     fn parses_nibble_rc_invocations() {

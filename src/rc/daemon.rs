@@ -351,12 +351,12 @@ impl Daemon {
             self.note(
                 channel,
                 thread_ts,
-                "No session here yet. Use *Start session…* above, or `/nibble`.",
+                "No session here yet. Use *Start session…* above, or send a new message.",
             );
             return Ok(());
         };
         if link.closed {
-            self.note(channel, thread_ts, "This session is closed. Start a new one with `/nibble`, or send `/nibble-rc` from the agent again.");
+            self.note(channel, thread_ts, "This session is closed. Start a new one with a new message, or send `/nibble-rc` from the agent again.");
             return Ok(());
         }
         let task = self.db.get_task_by_id(&link.task_id)?;
@@ -501,6 +501,7 @@ impl Daemon {
                 After::Nothing,
             );
         }
+        let command = slash_command(payload);
         match payload["text"].as_str().unwrap_or_default().trim() {
             "" | "new" => match payload["trigger_id"].as_str() {
                 Some(trigger) => (None, After::OpenForm(trigger.to_string())),
@@ -509,12 +510,15 @@ impl Daemon {
                     After::Nothing,
                 ),
             },
-            "list" => (Some(json!({ "text": self.list_text() })), After::Nothing),
-            _ => (Some(json!({ "text": SLASH_HELP })), After::Nothing),
+            "list" => (
+                Some(json!({ "text": self.list_text(command) })),
+                After::Nothing,
+            ),
+            _ => (Some(json!({ "text": slash_help(command) })), After::Nothing),
         }
     }
 
-    fn list_text(&self) -> String {
+    fn list_text(&self, command: &str) -> String {
         let links = store::links(&self.state).unwrap_or_default();
         let open: Vec<String> = links
             .iter()
@@ -534,8 +538,7 @@ impl Daemon {
             })
             .collect();
         if open.is_empty() {
-            "No sessions in Slack. Send `/nibble-rc` from an agent, or `/nibble` to start one."
-                .to_string()
+            no_sessions_text(command)
         } else {
             open.join("\n")
         }
@@ -908,9 +911,25 @@ pub(super) fn sessions_api_unavailable(code: Option<&str>) -> bool {
     )
 }
 
-const SLASH_HELP: &str =
-    "`/nibble` opens the new-session form · `/nibble list` shows sessions in Slack.\n\
-From a running agent, `/nibble-rc` sends its session here; `/nibble-rc stop` takes it back.";
+/// The slash command a payload was sent with. Each machine's app can have
+/// its own (`nibble rc manifest --name`), so replies name the one typed;
+/// `/nibble`, the manifest's default, if Slack left it out.
+fn slash_command(payload: &Value) -> &str {
+    payload["command"].as_str().unwrap_or("/nibble")
+}
+
+/// The `list` reply when no session is in Slack, naming `command` as typed.
+fn no_sessions_text(command: &str) -> String {
+    format!("No sessions in Slack. Send `/nibble-rc` from an agent, or `{command}` to start one.")
+}
+
+/// The reply to an unknown slash-command argument, naming `command` as typed.
+fn slash_help(command: &str) -> String {
+    format!(
+        "`{command}` opens the new-session form · `{command} list` shows sessions in Slack.\n\
+From a running agent, `/nibble-rc` sends its session here; `/nibble-rc stop` takes it back."
+    )
+}
 
 // ── Pure helpers ──────────────────────────────────────────────────────────────
 
@@ -1145,6 +1164,24 @@ mod tests {
             .unwrap();
         release.send(()).unwrap();
         worker.join().unwrap();
+    }
+
+    #[test]
+    fn slash_help_names_the_command_that_was_typed() {
+        let help = slash_help("/nibble-laptop");
+        assert!(help.contains("`/nibble-laptop` opens the new-session form"));
+        assert!(help.contains("`/nibble-laptop list`"));
+        assert!(!help.contains("`/nibble` "));
+    }
+
+    #[test]
+    fn replies_use_the_payload_command_or_the_default() {
+        let renamed = json!({ "command": "/nibble-laptop", "text": "list" });
+        assert_eq!(slash_command(&renamed), "/nibble-laptop");
+        assert!(no_sessions_text(slash_command(&renamed)).contains("`/nibble-laptop` to start one"));
+        assert!(slash_help(slash_command(&renamed)).contains("`/nibble-laptop list`"));
+        assert_eq!(slash_command(&json!({ "text": "list" })), "/nibble");
+        assert_eq!(slash_command(&json!({ "command": 7 })), "/nibble");
     }
 
     #[test]
