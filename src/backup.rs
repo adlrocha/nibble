@@ -337,6 +337,8 @@ pub fn import_backup(zip_path: &Path) -> Result<()> {
             None => continue, // skip paths with `..` etc.
         };
 
+        let is_dir = file.is_dir();
+
         // Skip the manifest itself.
         if outpath.file_name() == Some(std::ffi::OsStr::new(MANIFEST_NAME)) {
             continue;
@@ -346,13 +348,13 @@ pub fn import_backup(zip_path: &Path) -> Result<()> {
             // Strip the leading ".nibble/" prefix so we extract into ~/.nibble/ directly.
             target.join(rel)
         } else {
-            if !file.name().ends_with('/') {
+            if !is_dir {
                 session_files += 1;
             }
             home.join(&outpath)
         };
 
-        if file.name().ends_with('/') {
+        if is_dir {
             fs::create_dir_all(&dest_path)?;
         } else {
             if let Some(parent) = dest_path.parent() {
@@ -382,4 +384,39 @@ pub fn import_backup(zip_path: &Path) -> Result<()> {
     }
     println!("Run `./install.sh` to reinstall wrappers, hooks and sandbox images if needed.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Cursor, Write};
+
+    /// Restore tells directories from files with `ZipFile::is_dir`, which must
+    /// agree with how the backup writes them: `add_directory` for folders and
+    /// `start_file` for files.
+    #[test]
+    fn directory_entries_are_told_apart_from_files() {
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        writer.add_directory(".nibble/logs/", options).unwrap();
+        writer.start_file(".nibble/logs/a.log", options).unwrap();
+        writer.write_all(b"hello").unwrap();
+        let bytes = writer.finish().unwrap().into_inner();
+
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let kinds: Vec<(String, bool)> = (0..archive.len())
+            .map(|i| {
+                let entry = archive.by_index(i).unwrap();
+                let path = entry.enclosed_name().unwrap();
+                (path.to_string_lossy().into_owned(), entry.is_dir())
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                (".nibble/logs".to_string(), true),
+                (".nibble/logs/a.log".to_string(), false)
+            ]
+        );
+    }
 }
