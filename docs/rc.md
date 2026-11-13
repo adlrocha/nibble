@@ -146,6 +146,24 @@ directory can be typed in.
 
 - **`nibble rc doctor`** first.
 - Daemon log: `~/.nibble/logs/rc.log`.
+- Normal relay messages, reactions, and status/card updates are persisted in
+  the private `rc.db` and sent by a separate delivery worker. Output-heavy
+  turns and Slack rate-limit waits do not block socket reads. Transient HTTP
+  or network failures retry with backoff (up to 64 seconds, or longer when
+  Slack specifies `Retry-After`); pending deliveries survive daemon restarts.
+- Delivery is **at least once**, not exactly once: if Slack accepts a post but
+  its response is lost, or the daemon exits before saving the acknowledgement,
+  a retry can duplicate that post. Each long-reply chunk is tracked separately,
+  so confirmed chunks are not resent. Permanent failures are logged and kept
+  as failed `rc:delivery:*` records in the private state database; they do not
+  retry indefinitely or prevent later messages from being delivered.
+- This is not offline command replay: messages typed into agent panes are not
+  automatically retried, and the transcript reader still discovers only the
+  current turn. Several terminal turns completed while the daemon is stopped
+  may not all be recovered. Linking a session and opening forms still require
+  immediate Slack responses; retry `/nibble-rc` or the form if either fails.
+- The host must remain awake for remote control. Reconnection resumes when it
+  wakes and regains connectivity; it cannot execute commands while asleep.
 - *"the nibble rc daemon is not running"*: `systemctl --user status nibble-rc`.
 - *"The agent is no longer running in its pane"*: the agent exited or its
   pane was closed, so your message was not typed (it would have run in the

@@ -46,9 +46,44 @@ impl Daemon {
                 transcript::Turn::default()
             }
         });
-        // Record the new state (the reply included) before acting on it: a
-        // post that fails or times out after Slack delivered it must not be
-        // retried on the next poll and appear twice.
+        let mut deliveries = Vec::new();
+        for effect in &step.effects {
+            match effect {
+                Effect::Status(s) => {
+                    if self.sessions_api {
+                        deliveries.push(Self::status_delivery(&link.channel, &link.thread_ts, *s));
+                    }
+                }
+                Effect::Blocked => {
+                    let reason = task.attention_reason.as_deref().unwrap_or("Needs input");
+                    let text = format!(":raised_hand: *{}*. Reply here to answer (a number picks a menu option), or answer at the terminal.", slack::escape(reason));
+                    deliveries.push(Self::message(
+                        &link.channel,
+                        Some(&link.thread_ts),
+                        &text,
+                        &slack::note_blocks(&text),
+                    ));
+                }
+                Effect::Progress(text) => {
+                    deliveries.extend(Self::reply_deliveries(&link, &text.text, true))
+                }
+                Effect::Reply(text) => {
+                    deliveries.extend(Self::reply_deliveries(&link, &text.text, false))
+                }
+                Effect::NoReply => {
+                    let text = "The turn ended without a text reply (check the pane for details).";
+                    deliveries.push(Self::message(
+                        &link.channel,
+                        Some(&link.thread_ts),
+                        text,
+                        &slack::note_blocks(text),
+                    ));
+                }
+                Effect::Close => return self.close_link(&link.task_id, "The agent exited."),
+            }
+        }
+        // Discovery advances only in the same transaction that retains every
+        // outbound effect. Delivery acknowledgements are tracked separately.
         if step.changed(&link) {
             link.watch = step.watch;
             link.idle_checks = step.idle_checks;
@@ -58,58 +93,13 @@ impl Daemon {
             link.blocked_reason = step.blocked_reason.clone();
             // Re-read before writing: a reply may have closed the link meanwhile.
             if store::link(&self.state, &link.task_id)?.is_some_and(|l| !l.closed) {
-                store::put_link(&self.state, &link)?;
+                store::save_relay(&self.state, &link, &deliveries)?;
+                self.wake_delivery();
             }
         }
         // Only once the state is saved: a failed save reads the turn again.
         if let Some(len) = len {
             self.transcript_lens.insert(task.task_id.clone(), len);
-        }
-        for effect in &step.effects {
-            match effect {
-                Effect::Status(s) => self.session_status(&link.channel, &link.thread_ts, *s),
-                Effect::Blocked => {
-                    let reason = task.attention_reason.as_deref().unwrap_or("Needs input");
-                    self.note(
-                        &link.channel,
-                        &link.thread_ts,
-                        &format!(
-                            ":raised_hand: *{}*. Reply here to answer (a number picks a menu option), or answer at the terminal.",
-                            slack::escape(reason)
-                        ),
-                    );
-                }
-                Effect::Progress(text) => {
-                    if let Err(e) = self.post_progress(&link, &text.text) {
-                        self.note(
-                            &link.channel,
-                            &link.thread_ts,
-                            &format!(
-                                ":warning: Could not post a progress note ({e:#}); it is in the pane."
-                            ),
-                        );
-                    }
-                }
-                Effect::Reply(reply) => {
-                    if let Err(e) = self.post_reply(&link, &reply.text) {
-                        self.note(
-                            &link.channel,
-                            &link.thread_ts,
-                            &format!(
-                                ":warning: Could not post the reply ({e:#}); it is in the pane."
-                            ),
-                        );
-                    }
-                }
-                Effect::NoReply => self.note(
-                    &link.channel,
-                    &link.thread_ts,
-                    "The turn ended without a text reply (check the pane for details).",
-                ),
-                Effect::Close => {
-                    return self.close_link(&link.task_id, "The agent exited.");
-                }
-            }
         }
         Ok(())
     }
@@ -196,7 +186,12 @@ fn next_step(
             effects: vec![Effect::Close],
         };
     }
-    if observed == Watch::Idle && prev == Watch::Idle {
+    let new = turn().since(link.last_reply_id.as_deref());
+    if observed == Watch::Idle
+        && prev == Watch::Idle
+        && new.progress.is_empty()
+        && new.reply.is_none()
+    {
         return Step {
             watch: observed,
             idle_checks: 0,
@@ -205,7 +200,6 @@ fn next_step(
             effects: vec![],
         };
     }
-    let new = turn().since(link.last_reply_id.as_deref());
     let mut reply_id = new.progress.last().map(|r| r.id.clone());
     let mut effects: Vec<Effect> = new.progress.into_iter().map(Effect::Progress).collect();
     match observed {
@@ -346,6 +340,14 @@ mod tests {
     }
 
     #[test]
+    fn local_turn_finished_between_polls_is_relayed() {
+        let l = link(Watch::Idle, Some("old"), 0);
+        let step = next_step(&l, Watch::Idle, None, &|| done(&[], "new"));
+        assert_eq!(step.reply_id.as_deref(), Some("new"));
+        assert_eq!(step.effects[0], Effect::Reply(reply("new").unwrap()));
+    }
+
+    #[test]
     fn a_running_turn_streams_each_text_it_moves_on_from_once() {
         // The turn posts "a" while working; the reply candidate "b" waits.
         let l = link(Watch::Working, Some("old"), 0);
@@ -473,9 +475,9 @@ mod tests {
         assert_eq!(s.effects[0], Effect::Reply(reply("new").unwrap()));
         assert_eq!(s.effects[1], Effect::Status(SessionStatus::Active));
 
-        // Already idle: nothing, and the transcript is not even read.
+        // Already idle with no new transcript text: nothing to post.
         let l = link(Watch::Idle, Some("new"), 0);
-        let s = next_step(&l, Watch::Idle, None, &|| panic!("must not read"));
+        let s = next_step(&l, Watch::Idle, None, &|| done(&[], "new"));
         assert!(s.effects.is_empty());
         assert!(!s.changed(&l));
     }
