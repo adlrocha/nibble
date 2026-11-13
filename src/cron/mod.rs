@@ -409,7 +409,7 @@ pub fn real_jobs_dir(repo: &Path) -> Result<PathBuf> {
 /// `dir` (`<repo>/.nibble/cron`, which exists) canonicalised, refused
 /// unless it really is that directory of `repo`: not a link elsewhere, and
 /// not in `~/.nibble`.
-fn inside_repo(repo: &Path, dir: &Path, doing: &str) -> Result<PathBuf> {
+pub(crate) fn inside_repo(repo: &Path, dir: &Path, doing: &str) -> Result<PathBuf> {
     let real = std::fs::canonicalize(dir)?;
     let repo_real = std::fs::canonicalize(repo)?;
     if real != repo_real.join(JOBS_DIR) {

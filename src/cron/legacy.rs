@@ -22,6 +22,14 @@ pub enum LegacyItem {
         /// The legacy row, remembered once imported.
         row: i64,
     },
+    /// `path` already holds this job (a teammate committed it, or an
+    /// earlier import stopped half way): register `repo` and remember the
+    /// row, writing and approving nothing.
+    Register {
+        repo: PathBuf,
+        path: PathBuf,
+        row: i64,
+    },
     Skip {
         repo_path: String,
         label: String,
@@ -101,6 +109,7 @@ pub fn plan_legacy(store: &CronStore, db: &crate::db::Database) -> Result<Vec<Le
         // Walk base, base-2, ... once: a file holding this very job means a
         // retry after a partial import; the first free name is taken.
         let mut free = None;
+        let mut holding = None;
         for n in 1.. {
             let name = if n == 1 {
                 base.clone()
@@ -117,12 +126,17 @@ pub fn plan_legacy(store: &CronStore, db: &crate::db::Database) -> Result<Vec<Le
             let mut d = wanted.clone();
             d.name = name.clone();
             if std::fs::read_to_string(&path).is_ok_and(|t| t == super::format_job(&d)) {
+                holding = Some(path);
                 break;
             }
             if super::nothing_at(&path) && !taken.contains(&path) {
                 free = Some((name, path));
                 break;
             }
+        }
+        if let Some(path) = holding {
+            plan.push(LegacyItem::Register { repo, path, row });
+            continue;
         }
         let Some((name, path)) = free else {
             plan.push(skip("already imported".to_string()));
@@ -144,6 +158,10 @@ pub fn plan_legacy(store: &CronStore, db: &crate::db::Database) -> Result<Vec<Le
 /// remember that the import happened.
 pub fn apply_legacy(store: &CronStore, plan: &[LegacyItem]) -> Result<()> {
     for item in plan {
+        if let LegacyItem::Register { repo, path, row } = item {
+            store.add_repo(&repo.to_string_lossy())?;
+            store.set_meta(&imported_key(*row), &path.to_string_lossy())?;
+        }
         if let LegacyItem::Import {
             repo,
             path,
@@ -242,7 +260,7 @@ mod tests {
                         def.clone(),
                     ));
                 }
-                LegacyItem::Skip { .. } => skipped += 1,
+                LegacyItem::Skip { .. } | LegacyItem::Register { .. } => skipped += 1,
             }
         }
         let mut names: Vec<&str> = imported.iter().map(|(n, _)| n.as_str()).collect();
@@ -302,6 +320,41 @@ mod tests {
             "theirs"
         );
         assert!(legacy_done(&s).unwrap());
+    }
+
+    #[test]
+    fn a_job_already_in_the_repo_registers_it() {
+        let (tmp, s) = store();
+        let repo = git_repo(tmp.path(), "repo");
+        let db = crate::db::Database::open(tmp.path().join("tasks.db")).unwrap();
+        db.insert_cron_job(&crate::models::CronJob::new(
+            repo.to_string_lossy().to_string(),
+            "0 9 * * *".into(),
+            "Go".into(),
+            Some("Daily".into()),
+            Utc::now(),
+        ))
+        .unwrap();
+        // Imported on another machine and committed: the file is here, this
+        // machine's state is not.
+        let (_t2, other) = store();
+        apply_legacy(&other, &plan_legacy(&other, &db).unwrap()).unwrap();
+        let plan = plan_legacy(&s, &db).unwrap();
+        assert!(
+            matches!(&plan[..], [LegacyItem::Register { .. }]),
+            "{plan:?}"
+        );
+        apply_legacy(&s, &plan).unwrap();
+        let key = repo.to_string_lossy().to_string();
+        assert_eq!(s.repos().unwrap(), std::slice::from_ref(&key));
+        assert!(
+            s.job(&key, "daily").unwrap().approved.is_none(),
+            "for you to approve"
+        );
+        assert!(matches!(
+            &plan_legacy(&s, &db).unwrap()[..],
+            [LegacyItem::Skip { reason, .. }] if reason == "already imported"
+        ));
     }
 
     #[test]

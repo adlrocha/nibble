@@ -23,7 +23,8 @@ Read the last 30 minutes of production logs and report anything wrong.
 ```
 
 The `# ` line is the title. Everything between it and `## Prompt` is TOML,
-and everything after `## Prompt` is the prompt, sent as written. An unknown
+and everything after `## Prompt` is the prompt, sent as written but for
+leading and trailing blank space, which is trimmed. An unknown
 key or a bad value makes the file invalid; `nibble cron list` shows why, and
 the repo's other jobs still run.
 
