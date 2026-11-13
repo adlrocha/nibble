@@ -29,6 +29,20 @@ impl Database {
         Ok(out)
     }
 
+    /// Acquire the writer before a read/modify/write transaction. In WAL mode a
+    /// deferred reader cannot upgrade after another connection commits: SQLite
+    /// returns BUSY_SNAPSHOT without honouring busy_timeout. Queue producers
+    /// sharing a database with a delivery worker must serialize before reading.
+    pub fn with_immediate_write_tx<T>(&self, f: impl FnOnce(&Database) -> Result<T>) -> Result<T> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let out = f(self)?;
+        tx.commit()?;
+        Ok(out)
+    }
+
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let conn = Connection::open(path).context("Failed to open database")?;
 
