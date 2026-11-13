@@ -823,7 +823,8 @@ pub enum CronAction {
         #[arg(short, long)]
         prompt: Option<String>,
 
-        /// Markdown job definition to copy into the repo
+        /// Markdown job definition to write into the repo (in nibble's
+        /// layout: comments and default-valued keys are dropped)
         #[arg(short, long)]
         file: Option<String>,
 
