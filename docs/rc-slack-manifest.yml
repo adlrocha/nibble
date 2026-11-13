@@ -1,6 +1,8 @@
 # Slack app manifest for `nibble rc` (Slack remote control).
 # Create the app at https://api.slack.com/apps → Create New App →
 # From a manifest, pick your workspace, and paste this file.
+# With more than one machine, give each app its own name and slash command:
+# `nibble rc manifest --name nibble-laptop` (see docs/rc.md).
 display_information:
   name: nibble
   description: Talk to your nibble agent sessions from Slack.
