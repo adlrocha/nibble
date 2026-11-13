@@ -2,10 +2,10 @@
 //!
 //! A job is a markdown file in the repository it runs against,
 //! `<repo>/.nibble/cron/<name>.md`, so it travels with the code: any machine
-//! that registers the repo (`nibble cron add`) runs the same jobs. This
-//! machine's runtime state (which repos are registered, when each job runs
-//! next, what past runs reported) lives in [`store`], outside every
-//! sandbox's reach.
+//! that registers the repo (`nibble cron add`) can run the same jobs, each
+//! once you have approved it on that machine. This machine's runtime state
+//! (which repos are registered, when each job runs next, what you
+//! approved) lives in [`store`], outside every sandbox's reach.
 //!
 //! ```markdown
 //! # Production logs
@@ -404,11 +404,18 @@ pub fn jobs_dir(repo: &Path) -> PathBuf {
 pub fn real_jobs_dir(repo: &Path) -> Result<PathBuf> {
     let dir = jobs_dir(repo);
     std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
-    let real = std::fs::canonicalize(&dir)?;
+    inside_repo(repo, &dir, "write")
+}
+
+/// `dir` (`<repo>/.nibble/cron`, which exists) canonicalised, refused
+/// unless it really is that directory of `repo`: not a link elsewhere, and
+/// not in `~/.nibble`.
+fn inside_repo(repo: &Path, dir: &Path, doing: &str) -> Result<PathBuf> {
+    let real = std::fs::canonicalize(dir)?;
     let repo_real = std::fs::canonicalize(repo)?;
     if real != repo_real.join(JOBS_DIR) {
         bail!(
-            "{} resolves to {}, outside the repo; refusing to write there",
+            "{} resolves to {}, outside the repo; refusing to {doing} there",
             dir.display(),
             real.display()
         );
@@ -421,6 +428,41 @@ pub fn real_jobs_dir(repo: &Path) -> Result<PathBuf> {
 /// absent, yet a write would follow).
 pub fn nothing_at(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_err()
+}
+
+/// Write `def` as a new job file in `repo` and approve it here, exactly as
+/// it reads back. The one way a job file is created (`add` and `import`):
+/// it never replaces a file or follows a symlink, and never writes outside
+/// the repo.
+pub fn create_job(store: &store::CronStore, repo: &Path, def: &JobDef) -> Result<PathBuf> {
+    use std::io::Write;
+    let path = job_path(repo, &def.name);
+    // A dangling symlink "does not exist", yet writing would follow it.
+    if !nothing_at(&path) {
+        bail!(
+            "{} already exists; edit it with `nibble cron edit {}`",
+            path.display(),
+            def.name
+        );
+    }
+    let text = format_job(def);
+    // Never write a file that would not load.
+    parse_job(&def.name, &text).context("the new job is invalid")?;
+    real_jobs_dir(repo)?;
+    // `create_new` also refuses whatever appeared since the check above.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .and_then(|mut f| f.write_all(text.as_bytes()))
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    let written = load_job_file(&path)?;
+    store.set_approved(
+        &repo.to_string_lossy(),
+        &written.name,
+        &format_job(&written),
+    )?;
+    Ok(path)
 }
 
 /// `<repo>/.nibble/cron/<name>.md`.
@@ -479,8 +521,11 @@ pub struct BadFile {
 /// returned apart, so one broken file does not stop the others.
 pub fn load_repo_jobs(repo: &Path) -> Result<(Vec<JobDef>, Vec<BadFile>)> {
     let dir = jobs_dir(repo);
+    // Read only from the repo's own directory, as writes are: a symlinked
+    // `.nibble` or `.nibble/cron` (committed, or made by the sandbox) must
+    // not have jobs listed, approved or run from elsewhere.
     if dir.exists() {
-        check_outside_sandbox_mount(&dir)?;
+        inside_repo(repo, &dir, "read jobs")?;
     }
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,

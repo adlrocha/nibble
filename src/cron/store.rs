@@ -102,6 +102,20 @@ CREATE TABLE runs (
 );
 CREATE INDEX idx_runs_job ON runs(repo_path, name, id);
 ",
+    // One row per run in flight, each with its own owner: a single
+    // owner per job lost the claims of overlapping runs from other
+    // processes. `jobs.running`, `owner_pid` and `claimed_at` are unused
+    // from here on.
+    "
+CREATE TABLE claims (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo_path TEXT NOT NULL,
+    name TEXT NOT NULL,
+    pid INTEGER NOT NULL,
+    claimed_at INTEGER NOT NULL
+);
+CREATE INDEX idx_claims_job ON claims(repo_path, name);
+",
     "
 CREATE TABLE findings (
     repo_path TEXT NOT NULL,
@@ -310,7 +324,10 @@ impl CronStore {
         Ok(self
             .conn
             .query_row(
-                "SELECT schedule, next_run, last_run, paused, running, approved
+                "SELECT schedule, next_run, last_run, paused,
+                        EXISTS (SELECT 1 FROM claims c
+                                WHERE c.repo_path = jobs.repo_path AND c.name = jobs.name),
+                        approved
                  FROM jobs WHERE repo_path = ?1 AND name = ?2",
                 params![repo, name],
                 |r| {
@@ -377,12 +394,10 @@ impl CronStore {
     #[cfg(test)]
     pub fn put_job(&self, s: &JobState) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO jobs (repo_path, name, schedule, next_run, last_run, paused, running,
-                               approved)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "INSERT INTO jobs (repo_path, name, schedule, next_run, last_run, paused, approved)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT (repo_path, name) DO UPDATE SET
-               schedule = ?3, next_run = ?4, last_run = ?5, paused = ?6, running = ?7,
-               approved = ?8",
+               schedule = ?3, next_run = ?4, last_run = ?5, paused = ?6, approved = ?7",
             params![
                 s.repo_path,
                 s.name,
@@ -390,7 +405,6 @@ impl CronStore {
                 s.next_run.map(|t| t.timestamp()),
                 s.last_run.map(|t| t.timestamp()),
                 s.paused as i64,
-                s.running as i64,
                 s.approved,
             ],
         )?;
@@ -430,62 +444,71 @@ impl CronStore {
         Ok(())
     }
 
-    /// Claim the job for a run by process `pid`. False when a live run
-    /// holds it and overlapping is not allowed. A claim whose owner died is
-    /// taken over. Compare-and-swap, so two claimers never both win.
-    /// `running` counts the job's runs in flight, so with overlapping runs
-    /// the first to finish does not clear the others'.
-    pub fn claim(&self, repo: &str, name: &str, pid: u32, overlap: bool) -> Result<bool> {
+    /// Claim the job for a run by process `pid`; the claim's id, to
+    /// [`Self::release`] it, or `None` when a live run holds the job and
+    /// overlapping is not allowed. Claims whose owner died are dropped
+    /// first. One write transaction, so two claimers never both win and a
+    /// claimer allowed to overlap is never refused.
+    pub fn claim(&self, repo: &str, name: &str, pid: u32, overlap: bool) -> Result<Option<i64>> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
         self.conn.execute(
             "INSERT OR IGNORE INTO jobs (repo_path, name) VALUES (?1, ?2)",
             params![repo, name],
         )?;
-        let (running, owner, since): (i64, Option<u32>, Option<i64>) = self.conn.query_row(
-            "SELECT running, owner_pid, claimed_at FROM jobs WHERE repo_path = ?1 AND name = ?2",
+        self.drop_dead_claims(Some((repo, name)))?;
+        let held: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM claims WHERE repo_path = ?1 AND name = ?2",
             params![repo, name],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| r.get(0),
         )?;
-        let live = running > 0 && owner_alive(owner, since);
-        if live && !overlap {
-            return Ok(false);
+        if held > 0 && !overlap {
+            return Ok(None);
         }
-        let count = if live { running + 1 } else { 1 };
-        // Compare-and-swap on what was read, so two claimers never both win.
-        let n = self.conn.execute(
-            "UPDATE jobs SET running = :count, owner_pid = :pid, claimed_at = :now
-             WHERE repo_path = :repo AND name = :name
-               AND running = :was_running AND owner_pid IS :was_owner",
-            rusqlite::named_params! {
-                ":count": count,
-                ":pid": pid,
-                ":now": Utc::now().timestamp(),
-                ":repo": repo,
-                ":name": name,
-                ":was_running": running,
-                ":was_owner": owner,
-            },
+        self.conn.execute(
+            "INSERT INTO claims (repo_path, name, pid, claimed_at) VALUES (?1, ?2, ?3, ?4)",
+            params![repo, name, pid, Utc::now().timestamp()],
         )?;
-        Ok(n == 1)
+        let id = self.conn.last_insert_rowid();
+        tx.commit()?;
+        Ok(Some(id))
+    }
+
+    /// Drop the claims (of one job, or all) whose owner is gone.
+    fn drop_dead_claims(&self, job: Option<(&str, &str)>) -> Result<()> {
+        type Row = (i64, u32, i64, String, String);
+        let claims: Vec<Row> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id, pid, claimed_at, repo_path, name FROM claims")?;
+            let rows = stmt.query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })?;
+            rows.collect::<Result<_, _>>()?
+        };
+        let of_job = |r: &str, n: &str| job.is_none_or(|(repo, name)| repo == r && name == n);
+        for (id, pid, since, r, n) in claims {
+            if of_job(&r, &n) && !owner_alive(Some(pid), Some(since)) {
+                self.release(id)?;
+            }
+        }
+        Ok(())
     }
 
     /// Runs claimed across all jobs (by the daemon or `nibble cron run`).
     pub fn runs_in_flight(&self) -> Result<usize> {
-        let n: i64 =
-            self.conn
-                .query_row("SELECT COALESCE(SUM(running), 0) FROM jobs", [], |r| {
-                    r.get(0)
-                })?;
+        let n: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM claims", [], |r| r.get(0))?;
         Ok(usize::try_from(n).unwrap_or(0))
     }
 
     /// End one run's claim; the job is free once none is left.
-    pub fn release(&self, repo: &str, name: &str) -> Result<()> {
-        self.conn.execute(
-            "UPDATE jobs SET running = MAX(running - 1, 0),
-               owner_pid = CASE WHEN running <= 1 THEN NULL ELSE owner_pid END
-             WHERE repo_path = ?1 AND name = ?2 AND running > 0",
-            params![repo, name],
-        )?;
+    pub fn release(&self, claim: i64) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM claims WHERE id = ?1", params![claim])?;
         Ok(())
     }
 
@@ -495,23 +518,7 @@ impl CronStore {
     /// Returns each run it closed, with where its session may still be
     /// going inside the container.
     pub fn reap_stale(&self) -> Result<Vec<Reaped>> {
-        type Claim = (String, String, Option<u32>, Option<i64>);
-        let owners: Vec<Claim> = {
-            let mut stmt = self.conn.prepare(
-                "SELECT repo_path, name, owner_pid, claimed_at FROM jobs WHERE running > 0",
-            )?;
-            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
-            rows.collect::<Result<_, _>>()?
-        };
-        for (repo, name, owner, since) in owners {
-            if !owner_alive(owner, since) {
-                self.conn.execute(
-                    "UPDATE jobs SET running = 0, owner_pid = NULL
-                     WHERE repo_path = ?1 AND name = ?2 AND owner_pid IS ?3",
-                    params![repo, name, owner],
-                )?;
-            }
-        }
+        self.drop_dead_claims(None)?;
         type Open = (i64, Option<u32>, i64, Option<String>, Option<String>);
         let open: Vec<Open> = {
             let mut stmt = self.conn.prepare(
@@ -551,8 +558,10 @@ impl CronStore {
         Ok(())
     }
 
-    /// Record a run starting in process `pid`; returns its id. Old runs of
-    /// the job beyond the kept number are deleted.
+    /// Record a run starting in process `pid`; returns its id. Old finished
+    /// runs of the job beyond the kept number are deleted. One still
+    /// running never is, or a hung run would lose its own row while newer
+    /// ones start under it.
     pub fn start_run(
         &self,
         repo: &str,
@@ -620,18 +629,26 @@ impl CronStore {
         })
     }
 
-    /// The newest runs first; of one job when `job` is given.
-    pub fn runs(&self, job: Option<(&str, &str)>, limit: usize) -> Result<Vec<RunRecord>> {
-        let (repo, name) = job.unwrap_or_default();
+    /// Every job's runs, newest first.
+    pub fn runs(&self, limit: usize) -> Result<Vec<RunRecord>> {
+        self.query_runs("1", params![limit as i64])
+    }
+
+    /// One job's runs, newest first.
+    pub fn runs_of(&self, repo: &str, name: &str, limit: usize) -> Result<Vec<RunRecord>> {
+        self.query_runs(
+            "repo_path = ?2 AND name = ?3",
+            params![limit as i64, repo, name],
+        )
+    }
+
+    /// Runs matching `filter` (`?1` is the limit), newest first.
+    fn query_runs(&self, filter: &str, p: &[&dyn rusqlite::ToSql]) -> Result<Vec<RunRecord>> {
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT {} FROM runs WHERE ?1 = 0 OR (repo_path = ?2 AND name = ?3)
-             ORDER BY id DESC LIMIT ?4",
+            "SELECT {} FROM runs WHERE {filter} ORDER BY id DESC LIMIT ?1",
             Self::RUN_COLUMNS
         ))?;
-        let rows = stmt.query_map(
-            params![job.is_some() as i64, repo, name, limit as i64],
-            Self::row_to_run,
-        )?;
+        let rows = stmt.query_map(p, Self::row_to_run)?;
         rows.collect::<Result<_, _>>().map_err(Into::into)
     }
 
@@ -818,7 +835,8 @@ mod tests {
             next_run: Some(t),
             last_run: Some(t),
             paused: false,
-            running: true,
+            // `running` comes from claims, not from this row.
+            running: false,
             ..fresh
         };
         s.put_job(&j).unwrap();
@@ -849,32 +867,43 @@ mod tests {
     fn claims_are_exclusive_and_dead_owners_lose_them() {
         let (_t, s) = store();
         let me = std::process::id();
-        assert!(s.claim("/r", "a", me, false).unwrap());
+        let first = s.claim("/r", "a", me, false).unwrap().unwrap();
         assert!(
-            !s.claim("/r", "a", me, false).unwrap(),
+            s.claim("/r", "a", me, false).unwrap().is_none(),
             "held by a live owner"
         );
-        assert!(s.claim("/r", "a", me, true).unwrap(), "overlap allowed");
+        let second = s.claim("/r", "a", me, true).unwrap().unwrap();
         assert!(s.job("/r", "a").unwrap().running);
-        s.release("/r", "a").unwrap();
+        s.release(first).unwrap();
         assert!(
             s.job("/r", "a").unwrap().running,
             "the overlapping run still holds it"
         );
-        s.release("/r", "a").unwrap();
+        s.release(second).unwrap();
         assert!(!s.job("/r", "a").unwrap().running);
-        s.release("/r", "a").unwrap();
-        assert!(!s.job("/r", "a").unwrap().running, "no underflow");
-        assert!(s.claim("/r", "x", me, false).unwrap());
-        assert!(s.claim("/r", "y", me, false).unwrap());
+        s.release(second).unwrap();
+        assert!(
+            !s.job("/r", "a").unwrap().running,
+            "releasing twice is harmless"
+        );
+        s.claim("/r", "x", me, false).unwrap().unwrap();
+        s.claim("/r", "y", me, false).unwrap().unwrap();
         assert_eq!(s.runs_in_flight().unwrap(), 2, "counts every job's claims");
         // A dead owner's claim is taken over, and reaped.
-        assert!(s.claim("/r", "b", DEAD, false).unwrap());
-        assert!(s.claim("/r", "b", me, false).unwrap());
-        assert!(s.claim("/r", "c", DEAD, false).unwrap());
+        s.claim("/r", "b", DEAD, false).unwrap().unwrap();
+        s.claim("/r", "b", me, false).unwrap().unwrap();
+        s.claim("/r", "c", DEAD, false).unwrap().unwrap();
         s.reap_stale().unwrap();
         assert!(!s.job("/r", "c").unwrap().running);
         assert!(s.job("/r", "b").unwrap().running, "a live claim stays");
+        // Overlapping runs of different owners: one dying leaves only its
+        // own claim to reap, and the live one's release frees the job.
+        let live = s.claim("/r", "o", me, true).unwrap().unwrap();
+        s.claim("/r", "o", DEAD, true).unwrap().unwrap();
+        s.reap_stale().unwrap();
+        assert!(s.job("/r", "o").unwrap().running);
+        s.release(live).unwrap();
+        assert!(!s.job("/r", "o").unwrap().running, "nothing left behind");
         assert!(alive(me) && !alive(DEAD));
         // A claim from before the last boot is dead, whatever its pid.
         if boot_time().is_some() {
@@ -910,9 +939,9 @@ mod tests {
         assert_eq!(r.summary.as_deref(), Some("sum"));
         assert_eq!(r.session_id.as_deref(), Some("sid"));
         assert!(r.finished_at.is_some());
-        let all: Vec<i64> = s.runs(None, 10).unwrap().iter().map(|r| r.id).collect();
+        let all: Vec<i64> = s.runs(10).unwrap().iter().map(|r| r.id).collect();
         assert_eq!(all, [b, a], "newest first");
-        assert_eq!(s.runs(Some(("/r", "a")), 10).unwrap().len(), 1);
+        assert_eq!(s.runs_of("/r", "a", 10).unwrap().len(), 1);
         assert!(s.run(999).unwrap().is_none());
         // A run whose process died is closed; a live one is not.
         let live = s.start_run("/r", "d", "D", "manual", me).unwrap();
@@ -945,12 +974,12 @@ mod tests {
             s.finish_run(id, &done).unwrap();
         }
         assert_eq!(
-            s.runs(Some(("/r", "c")), 1000).unwrap().len() as i64,
+            s.runs_of("/r", "c", 1000).unwrap().len() as i64,
             RUNS_KEPT + 1
         );
         assert_eq!(s.run(hung).unwrap().unwrap().status, RunStatus::Running);
         assert_eq!(
-            s.runs(Some(("/r", "a")), 10).unwrap().len(),
+            s.runs_of("/r", "a", 10).unwrap().len(),
             1,
             "other jobs kept"
         );

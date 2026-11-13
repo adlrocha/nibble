@@ -47,7 +47,8 @@ nibble cron add                       # register the repo around the current dir
 nibble cron add --repo ~/src/shop     # register another repo
 nibble cron add --schedule "0 8 * * *" --prompt "Audit dependencies" --label "Deps audit"
                                       # write .nibble/cron/deps-audit.md, then register
-nibble cron add --file job.md         # copy a job file into the repo, then register
+nibble cron add --file job.md         # write a job file's settings and prompt into the repo
+                                      # (in nibble's layout, comments dropped), then register
 nibble cron list [repo]               # jobs, status, next and last run
 nibble cron approve deps-audit        # review a new or changed job file
 nibble cron edit deps-audit           # open the file in $EDITOR
@@ -60,7 +61,11 @@ nibble cron show 12                   # one run's full report
 nibble cron kill deps-audit           # delete the job file
 nibble cron forget ~/src/shop         # stop running the repo's jobs here
 nibble cron import                    # move jobs from older nibble versions (see below)
+nibble cron daemon                    # the scheduler itself; nibble-cron.service runs it
 ```
+
+To stop the scheduler, `systemctl --user stop nibble-cron` (`disable` keeps
+it off after a reboot). Without systemd, run `nibble cron daemon` yourself.
 
 Your home directory, anything inside `~/.nibble`, and symlinked job files
 are refused: sandboxes can write `~/.nibble`, and a link could point a job
@@ -217,8 +222,9 @@ register repos, approve jobs or unpause them. What a job does is in its
 file, which a sandbox can change; that is what approval is for.
 
 Older nibble versions stored jobs in `~/.nibble/tasks.db`, where nothing
-ran them on a schedule. `nibble cron` commands remind you while any are
-left. `nibble cron import` lists each one, with the file it would write
+ran them on a schedule. `nibble cron` commands remind you of them until
+you run `nibble cron import`; run it again later for any it skipped (say,
+once their repo is cloned). `nibble cron import` lists each one, with the file it would write
 (`.nibble/cron/<name>.md`, the name made from its label, `-2` added when
 taken) and the repo it would register, and asks before doing anything,
 because sandboxes can write that database. Imported jobs get

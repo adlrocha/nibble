@@ -754,6 +754,9 @@ After=default.target network-online.target
 [Service]
 Type=simple
 ExecStart=$BIN_DIR/nibble cron daemon
+# Only the daemon is stopped on stop/restart/upgrade: a sandbox it started
+# for a repo is that repo's sandbox, and lives on with any session in it.
+KillMode=process
 Restart=on-failure
 RestartSec=30
 Environment=HOME=%h

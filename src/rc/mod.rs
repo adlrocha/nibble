@@ -232,6 +232,23 @@ pub(crate) fn cmd_claude_hook(db: &Database) -> Result<()> {
 
 /// Read one line from the terminal, optionally without echo (tokens).
 pub(crate) fn prompt_line(label: &str, secret: bool) -> Result<String> {
+    let value = read_prompt(label, secret)?;
+    if secret {
+        println!("  got {}", mask(&value));
+    }
+    Ok(value)
+}
+
+/// Read a secret without echo and show back only its length: unlike a
+/// Slack token, a value of no known shape would give most of itself away
+/// through [`mask`].
+pub(crate) fn prompt_hidden(label: &str) -> Result<String> {
+    let value = read_prompt(label, true)?;
+    println!("  got {}", length_only(&value));
+    Ok(value)
+}
+
+fn read_prompt(label: &str, secret: bool) -> Result<String> {
     print!("{label}: ");
     std::io::stdout().flush()?;
     let _guard = if secret { EchoOff::new() } else { None };
@@ -240,12 +257,18 @@ pub(crate) fn prompt_line(label: &str, secret: bool) -> Result<String> {
         .lock()
         .read_line(&mut line)
         .context("failed to read input")?;
-    let value = line.trim().to_string();
     if secret {
         println!();
-        println!("  got {}", mask(&value));
     }
-    Ok(value)
+    Ok(line.trim().to_string())
+}
+
+/// `N chars`, and nothing of the value.
+fn length_only(value: &str) -> String {
+    match value.chars().count() {
+        0 => "nothing (empty input)".to_string(),
+        n => format!("{n} chars"),
+    }
 }
 
 /// A token as shown back after a hidden paste: its first 9 and last 4
@@ -536,6 +559,8 @@ mod tests {
         // Short or empty input reveals nothing but its length.
         assert_eq!(super::mask("xoxb-short"), "******** (10 chars)");
         assert_eq!(super::mask(""), "nothing (empty input)");
+        assert_eq!(super::length_only("abcdefghijklmnopq"), "17 chars");
+        assert_eq!(super::length_only(""), "nothing (empty input)");
     }
 
     use super::*;
