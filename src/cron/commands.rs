@@ -250,37 +250,6 @@ pub(crate) fn resolve_job_file(store: &CronStore, arg: &str) -> Result<(PathBuf,
     }
 }
 
-/// Write `def` as a new job file in `repo` and approve it here, exactly as
-/// it reads back. The one way a job file is created (`add` and `import`):
-/// it never replaces a file or follows a symlink, and never writes outside
-/// the repo.
-pub(crate) fn create_job(store: &CronStore, repo: &Path, def: &JobDef) -> Result<PathBuf> {
-    use std::io::Write;
-    let path = super::job_path(repo, &def.name);
-    // A dangling symlink "does not exist", yet writing would follow it.
-    if !super::nothing_at(&path) {
-        bail!(
-            "{} already exists; edit it with `nibble cron edit {}`",
-            path.display(),
-            def.name
-        );
-    }
-    let text = super::format_job(def);
-    // Never write a file that would not load.
-    super::parse_job(&def.name, &text).context("the new job is invalid")?;
-    super::real_jobs_dir(repo)?;
-    // `create_new` also refuses whatever appeared since the check above.
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .and_then(|mut f| f.write_all(text.as_bytes()))
-        .with_context(|| format!("failed to write {}", path.display()))?;
-    let written = super::load_job_file(&path)?;
-    store.set_approved(&repo_str(repo), &written.name, &super::format_job(&written))?;
-    Ok(path)
-}
-
 /// The arguments of `nibble cron add`.
 pub(crate) struct AddArgs {
     pub repo: Option<String>,
@@ -354,7 +323,7 @@ pub(crate) fn cmd_add(store: &CronStore, a: AddArgs) -> Result<()> {
             def.expires_at = Some(super::parse_expiry(&e, now)?);
         }
         // You wrote it here: approved.
-        let path = create_job(store, &repo, &def)?;
+        let path = super::create_job(store, &repo, &def)?;
         println!("Wrote {} (commit it to share it).", path.display());
     }
     if added {
@@ -468,7 +437,9 @@ fn when(t: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
 /// `nibble cron list`: every registered repo's jobs, with this machine's
 /// state. Broken files are listed with their error.
 pub(crate) fn cmd_list(store: &CronStore, repo_filter: Option<&str>) -> Result<()> {
-    let filter = repo_filter.map(|r| canonical_repo(Some(r))).transpose()?;
+    // Matched as `forget` matches, so a repo that is gone is still listed
+    // (as missing) instead of refused.
+    let filter = repo_filter.map(|r| PathBuf::from(repo_key(r)));
     let repos: Vec<PathBuf> = store
         .repos()?
         .into_iter()
@@ -674,7 +645,7 @@ pub(crate) fn cmd_secret_set(name: &str, repo: Option<&str>) -> Result<()> {
     // Reuse the job-file rule, so a name that a file could never ask for
     // is refused here too.
     super::validate_env_name(name)?;
-    let value = crate::rc::prompt_line(&format!("Value for {name}"), true)?;
+    let value = crate::rc::prompt_hidden(&format!("Value for {name}"))?;
     if value.is_empty() {
         bail!("empty value; nothing saved");
     }
@@ -707,9 +678,7 @@ fn remove_secret(path: &Path, repo: &str, name: &str) -> Result<()> {
 
 /// `nibble cron secret list`: names only, never values.
 pub(crate) fn cmd_secret_list(repo: Option<&str>) -> Result<()> {
-    let only = repo
-        .map(|r| canonical_repo(Some(r)).map(|p| repo_str(&p)))
-        .transpose()?;
+    let only = repo.map(repo_key);
     let table = secrets::load_from(&secrets::path())?;
     let mut any = false;
     for (r, vars) in table
@@ -1237,7 +1206,25 @@ mod tests {
         let gone = tmp.path().join("gone");
         store.add_repo(&gone.to_string_lossy()).unwrap();
         cmd_list(&store, None).unwrap();
+        cmd_list(&store, Some(&gone.to_string_lossy())).unwrap();
         cmd_forget(&store, &gone.to_string_lossy()).unwrap();
+    }
+
+    #[test]
+    fn reads_refuse_a_symlinked_job_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = std::fs::canonicalize(tmp.path()).unwrap().join("shop");
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(repo.join(".nibble")).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(
+            elsewhere.join("logs.md"),
+            "# Logs\n\nschedule = \"0 1 * * *\"\n\n## Prompt\n\nx\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&elsewhere, repo.join(".nibble/cron")).unwrap();
+        let err = super::super::load_repo_jobs(&repo).unwrap_err().to_string();
+        assert!(err.contains("outside the repo"), "{err}");
     }
 
     #[test]
