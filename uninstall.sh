@@ -79,7 +79,7 @@ fi
 step "Stopping services"
 
 for svc in nibble-listener nibble-resume nibble-reset nibble-cleanup nibble-web \
-           nibble-usage nibble-rc; do
+           nibble-usage nibble-rc nibble-cron; do
     if systemctl --user is-active --quiet "$svc.service" 2>/dev/null; then
         systemctl --user stop "$svc.service"
         ok "Stopped $svc.service"
@@ -96,7 +96,7 @@ done
 step "Removing systemd services"
 
 for svc in nibble-listener nibble-resume nibble-reset nibble-cleanup nibble-web \
-           nibble-usage nibble-rc; do
+           nibble-usage nibble-rc nibble-cron; do
     if [ -f "$SYSTEMD_DIR/$svc.service" ]; then
         systemctl --user disable "$svc.service" 2>/dev/null || true
         rm -f "$SYSTEMD_DIR/$svc.service"
@@ -227,8 +227,24 @@ if [ "$KEEP_CONFIG" = false ]; then
         rm -rf "$RC_STATE"
         ok "Removed $RC_STATE/"
     fi
+    # `nibble cron`'s per-repo secrets and the daemon's environment file.
+    for f in cron-secrets.toml cron.env; do
+        CRON_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/nibble/$f"
+        if [ -f "$CRON_FILE" ]; then
+            rm -f "$CRON_FILE"
+            ok "Removed $CRON_FILE"
+        fi
+    done
+    rmdir "${XDG_CONFIG_HOME:-$HOME/.config}/nibble" 2>/dev/null || true
+    # Its private state: registered repos, approvals, run reports, daemon log.
+    CRON_STATE="${XDG_STATE_HOME:-$HOME/.local/state}/nibble/cron"
+    if [ -d "$CRON_STATE" ]; then
+        rm -rf "$CRON_STATE"
+        ok "Removed $CRON_STATE/"
+    fi
+    rmdir "${XDG_STATE_HOME:-$HOME/.local/state}/nibble" 2>/dev/null || true
 else
-    warn "Keeping $HOME/.nibble/ and the Slack credentials and state (--keep-config)"
+    warn "Keeping $HOME/.nibble/, the Slack and cron credentials, and their state (--keep-config)"
 fi
 
 # ── 9b. Remove the one-command install's source checkout ─────────────────────

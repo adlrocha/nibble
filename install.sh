@@ -365,7 +365,7 @@ step "Installing binaries to $BIN_DIR"
 # UI is restarted unconditionally further down (5d); the daemons only if
 # they were running.
 RESTART_AFTER_UPGRADE=()
-for svc in nibble-web nibble-quota-watch nibble-rc; do
+for svc in nibble-web nibble-quota-watch nibble-rc nibble-cron; do
     systemctl --user is-active --quiet "$svc.service" 2>/dev/null || continue
     if command -v timeout >/dev/null 2>&1; then
         timeout 5 systemctl --user stop "$svc.service" 2>/dev/null || true
@@ -731,6 +731,53 @@ if systemctl --user daemon-reload 2>/dev/null; then
     fi
 else
     warn "systemd user session not available. Run manually: nibble rc daemon"
+fi
+
+# ── 5e3. Scheduled jobs (nibble cron) ─────────────────────────────────────────
+# Runs the jobs of registered repos (.nibble/cron/*.md) on their schedules,
+# each as a headless session in the repo's sandbox (see docs/cron.md). With
+# no repo registered it only idles. Its log stays out of ~/.nibble, which
+# sandboxes can read.
+step "Installing scheduled jobs daemon"
+
+CRON_LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/nibble/cron"
+mkdir -p "$CRON_LOG_DIR" && chmod 700 "$CRON_LOG_DIR"
+# Optional: a systemd unit gets none of a shell's exports, so keys a sandbox
+# it spawns needs (ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, GITHUB_TOKEN, ...)
+# go here. The leading `-` keeps a missing file from failing the unit.
+CRON_ENV_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/nibble/cron.env"
+cat > "$SYSTEMD_DIR/nibble-cron.service" << UNIT
+[Unit]
+Description=Nibble — run scheduled jobs of registered repos
+After=default.target network-online.target
+
+[Service]
+Type=simple
+ExecStart=$BIN_DIR/nibble cron daemon
+# Only the daemon is stopped on stop/restart/upgrade: a sandbox it started
+# for a repo is that repo's sandbox, and lives on with any session in it.
+KillMode=process
+Restart=on-failure
+RestartSec=30
+Environment=HOME=%h
+Environment="PATH=$BIN_DIR:$PATH"
+$( [ -n "${XDG_CONFIG_HOME:-}" ] && printf 'Environment="XDG_CONFIG_HOME=%s"' "$XDG_CONFIG_HOME" )
+$( [ -n "${XDG_STATE_HOME:-}" ] && printf 'Environment="XDG_STATE_HOME=%s"' "$XDG_STATE_HOME" )
+EnvironmentFile=-$CRON_ENV_FILE
+StandardOutput=append:$CRON_LOG_DIR/daemon.log
+StandardError=append:$CRON_LOG_DIR/daemon.log
+
+[Install]
+WantedBy=default.target
+UNIT
+
+if systemctl --user daemon-reload 2>/dev/null; then
+    systemctl --user enable nibble-cron.service 2>/dev/null || true
+    systemctl --user restart nibble-cron.service 2>/dev/null \
+        && ok "Scheduled jobs daemon enabled (nibble-cron.service)" \
+        || warn "Could not start nibble-cron.service. Check: systemctl --user status nibble-cron"
+else
+    warn "systemd user session not available. Run manually: nibble cron daemon"
 fi
 
 # ── 5f. Agent usage records (omarchy agents panel) ────────────────────────────

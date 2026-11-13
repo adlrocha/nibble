@@ -30,7 +30,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub mod commands;
+pub mod daemon;
 pub mod legacy;
+pub mod run;
 pub mod secrets;
 pub mod store;
 
