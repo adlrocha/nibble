@@ -158,7 +158,7 @@ pub fn apply_legacy(store: &CronStore, plan: &[LegacyItem]) -> Result<()> {
                 continue;
             }
             // You reviewed it in the plan.
-            super::commands::create_job(store, repo, def)?;
+            super::create_job(store, repo, def)?;
             store.add_repo(&repo.to_string_lossy())?;
             store.set_meta(&imported_key(*row), &path.to_string_lossy())?;
         }

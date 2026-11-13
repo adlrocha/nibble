@@ -806,9 +806,10 @@ pub enum SessionAction {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum CronAction {
-    /// Register a repo so its job files (`.nibble/cron/*.md`) run on this
-    /// machine. With --schedule and --prompt, or --file, first writes a new
-    /// job file into the repo.
+    /// Register a repo on this machine and review its job files
+    /// (`.nibble/cron/*.md`): only approved ones run here, on schedule once
+    /// the scheduler service is installed. With --schedule and --prompt, or
+    /// --file, first writes a new job file into the repo.
     Add {
         /// Repository (default: the git repo around the current directory)
         #[arg(short, long)]
