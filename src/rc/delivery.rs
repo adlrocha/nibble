@@ -12,6 +12,17 @@ use super::daemon::log;
 use super::slack::{self, Slack};
 use super::store::{self, StateDb};
 
+/// Transient failures (network, 5xx, rate limits) a delivery may hit before it
+/// is marked failed. Every session shares the daemon's DM channel, and a
+/// waiting delivery holds back the later ones on its channel, so a payload
+/// Slack keeps rejecting must eventually step aside.
+const MAX_ATTEMPTS: u32 = 8;
+/// The longest single wait, even when Slack's `Retry-After` asks for more.
+const MAX_WAIT_SECS: u64 = 900;
+/// Failed records kept for inspection; older ones are pruned, so a pass never
+/// scans an ever-growing history.
+const KEEP_FAILED: usize = 50;
+
 pub(super) struct Worker {
     wake: SyncSender<()>,
     thread: JoinHandle<()>,
@@ -54,7 +65,13 @@ fn pass(state: &StateDb, bot: &Slack) -> Result<()> {
     let mut attempted = 0;
     // Small batches avoid monopolising SQLite on output-heavy turns. Preserve
     // channel ordering, but a retrying channel must not starve other channels.
-    for mut delivery in store::deliveries(state)?.into_iter().filter(|d| !d.failed) {
+    let (failed, pending): (Vec<_>, Vec<_>) = store::deliveries(state)?
+        .into_iter()
+        .partition(|d| d.failed);
+    for old in failed.iter().rev().skip(KEEP_FAILED) {
+        store::delete_delivery(state, &old.id)?;
+    }
+    for mut delivery in pending {
         if delivery.method.starts_with("agents.sessions.") && store::sessions_disabled(state)? {
             store::delete_delivery(state, &delivery.id)?;
             continue;
@@ -83,11 +100,12 @@ fn pass(state: &StateDb, bot: &Slack) -> Result<()> {
             Err(e) => {
                 delivery.attempts = delivery.attempts.saturating_add(1);
                 delivery.last_error = Some(format!("{e:#}"));
-                if let Some(minimum) = slack::retry_delay(&e) {
+                let retry = slack::retry_delay(&e).filter(|_| delivery.attempts < MAX_ATTEMPTS);
+                if let Some(minimum) = retry {
                     let backoff = 1_u64 << delivery.attempts.min(6);
-                    // Honour Retry-After instead of clamping it to 30s. Bound
-                    // only absurd values to keep timestamp arithmetic safe.
-                    let seconds = minimum.max(backoff).min(31_536_000);
+                    // Honour Retry-After, up to a bound that keeps one
+                    // delivery from holding its channel for hours.
+                    let seconds = minimum.max(backoff).min(MAX_WAIT_SECS);
                     delivery.due = Utc::now() + Duration::seconds(seconds as i64);
                     blocked.insert(delivery.channel.clone());
                     log(&format!(
@@ -97,8 +115,8 @@ fn pass(state: &StateDb, bot: &Slack) -> Result<()> {
                 } else {
                     delivery.failed = true;
                     log(&format!(
-                        "delivery {} failed permanently: {e:#}; retained in rc state",
-                        delivery.id
+                        "delivery {} failed permanently after {} attempt(s): {e:#}; retained in rc state",
+                        delivery.id, delivery.attempts
                     ));
                 }
                 store::save_delivery(state, &delivery)?;
@@ -211,6 +229,60 @@ mod tests {
         let pending = store::deliveries(&state).unwrap();
         assert_eq!(pending.len(), 1);
         assert!(pending[0].failed);
+    }
+
+    #[test]
+    fn a_delivery_that_keeps_failing_gives_way_to_later_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = store::open_state_in(dir.path()).unwrap();
+        let mut stuck = message("stuck");
+        stuck.attempts = MAX_ATTEMPTS - 1;
+        store::enqueue(&state, &[stuck, message("next")]).unwrap();
+        let (bot, thread) = server(vec![
+            (429, "limited", Some("600")),
+            (200, "{\"ok\":true}", None),
+        ]);
+        pass(&state, &bot).unwrap();
+        let bodies = thread.join().unwrap();
+        assert!(bodies[0].contains("stuck"));
+        assert!(bodies[1].contains("next"));
+        let pending = store::deliveries(&state).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].failed);
+        assert_eq!(pending[0].attempts, MAX_ATTEMPTS);
+    }
+
+    #[test]
+    fn retry_after_is_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = store::open_state_in(dir.path()).unwrap();
+        store::enqueue(&state, &[message("one")]).unwrap();
+        let (bot, thread) = server(vec![(429, "limited", Some("86400"))]);
+        pass(&state, &bot).unwrap();
+        thread.join().unwrap();
+        let pending = store::deliveries(&state).unwrap();
+        assert!(!pending[0].failed);
+        assert!(pending[0].due <= Utc::now() + Duration::seconds(MAX_WAIT_SECS as i64));
+    }
+
+    #[test]
+    fn only_the_newest_failed_records_are_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = store::open_state_in(dir.path()).unwrap();
+        let failed: Vec<_> = (0..KEEP_FAILED + 3)
+            .map(|i| {
+                let mut d = message(&format!("failed-{i}"));
+                d.failed = true;
+                d
+            })
+            .collect();
+        store::enqueue(&state, &failed).unwrap();
+        let (bot, thread) = server(vec![]);
+        pass(&state, &bot).unwrap();
+        thread.join().unwrap();
+        let kept = store::deliveries(&state).unwrap();
+        assert_eq!(kept.len(), KEEP_FAILED);
+        assert!(kept[0].params.iter().any(|(_, v)| v == "failed-3"));
     }
 
     #[test]

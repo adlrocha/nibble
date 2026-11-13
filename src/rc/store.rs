@@ -13,6 +13,10 @@
 //! - `rc:link:<task_id>`: a session ↔ Slack thread link ([`Link`]).
 //! - `rc:spawn:<thread_ts>`: a session started from Slack whose agent has
 //!   not registered yet ([`PendingSpawn`]).
+//! - `rc:delivery:<id>`: a queued Slack Web API call ([`Delivery`]),
+//!   including the message text it posts; `rc:delivery-sequence` orders them.
+//! - `rc:sessions-disabled`: set when Slack rejects the agent-session APIs,
+//!   so status and title calls stop queuing until the daemon restarts.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
