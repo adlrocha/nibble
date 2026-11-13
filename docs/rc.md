@@ -126,7 +126,7 @@ nibble rc manifest --name nibble-desktop   # on the desktop
 ```
 
 `--name` names the app, its bot and its slash command (`/nibble-laptop`,
-`/nibble-desktop`). It has to be up to 32 lowercase letters, digits, `-` or
+`/nibble-desktop`). It has to be up to 31 lowercase letters, digits, `-` or
 `_`. Two things go wrong otherwise:
 
 - **Same slash command.** Slash commands are workspace-wide: if both apps
@@ -142,8 +142,8 @@ To fix an app that already declares `/nibble`: on its page at
 <https://api.slack.com/apps>, open *App Manifest*, change `command: /nibble`
 (and the names) to the machine's own, save, and reinstall if Slack asks. If
 the bot token changes, run `nibble rc setup` again and
-`systemctl --user restart nibble-rc`. The daemon answers to any command
-name, and its replies to a command name the one you typed.
+`systemctl --user restart nibble-rc`. The daemon answers whatever the
+command is called, and its replies name the command you typed.
 
 ## Configuration
 

@@ -64,16 +64,19 @@ fn manifest(name: Option<&str>) -> Result<String> {
     let Some(name) = name else {
         return Ok(MANIFEST.to_string());
     };
-    // Slack: a command is at most 32 characters, lowercase, without spaces.
+    // Slack: a command, its leading `/` included, is at most 32 characters,
+    // lowercase, without spaces.
     let valid = !name.is_empty()
-        && name.len() <= 32
+        && name.len() < 32
         && name
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
     if !valid {
-        bail!("invalid --name '{name}': use up to 32 lowercase letters, digits, '-' or '_', since it becomes the slash command");
+        bail!("invalid --name '{name}': use up to 31 lowercase letters, digits, '-' or '_', since it becomes the slash command");
     }
-    Ok([
+    // Each anchor must match exactly once, so a manifest edit that moves
+    // one fails loudly instead of silently leaving a field unrenamed.
+    [
         ("\n  name: nibble\n", format!("\n  name: \"{name}\"\n")),
         (
             "display_name: nibble\n",
@@ -83,9 +86,15 @@ fn manifest(name: Option<&str>) -> Result<String> {
         ("new one with /nibble.", format!("new one with /{name}.")),
     ]
     .iter()
-    .fold(MANIFEST.to_string(), |m, (from, to)| {
-        m.replacen(from, to, 1)
-    }))
+    .try_fold(MANIFEST.to_string(), |m, (from, to)| rename(&m, from, to))
+}
+
+/// `text` with its one occurrence of `from` replaced by `to`.
+fn rename(text: &str, from: &str, to: &str) -> Result<String> {
+    match text.matches(from).count() {
+        1 => Ok(text.replacen(from, to, 1)),
+        n => bail!("manifest template has {n} matches for {from:?}, expected 1"),
+    }
 }
 
 /// The task a command targets: the explicit id, else the agent's own
@@ -597,10 +606,18 @@ mod tests {
 
     #[test]
     fn manifest_rejects_names_slack_would_refuse() {
-        for bad in ["", "Nibble", "my nibble", "/nibble", &"a".repeat(33)] {
+        for bad in ["", "Nibble", "my nibble", "/nibble", &"a".repeat(32)] {
             assert!(manifest(Some(bad)).is_err(), "{bad:?} accepted");
         }
-        assert!(manifest(Some(&"a".repeat(32))).is_ok());
+        // 31 characters plus the leading `/` is Slack's 32.
+        assert!(manifest(Some(&"a".repeat(31))).is_ok());
+    }
+
+    #[test]
+    fn rename_requires_exactly_one_match() {
+        assert_eq!(rename("a b", "b", "c").unwrap(), "a c");
+        assert!(rename("a b", "x", "c").is_err());
+        assert!(rename("b b", "b", "c").is_err());
     }
 
     #[test]
