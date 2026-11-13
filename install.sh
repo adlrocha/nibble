@@ -742,6 +742,10 @@ step "Installing scheduled jobs daemon"
 
 CRON_LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/nibble/cron"
 mkdir -p "$CRON_LOG_DIR" && chmod 700 "$CRON_LOG_DIR"
+# Optional: a systemd unit gets none of a shell's exports, so keys a sandbox
+# it spawns needs (ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, GITHUB_TOKEN, ...)
+# go here. The leading `-` keeps a missing file from failing the unit.
+CRON_ENV_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/nibble/cron.env"
 cat > "$SYSTEMD_DIR/nibble-cron.service" << UNIT
 [Unit]
 Description=Nibble — run scheduled jobs of registered repos
@@ -756,6 +760,7 @@ Environment=HOME=%h
 Environment="PATH=$BIN_DIR:$PATH"
 $( [ -n "${XDG_CONFIG_HOME:-}" ] && printf 'Environment="XDG_CONFIG_HOME=%s"' "$XDG_CONFIG_HOME" )
 $( [ -n "${XDG_STATE_HOME:-}" ] && printf 'Environment="XDG_STATE_HOME=%s"' "$XDG_STATE_HOME" )
+EnvironmentFile=-$CRON_ENV_FILE
 StandardOutput=append:$CRON_LOG_DIR/daemon.log
 StandardError=append:$CRON_LOG_DIR/daemon.log
 
