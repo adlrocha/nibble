@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 /// older nibble's jobs are waiting for `nibble cron import`.
 pub(crate) fn open(db: &Database) -> Result<CronStore> {
     let store = CronStore::open()?;
-    if super::store::legacy_pending(&store, db)? {
+    if super::legacy::legacy_pending(&store, db)? {
         eprintln!(
             "Older cron jobs are still in ~/.nibble/tasks.db; review and move them into their repos with `nibble cron import`."
         );
@@ -22,15 +22,17 @@ pub(crate) fn open(db: &Database) -> Result<CronStore> {
 /// `nibble cron import`: show what would happen to older nibble's jobs,
 /// and do it once confirmed.
 pub(crate) fn cmd_import(db: &Database, store: &CronStore, yes: bool) -> Result<()> {
-    use super::store::LegacyItem;
-    let plan = super::store::plan_legacy(db)?;
+    use super::legacy::LegacyItem;
+    let plan = super::legacy::plan_legacy(store, db)?;
     if plan.is_empty() {
         println!("No older cron jobs to import.");
-        return super::store::mark_legacy_done(store);
+        return super::legacy::mark_legacy_done(store);
     }
     for item in &plan {
         match item {
-            LegacyItem::Import { repo, path, def } => {
+            LegacyItem::Import {
+                repo, path, def, ..
+            } => {
                 // In full: importing approves it, so you see what you approve.
                 println!(
                     "\n── import → {} (registers {}){}\n{}",
@@ -53,7 +55,7 @@ pub(crate) fn cmd_import(db: &Database, store: &CronStore, yes: bool) -> Result<
         println!("Nothing imported. Run `nibble cron import` again when ready.");
         return Ok(());
     }
-    super::store::apply_legacy(store, &plan)?;
+    super::legacy::apply_legacy(store, &plan)?;
     println!("Imported. Commit the new files to keep them; the old rows stay in tasks.db.");
     Ok(())
 }
@@ -222,10 +224,15 @@ pub(crate) fn resolve_job_file(store: &CronStore, arg: &str) -> Result<(PathBuf,
     }
 }
 
-/// Write a new job file, refusing to replace one.
-fn write_new(repo: &Path, def: &JobDef) -> Result<PathBuf> {
+/// Write `def` as a new job file in `repo` and approve it here, exactly as
+/// it reads back. The one way a job file is created (`add` and `import`):
+/// it never replaces a file or follows a symlink, and never writes outside
+/// the repo.
+pub(crate) fn create_job(store: &CronStore, repo: &Path, def: &JobDef) -> Result<PathBuf> {
+    use std::io::Write;
     let path = super::job_path(repo, &def.name);
-    if path.exists() {
+    // A dangling symlink "does not exist", yet writing would follow it.
+    if !super::nothing_at(&path) {
         bail!(
             "{} already exists; edit it with `nibble cron edit {}`",
             path.display(),
@@ -236,7 +243,15 @@ fn write_new(repo: &Path, def: &JobDef) -> Result<PathBuf> {
     // Never write a file that would not load.
     super::parse_job(&def.name, &text).context("the new job is invalid")?;
     super::real_jobs_dir(repo)?;
-    std::fs::write(&path, text).with_context(|| format!("failed to write {}", path.display()))?;
+    // `create_new` also refuses whatever appeared since the check above.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .and_then(|mut f| f.write_all(text.as_bytes()))
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    let written = super::load_job_file(&path)?;
+    store.set_approved(&repo_str(repo), &written.name, &super::format_job(&written))?;
     Ok(path)
 }
 
@@ -312,10 +327,8 @@ pub(crate) fn cmd_add(store: &CronStore, a: AddArgs) -> Result<()> {
         if let Some(e) = a.expires {
             def.expires_at = Some(super::parse_expiry(&e, now)?);
         }
-        let path = write_new(&repo, &def)?;
-        // You wrote it here: approved, as read back from the file.
-        let written = super::load_job_file(&path)?;
-        store.set_approved(&key, &written.name, &super::format_job(&written))?;
+        // You wrote it here: approved.
+        let path = create_job(store, &repo, &def)?;
         println!("Wrote {} (commit it to share it).", path.display());
     }
     if added {
@@ -875,6 +888,27 @@ mod tests {
         let err = cmd_add(&store, a).unwrap_err().to_string();
         assert!(err.contains("outside the repo"), "{err}");
         assert!(!elsewhere.join("cron/job.md").exists());
+    }
+
+    #[test]
+    fn writes_refuse_a_dangling_symlinked_file() {
+        let (tmp, store, repo) = setup();
+        let target = tmp.path().join("outside.md");
+        std::os::unix::fs::symlink(&target, super::super::job_path(&repo, "job")).unwrap();
+        let a = AddArgs {
+            repo: Some(repo_str(&repo)),
+            schedule: Some("0 1 * * *".into()),
+            prompt: Some("p".into()),
+            file: None,
+            label: Some("Job".into()),
+            expires: None,
+            yes: false,
+        };
+        assert!(cmd_add(&store, a)
+            .unwrap_err()
+            .to_string()
+            .contains("already exists"));
+        assert!(!target.exists(), "nothing written through the link");
     }
 
     #[test]

@@ -30,11 +30,14 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub mod commands;
+pub mod legacy;
 pub mod secrets;
 pub mod store;
 
 /// Where a repository keeps its job files.
 pub const JOBS_DIR: &str = ".nibble/cron";
+/// Longest job name, and so job file stem.
+pub const MAX_NAME_LEN: usize = 64;
 /// How long a run may take when the file sets no `timeout`.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// Longest `timeout` a file may set.
@@ -241,14 +244,14 @@ pub fn validate_label(label: &str) -> Result<()> {
 /// A job file name: lowercase letters, digits, `-` and `_`.
 pub fn validate_name(name: &str) -> Result<()> {
     let ok = !name.is_empty()
-        && name.len() <= 64
+        && name.len() <= MAX_NAME_LEN
         && name.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
         && name
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
     if !ok {
         bail!(
-            "job name {name:?} must be 1-64 lowercase letters, digits, '-' or '_', starting with a letter or digit"
+            "job name {name:?} must be 1-{MAX_NAME_LEN} lowercase letters, digits, '-' or '_', starting with a letter or digit"
         );
     }
     Ok(())
@@ -279,7 +282,11 @@ pub fn slug(label: &str) -> String {
             out.push('-');
         }
     }
-    let out: String = out.trim_end_matches('-').chars().take(64).collect();
+    let out: String = out
+        .trim_end_matches('-')
+        .chars()
+        .take(MAX_NAME_LEN)
+        .collect();
     let out = out.trim_end_matches('-').to_string();
     if out.is_empty() {
         "job".to_string()
@@ -405,6 +412,12 @@ pub fn real_jobs_dir(repo: &Path) -> Result<PathBuf> {
     }
     check_outside_sandbox_mount(&real)?;
     Ok(real)
+}
+
+/// Nothing at `path`, not even a dangling symlink (which `exists()` calls
+/// absent, yet a write would follow).
+pub fn nothing_at(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_err()
 }
 
 /// `<repo>/.nibble/cron/<name>.md`.
@@ -693,7 +706,7 @@ enabled = false is prompt text, not a setting.
         assert_eq!(slug("Daily Standup!"), "daily-standup");
         assert_eq!(slug("  --Ünïcode  "), "n-code");
         assert_eq!(slug("!!!"), "job");
-        assert_eq!(slug(&"a".repeat(80)).len(), 64);
+        assert_eq!(slug(&"a".repeat(80)).len(), MAX_NAME_LEN);
         assert!(validate_name(&slug("Malone Daily Tasks")).is_ok());
     }
 

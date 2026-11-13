@@ -45,7 +45,9 @@ the repo's other jobs still run.
 
 For now `nibble cron run` types the prompt into the repo's running sandbox
 session, where `timeout`, `model`, `env`, `notify` and `read_only` do not
-apply yet.
+apply yet. A manual run is one you asked for, so it also ignores
+`enabled`, `expires_at`, `skip_if_running` and a `nibble cron stop` pause;
+it only needs the job approved here.
 
 ## Commands
 
