@@ -71,6 +71,10 @@ zellij pane (claude | pi | omp, host or sandbox)
   command.
 - Only your Slack member ID is listened to. Messages from anyone else, and
   from other channels, are ignored.
+- The same daemon posts [`nibble cron`](cron.md#reports-in-slack) report
+  cards to the DM, on its poll pass. They wait in `rc.db` (`rc:report:`
+  records) until posted, so a report made while the daemon is down is posted
+  once it is back.
 
 ## Setup
 
@@ -131,7 +135,7 @@ events between them at random.
 zellij_session = "main"         # where sessions started from Slack open
 repo_roots = ["~/workspace"]    # searched for git repos for the form
 repo_depth = 3                  # levels below each root
-poll_ms = 1500                  # how often finished turns are checked
+poll_ms = 1500                  # how often finished turns and cron cards are checked
 start_timeout_secs = 240        # how long a new session may take to start
 ```
 

@@ -12,6 +12,8 @@
 //!   `/nibble-rc stop`: relaying stops, the session keeps running. Host
 //!   sessions started from Slack also have End session, which closes the
 //!   tab the daemon opened for them and so stops the agent.
+//! - The daemon also posts `nibble cron` report cards to the DM ([`reports`]),
+//!   queued in its private state, with Investigate, Fix → PR and Snooze.
 //!
 //! The Slack connection lives in one host daemon (`nibble rc daemon`,
 //! `nibble-rc.service`). Agents talk to it through nibble's database, so
@@ -22,6 +24,7 @@ mod daemon;
 mod modal;
 mod pane;
 mod relay;
+pub(crate) mod reports;
 pub(crate) mod secrets;
 mod slack;
 mod socket;

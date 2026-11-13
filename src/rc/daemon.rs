@@ -428,6 +428,16 @@ impl Daemon {
                     "Disconnected from Slack. The session keeps running in zellij.",
                 )
             }),
+            Some(
+                id @ (super::reports::INVESTIGATE_ACTION
+                | super::reports::FIX_ACTION
+                | super::reports::SNOOZE_ACTION),
+            ) => {
+                let clicked = payload["channel"]["id"]
+                    .as_str()
+                    .zip(payload["message"]["ts"].as_str());
+                self.on_report_action(id, action["value"].as_str(), clicked)
+            }
             Some(slack::END_ACTION) => action["value"]
                 .as_str()
                 .map_or(Ok(()), |task| self.end_link(task)),
@@ -673,6 +683,10 @@ impl Daemon {
             if let Err(e) = self.refresh_repos() {
                 log(&format!("repo scan failed: {e:#}"));
             }
+        }
+        // A Slack hiccup must not hold up the sessions' relays below.
+        if let Err(e) = self.post_reports() {
+            log(&format!("{e:#}"));
         }
         for (task_id, req) in store::requests(&self.db)? {
             let result = match req.action {

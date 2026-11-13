@@ -116,7 +116,29 @@ CREATE TABLE claims (
 );
 CREATE INDEX idx_claims_job ON claims(repo_path, name);
 ",
+    "
+CREATE TABLE findings (
+    repo_path TEXT NOT NULL,
+    name TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    notified_at INTEGER,
+    snoozed_until INTEGER,
+    last_seen INTEGER NOT NULL,
+    PRIMARY KEY (repo_path, name, fingerprint)
+);
+",
 ];
+
+/// What is remembered about a problem a job keeps finding, so it is
+/// reported once rather than on every run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FindingState {
+    pub severity: super::run::Severity,
+    pub notified_at: Option<DateTime<Utc>>,
+    pub snoozed_until: Option<DateTime<Utc>>,
+    pub last_seen: DateTime<Utc>,
+}
 
 /// A run [`CronStore::reap_stale`] closed because its process was gone.
 #[derive(Debug, Clone, PartialEq)]
@@ -159,8 +181,9 @@ pub fn alive(pid: u32) -> bool {
     rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
-/// How a run ended (or that it has not).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How a run ended (or that it has not). Serialized as [`Self::as_str`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum RunStatus {
     Running,
     /// The report found nothing wrong.
@@ -169,6 +192,7 @@ pub enum RunStatus {
     Critical,
     /// The run broke before reporting (no sandbox, bad output, ...).
     Failed,
+    #[serde(rename = "timeout")]
     TimedOut,
 }
 
@@ -281,6 +305,8 @@ impl CronStore {
     pub fn remove_repo(&self, repo: &str) -> Result<bool> {
         self.conn
             .execute("DELETE FROM jobs WHERE repo_path = ?1", params![repo])?;
+        self.conn
+            .execute("DELETE FROM findings WHERE repo_path = ?1", params![repo])?;
         let n = self
             .conn
             .execute("DELETE FROM repos WHERE repo_path = ?1", params![repo])?;
@@ -390,6 +416,11 @@ impl CronStore {
     pub fn delete_job(&self, repo: &str, name: &str) -> Result<()> {
         self.conn.execute(
             "DELETE FROM jobs WHERE repo_path = ?1 AND name = ?2",
+            params![repo, name],
+        )?;
+        // A job made again under the name starts with no reported findings.
+        self.conn.execute(
+            "DELETE FROM findings WHERE repo_path = ?1 AND name = ?2",
             params![repo, name],
         )?;
         Ok(())
@@ -633,6 +664,121 @@ impl CronStore {
             )
             .optional()
             .map_err(Into::into)
+    }
+
+    pub fn finding(&self, repo: &str, name: &str, fp: &str) -> Result<Option<FindingState>> {
+        self.conn
+            .query_row(
+                "SELECT severity, notified_at, snoozed_until, last_seen FROM findings
+                 WHERE repo_path = ?1 AND name = ?2 AND fingerprint = ?3",
+                params![repo, name, fp],
+                |r| {
+                    let sev: String = r.get(0)?;
+                    Ok(FindingState {
+                        severity: super::run::Severity::parse(&sev),
+                        notified_at: ts(r.get(1)?),
+                        snoozed_until: ts(r.get(2)?),
+                        last_seen: ts(r.get(3)?).unwrap_or_default(),
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn put_finding(&self, repo: &str, name: &str, fp: &str, f: &FindingState) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO findings (repo_path, name, fingerprint, severity, notified_at,
+                                   snoozed_until, last_seen)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT (repo_path, name, fingerprint) DO UPDATE SET
+               severity = ?4, notified_at = ?5, last_seen = ?7,
+               -- the later snooze end wins: a run's stale read must not
+               -- shorten a snooze set while it ran.
+               snoozed_until = NULLIF(MAX(COALESCE(snoozed_until, 0), COALESCE(?6, 0)), 0)",
+            params![
+                repo,
+                name,
+                fp,
+                f.severity.as_str(),
+                f.notified_at.map(|t| t.timestamp()),
+                f.snoozed_until.map(|t| t.timestamp()),
+                f.last_seen.timestamp(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Forget the job's findings that its latest run no longer reports, so
+    /// a problem that comes back is reported again. Snoozed ones are kept
+    /// until their snooze ends.
+    /// Only rows last seen before `seen_before` (the run's start) go, so an
+    /// older overlapping run cannot erase what a newer one just recorded.
+    pub fn retain_findings(
+        &self,
+        repo: &str,
+        name: &str,
+        keep: &[String],
+        now: DateTime<Utc>,
+        seen_before: DateTime<Utc>,
+    ) -> Result<()> {
+        // One statement, so a snooze set while it runs is honoured.
+        let keep = serde_json::to_string(keep)?;
+        self.conn.execute(
+            "DELETE FROM findings WHERE repo_path = ?1 AND name = ?2
+               AND fingerprint NOT IN (SELECT value FROM json_each(?3))
+               AND (snoozed_until IS NULL OR snoozed_until <= ?4)
+               AND last_seen < ?5",
+            params![repo, name, keep, now.timestamp(), seen_before.timestamp()],
+        )?;
+        Ok(())
+    }
+
+    /// Run `f` in one write transaction (`BEGIN IMMEDIATE`): another
+    /// process's writes cannot interleave with what `f` reads and writes.
+    /// The guard rolls back on an error or a panic, like `db`'s
+    /// `with_write_tx`.
+    pub fn atomically<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let out = f()?;
+        tx.commit()?;
+        Ok(out)
+    }
+
+    /// Forget that these findings were reported (their card never made it
+    /// to the queue), so the next run reports them.
+    pub fn unstamp(&self, repo: &str, name: &str, fps: &[String]) -> Result<()> {
+        self.conn.execute(
+            "UPDATE findings SET notified_at = NULL
+             WHERE repo_path = ?1 AND name = ?2
+               AND fingerprint IN (SELECT value FROM json_each(?3))",
+            params![repo, name, serde_json::to_string(fps)?],
+        )?;
+        Ok(())
+    }
+
+    /// Stop reporting these findings until `until`.
+    pub fn snooze(
+        &self,
+        repo: &str,
+        name: &str,
+        fps: &[String],
+        until: DateTime<Utc>,
+    ) -> Result<()> {
+        for fp in fps {
+            let mut f = self.finding(repo, name, fp)?.unwrap_or(FindingState {
+                severity: super::run::Severity::Warn,
+                notified_at: None,
+                snoozed_until: None,
+                last_seen: Utc::now(),
+            });
+            f.snoozed_until = Some(until);
+            self.put_finding(repo, name, fp, &f)?;
+        }
+        Ok(())
     }
 
     /// A value `nibble cron` keeps about this machine (see [`super::legacy`]).
