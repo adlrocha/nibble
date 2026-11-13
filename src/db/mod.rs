@@ -948,6 +948,8 @@ impl Database {
 
         Ok((rows, window))
     }
+    /// Test-only: legacy rows are only ever read now (see `cron::legacy::plan_legacy`).
+    #[cfg(test)]
     pub fn insert_cron_job(&self, job: &CronJob) -> Result<i64> {
         let now = Utc::now().timestamp();
         self.conn.execute(
@@ -972,41 +974,18 @@ impl Database {
         Ok(self.conn.last_insert_rowid())
     }
 
-    pub fn update_cron_job(&self, job: &CronJob) -> Result<()> {
-        self.conn.execute(
-            "UPDATE cron_jobs SET
-                label = ?1, schedule = ?2, prompt = ?3, enabled = ?4,
-                skip_if_running = ?5, running = ?6, last_run = ?7, next_run = ?8,
-                expires_at = ?9
-            WHERE id = ?10",
-            params![
-                job.label,
-                job.schedule,
-                job.prompt,
-                job.enabled as i32,
-                job.skip_if_running as i32,
-                job.running as i32,
-                job.last_run.map(|dt| dt.timestamp()),
-                job.next_run.timestamp(),
-                job.expires_at.map(|dt| dt.timestamp()),
-                job.id.unwrap_or(0),
-            ],
-        )?;
+    #[cfg(test)]
+    pub fn set_cron_next_run_for_test(&self, ts: i64) -> Result<()> {
+        self.conn
+            .execute("UPDATE cron_jobs SET next_run = ?1", params![ts])?;
         Ok(())
     }
 
-    pub fn get_cron_job(&self, id: i64) -> Result<Option<CronJob>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, repo_path, label, schedule, prompt, enabled, skip_if_running,
-                    running, last_run, next_run, expires_at, created_at
-             FROM cron_jobs WHERE id = ?1",
-        )?;
-
-        let job = stmt
-            .query_row(params![id], |row| self.row_to_cron_job(row))
-            .optional()?;
-
-        Ok(job)
+    /// Whether any legacy cron row exists, without reading the rows.
+    pub fn has_cron_jobs(&self) -> Result<bool> {
+        Ok(self
+            .conn
+            .query_row("SELECT EXISTS (SELECT 1 FROM cron_jobs)", [], |r| r.get(0))?)
     }
 
     pub fn list_cron_jobs(&self, repo_path_filter: Option<&str>) -> Result<Vec<CronJob>> {
@@ -1038,35 +1017,6 @@ impl Database {
         Ok(jobs)
     }
 
-    pub fn delete_cron_job(&self, id: i64) -> Result<bool> {
-        let affected = self
-            .conn
-            .execute("DELETE FROM cron_jobs WHERE id = ?1", params![id])?;
-
-        Ok(affected > 0)
-    }
-
-    pub fn get_cron_job_by_label(&self, label: &str) -> Result<Option<CronJob>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, repo_path, label, schedule, prompt, enabled, skip_if_running,
-                    running, last_run, next_run, expires_at, created_at
-             FROM cron_jobs WHERE label = ?1 LIMIT 1",
-        )?;
-        let job = stmt
-            .query_row(params![label], |row| self.row_to_cron_job(row))
-            .optional()?;
-        Ok(job)
-    }
-
-    pub fn label_exists_for_repo(&self, repo_path: &str, label: &str) -> Result<bool> {
-        let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM cron_jobs WHERE repo_path = ?1 AND label = ?2",
-            params![repo_path, label],
-            |row| row.get(0),
-        )?;
-        Ok(count > 0)
-    }
-
     fn row_to_cron_job(&self, row: &rusqlite::Row) -> rusqlite::Result<CronJob> {
         let last_run_ts: Option<i64> = row.get(8)?;
         let next_run_ts: i64 = row.get(9)?;
@@ -1082,10 +1032,18 @@ impl Database {
             enabled: row.get::<_, i32>(5)? != 0,
             skip_if_running: row.get::<_, i32>(6)? != 0,
             running: row.get::<_, i32>(7)? != 0,
-            last_run: last_run_ts.map(|ts| Utc.timestamp_opt(ts, 0).unwrap()),
-            next_run: Utc.timestamp_opt(next_run_ts, 0).unwrap(),
-            expires_at: expires_ts.map(|ts| Utc.timestamp_opt(ts, 0).unwrap()),
-            created_at: Utc.timestamp_opt(created_ts, 0).unwrap(),
+            // These rows sit in a database sandboxes can write: an
+            // out-of-range time must not panic every `nibble cron` command.
+            last_run: last_run_ts.and_then(|ts| Utc.timestamp_opt(ts, 0).single()),
+            next_run: Utc
+                .timestamp_opt(next_run_ts, 0)
+                .single()
+                .unwrap_or_default(),
+            expires_at: expires_ts.and_then(|ts| Utc.timestamp_opt(ts, 0).single()),
+            created_at: Utc
+                .timestamp_opt(created_ts, 0)
+                .single()
+                .unwrap_or_default(),
         })
     }
 

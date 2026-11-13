@@ -811,45 +811,51 @@ pub enum SessionAction {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum CronAction {
-    /// Add a new cron job targeting a repo path.
-    /// At trigger time nibble will find or spawn a sandbox for that repo automatically.
+    /// Register a repo on this machine and review its job files
+    /// (`.nibble/cron/*.md`): only approved ones run here, on schedule once
+    /// the scheduler service is installed. With --schedule and --prompt, or
+    /// --file, first writes a new job file into the repo.
     Add {
-        /// Path to the repository this cron job targets.
-        /// If omitted, repo_path must be set in the --file markdown.
+        /// Repository (default: the git repo around the current directory)
         #[arg(short, long)]
         repo: Option<String>,
 
-        /// Cron schedule expression (e.g., "0 9 * * 1-5" for 9am weekdays)
+        /// Cron schedule for a new job (e.g. "0 9 * * 1-5" for 9am weekdays)
         #[arg(short, long)]
         schedule: Option<String>,
 
-        /// Prompt text to send (alternative to --file)
+        /// Prompt for a new job
         #[arg(short, long)]
         prompt: Option<String>,
 
-        /// Path to markdown file with cron definition
+        /// Markdown job definition to write into the repo (in nibble's
+        /// layout: comments and default-valued keys are dropped)
         #[arg(short, long)]
         file: Option<String>,
 
-        /// Label/name for this cron job
+        /// Title of the new job; its file name is made from it
         #[arg(short, long)]
         label: Option<String>,
 
-        /// Expiry datetime in RFC3339 format (e.g. "2026-04-01T00:00:00Z").
-        /// Job is auto-disabled after this time.
+        /// Expiry for the new job: RFC3339 ("2026-04-01T00:00:00Z") or
+        /// relative ("+7d"). The job stops running after it.
         #[arg(long)]
         expires: Option<String>,
+
+        /// Approve the repo's job files without asking
+        #[arg(long)]
+        yes: bool,
     },
 
-    /// List cron jobs (optionally filtered by repo path)
+    /// List the jobs of registered repos (optionally one repo)
     List {
-        /// Optional canonical repo path to filter by
+        /// Only this repo
         repo_path: Option<String>,
     },
 
-    /// Edit an existing cron job
+    /// Change a job file: with flags, or in $EDITOR when none are given
     Edit {
-        /// Cron job ID or label
+        /// Job name, repo/name, or path of the job file
         id: String,
 
         /// New schedule expression
@@ -860,46 +866,105 @@ pub enum CronAction {
         #[arg(short, long)]
         prompt: Option<String>,
 
-        /// New label
+        /// New title
         #[arg(short, long)]
         label: Option<String>,
 
-        /// Enable the cron job
+        /// Set enabled = true in the file (every machine)
         #[arg(long)]
         enable: bool,
 
-        /// Disable the cron job
+        /// Set enabled = false in the file (every machine)
         #[arg(long)]
         disable: bool,
 
-        /// Set or update expiry datetime in RFC3339 format (e.g. "2026-04-01T00:00:00Z").
-        /// Pass "none" to remove an existing expiry.
+        /// Expiry: RFC3339, relative ("+7d"), or "none" to remove it
         #[arg(long)]
         expires: Option<String>,
     },
 
-    /// Disable a cron job without deleting it (can be re-enabled with start)
+    /// Review and approve job files to run on this machine (a file that
+    /// changes needs approving again)
+    Approve {
+        /// Job name, repo/name, or path (default: every pending job of --repo)
+        job: Option<String>,
+        /// Repository (default: the git repo around the current directory)
+        #[arg(short, long)]
+        repo: Option<String>,
+        /// Approve without asking
+        #[arg(long)]
+        yes: bool,
+    },
+
+    /// Pause a job on this machine only (the file is untouched)
     Stop {
-        /// Cron job ID or label
+        /// Job name, repo/name, or path of the job file
         id: String,
     },
 
-    /// Re-enable a previously stopped cron job
+    /// Resume a job paused with stop
     Start {
-        /// Cron job ID or label
+        /// Job name, repo/name, or path of the job file
         id: String,
     },
 
-    /// Delete a cron job
+    /// Delete a job file
     Kill {
-        /// Cron job ID or label
+        /// Job name, repo/name, or path of the job file
         id: String,
     },
 
-    /// Run a cron job immediately (for testing)
+    /// Run a job now
     Run {
-        /// Cron job ID or label
+        /// Job name, repo/name, or path of the job file
         id: String,
+    },
+
+    /// Stop running a repo's jobs on this machine (its files are kept)
+    Forget {
+        /// Repository path
+        repo: String,
+    },
+
+    /// Move jobs an older nibble kept in ~/.nibble/tasks.db into their repos,
+    /// after showing what would happen
+    Import {
+        /// Import without asking
+        #[arg(long)]
+        yes: bool,
+    },
+
+    /// Values jobs get as environment variables (`env = [...]` in the file),
+    /// kept per repo outside every sandbox
+    Secret {
+        #[command(subcommand)]
+        action: CronSecretAction,
+    },
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum CronSecretAction {
+    /// Store a value (read without echo, or from stdin)
+    Set {
+        /// Variable name, e.g. NORTHFLANK_API_TOKEN
+        name: String,
+        /// Repository (default: the git repo around the current directory)
+        #[arg(short, long)]
+        repo: Option<String>,
+    },
+    /// List stored names (never values)
+    List {
+        /// Only this repository
+        #[arg(short, long)]
+        repo: Option<String>,
+    },
+    /// Remove a value
+    Unset {
+        /// Variable name
+        name: String,
+        /// Repository (default: the git repo around the current directory)
+        #[arg(short, long)]
+        repo: Option<String>,
     },
 }
 
