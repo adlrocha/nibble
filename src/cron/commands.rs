@@ -467,6 +467,9 @@ pub(crate) fn cmd_list(store: &CronStore, repo_filter: Option<&str>) -> Result<(
     // Matched as `forget` matches, so a repo that is gone is still listed
     // (as missing) instead of refused.
     let filter = repo_filter.map(|r| PathBuf::from(repo_key(r)));
+    // A run stopped with Ctrl-C leaves its claim; without the daemon to
+    // reap it, the job would read `running` until its next run.
+    store.drop_dead_claims(None)?;
     let repos: Vec<PathBuf> = store
         .repos()?
         .into_iter()
@@ -1317,6 +1320,19 @@ mod tests {
         std::os::unix::fs::symlink(&elsewhere, repo.join(".nibble/cron")).unwrap();
         let err = super::super::load_repo_jobs(&repo).unwrap_err().to_string();
         assert!(err.contains("outside the repo"), "{err}");
+    }
+
+    #[test]
+    fn listing_drops_the_claim_of_a_run_that_died() {
+        let (_tmp, store, repo) = setup();
+        let key = repo_str(&repo);
+        store
+            .claim(&key, "logs", u32::MAX - 1, false)
+            .unwrap()
+            .unwrap();
+        assert!(store.job(&key, "logs").unwrap().running);
+        cmd_list(&store, None).unwrap();
+        assert!(!store.job(&key, "logs").unwrap().running);
     }
 
     #[test]

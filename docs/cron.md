@@ -134,7 +134,10 @@ repo's sandbox (after a reboot, or `nibble sandbox kill`), that sandbox
 only has the keys the service has, so put any your sandboxes need, such as
 `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL` or `GITHUB_TOKEN`, in
 `~/.config/nibble/cron.env` (`NAME=value` lines, mode 0600) and run
-`systemctl --user restart nibble-cron`.
+`systemctl --user restart nibble-cron`. A sandbox keeps the environment it
+was created with, so also `nibble sandbox kill` the repo's sandbox if the
+service already started one without those keys; the next run starts a new
+one.
 
 ## Approving jobs
 
