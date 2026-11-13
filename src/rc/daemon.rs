@@ -1,7 +1,8 @@
 //! `nibble rc daemon`: the Slack side of remote control.
 //!
-//! One thread serves the Socket Mode connection and, between frames, runs a
-//! poll pass over nibble's state:
+//! The socket loop polls nibble's state; normal outbound posts are retained in
+//! a durable queue and delivered by a separate worker, so slow Slack requests
+//! and rate limits cannot block reading/acknowledging socket frames:
 //!
 //! - **Requests** from `/nibble-rc` (host or sandbox) link a session to a
 //!   new DM thread, or close the link.
@@ -28,7 +29,7 @@ use super::secrets::Secrets;
 use super::slack::{self, CardState, SessionCard, SessionStatus, Slack};
 use super::socket::{self, Envelope, Read};
 use super::store::{self, CardInfo, Link, RequestAction, Response};
-use super::{pane, relay, transcript};
+use super::{delivery, pane, relay, transcript};
 use crate::config::RcConfig;
 use crate::db::Database;
 use crate::models::{SandboxType, Task};
@@ -66,7 +67,7 @@ pub(crate) fn run(cfg: RcConfig, db_path: PathBuf) -> Result<()> {
 
     let mut daemon = Daemon {
         cfg,
-        secrets,
+        secrets: secrets.clone(),
         bot,
         dm,
         db,
@@ -76,6 +77,7 @@ pub(crate) fn run(cfg: RcConfig, db_path: PathBuf) -> Result<()> {
         last_beat: None,
         repos_cache: None,
         transcript_lens: HashMap::new(),
+        delivery: Some(delivery::Worker::start(secrets.bot_token.clone())?),
     };
     // Warm the form's repo list so the first click opens it quickly.
     if let Err(e) = daemon.repos() {
@@ -135,6 +137,7 @@ pub(super) struct Daemon {
     /// Each linked task's transcript size when it was last read, so a turn
     /// that wrote nothing new is not read again.
     pub(super) transcript_lens: HashMap<String, u64>,
+    pub(super) delivery: Option<delivery::Worker>,
 }
 
 impl Daemon {
@@ -189,6 +192,14 @@ impl Daemon {
     }
 
     fn dispatch(&mut self, conn: &mut socket::Connection, env: Envelope) -> Result<()> {
+        self.dispatch_with(&mut |frame| conn.send(frame), env)
+    }
+
+    fn dispatch_with(
+        &mut self,
+        send: &mut impl FnMut(String) -> Result<()>,
+        env: Envelope,
+    ) -> Result<()> {
         let id = env.envelope_id().unwrap_or_default().to_string();
         // Slack redelivers what it did not see acknowledged in 3 seconds
         // (a long poll pass can delay the read): act once, re-ack the rest.
@@ -196,14 +207,14 @@ impl Daemon {
         if let Some(key) = &key {
             if !self.first_sight(key) {
                 if !id.is_empty() {
-                    conn.send(socket::ack_frame(&id, None))?;
+                    send(socket::ack_frame(&id, None))?;
                 }
                 return Ok(());
             }
         }
         let (ack, after) = match env {
             Envelope::Event { payload, .. } => {
-                conn.send(socket::ack_frame(&id, None))?;
+                send(socket::ack_frame(&id, None))?;
                 if let Err(e) = self.on_event(&payload) {
                     log(&format!("event failed: {e:#}"));
                 }
@@ -225,7 +236,7 @@ impl Daemon {
             }
         }
         if !id.is_empty() {
-            if let Err(e) = conn.send(socket::ack_frame(&id, ack.as_ref())) {
+            if let Err(e) = send(socket::ack_frame(&id, ack.as_ref())) {
                 // Unacknowledged: Slack redelivers it, and it must be acted
                 // on then rather than dropped as a repeat.
                 if let Some(key) = &key {
@@ -313,9 +324,12 @@ impl Daemon {
         match incoming {
             Incoming::TopLevel { channel, ts, text } => {
                 let blocks = slack::new_session_offer_blocks(&ts, &text);
-                self.bot
-                    .post(&channel, Some(&ts), "Start a session for this?", &blocks)
-                    .map(drop)
+                self.queue(&[Self::message(
+                    &channel,
+                    Some(&ts),
+                    "Start a session for this?",
+                    &blocks,
+                )])
             }
             Incoming::Reply {
                 channel,
@@ -330,7 +344,7 @@ impl Daemon {
         if let Some(mut spawn) = store::spawn_for_thread(&self.state, thread_ts)? {
             spawn.queued.push(text.to_string());
             store::put_spawn(&self.state, &spawn)?;
-            let _ = self.bot.react(channel, ts, "hourglass_flowing_sand");
+            self.queue_reaction(channel, ts, "hourglass_flowing_sand");
             return Ok(());
         }
         let Some(mut link) = store::link_by_thread(&self.state, channel, thread_ts)? else {
@@ -366,7 +380,7 @@ impl Daemon {
             return Ok(());
         }
         pane_input::send_text(&session, pane_id, text)?;
-        let _ = self.bot.react(channel, ts, "eyes");
+        self.queue_reaction(channel, ts, "eyes");
         link.watch = relay::after_reply(link.watch);
         link.idle_checks = 0;
         store::put_link(&self.state, &link)?;
@@ -564,12 +578,13 @@ impl Daemon {
         // fail, so its thread and Close button always have a session.
         let (cursor, shown) = relay::start_point(self.current_turn(&task), link.watch);
         link.last_reply_id = cursor;
-        store::put_link(&self.state, &link)?;
-        if let Some(reply) = shown {
-            if let Err(e) = self.post_reply(&link, &format!("*Last reply*\n\n{}", reply.text)) {
-                log(&format!("could not post the last reply: {e:#}"));
-            }
-        }
+        let deliveries = shown
+            .map(|reply| {
+                Self::reply_deliveries(&link, &format!("*Last reply*\n\n{}", reply.text), false)
+            })
+            .unwrap_or_default();
+        store::save_relay(&self.state, &link, &deliveries)?;
+        self.wake_delivery();
         let status = relay::status_of(link.watch);
         self.session_status(&link.channel, &link.thread_ts, status);
         self.session_title(
@@ -644,25 +659,50 @@ impl Daemon {
 
     fn finish_link(&mut self, mut link: Link, why: &str, state: CardState) -> Result<()> {
         link.closed = true;
-        self.transcript_lens.remove(&link.task_id);
-        store::put_link(&self.state, &link)?;
         let card = session_card(&link, None);
-        if let Err(e) = self.bot.update(
+        let text = slack::session_card_text(&card);
+        let blocks = slack::session_card_blocks(&card, state).to_string();
+        let mut deliveries = vec![store::Delivery::new(
             &link.channel,
-            link.card_message(),
-            &slack::session_card_text(&card),
-            &slack::session_card_blocks(&card, state),
-        ) {
-            log(&format!("could not update the session card: {e:#}"));
+            "chat.update",
+            &[
+                ("channel", &link.channel),
+                ("ts", link.card_message()),
+                ("text", &text),
+                ("blocks", &blocks),
+            ],
+        )];
+        deliveries.push(Self::message(
+            &link.channel,
+            Some(&link.thread_ts),
+            why,
+            &slack::note_blocks(why),
+        ));
+        if self.sessions_api {
+            deliveries.push(Self::status_delivery(
+                &link.channel,
+                &link.thread_ts,
+                SessionStatus::Closed,
+            ));
         }
-        self.note(&link.channel, &link.thread_ts, why);
-        self.session_status(&link.channel, &link.thread_ts, SessionStatus::Closed);
+        store::save_relay(&self.state, &link, &deliveries)?;
+        self.transcript_lens.remove(&link.task_id);
+        self.wake_delivery();
         Ok(())
     }
 
     // ── Poll pass ─────────────────────────────────────────────────────────
 
     fn poll_pass(&mut self) -> Result<()> {
+        if self
+            .delivery
+            .as_ref()
+            .is_some_and(delivery::Worker::finished)
+        {
+            log("delivery worker stopped; restarting it");
+            self.delivery = Some(delivery::Worker::start(self.secrets.bot_token.clone())?);
+        }
+        self.sessions_api = !store::sessions_disabled(&self.state)?;
         let now = Utc::now();
         if self.last_beat.is_none_or(|b| b.elapsed() >= BEAT_EVERY) {
             store::beat(&self.db, now)?;
@@ -734,81 +774,129 @@ impl Daemon {
             .unwrap_or_default()
     }
 
-    /// Post a text the turn went on from, set apart from replies.
-    pub(super) fn post_progress(&self, link: &Link, text: &str) -> Result<()> {
-        match slack::progress_blocks(text) {
-            Some(blocks) => self
-                .bot
-                .post(
+    pub(super) fn wake_delivery(&self) {
+        if let Some(worker) = &self.delivery {
+            worker.wake();
+        }
+    }
+
+    pub(super) fn queue(&self, deliveries: &[store::Delivery]) -> Result<()> {
+        store::enqueue(&self.state, deliveries)?;
+        self.wake_delivery();
+        Ok(())
+    }
+
+    pub(super) fn message(
+        channel: &str,
+        thread: Option<&str>,
+        text: &str,
+        blocks: &Value,
+    ) -> store::Delivery {
+        let blocks = blocks.to_string();
+        let mut params = vec![("channel", channel), ("text", text), ("blocks", &blocks)];
+        if let Some(ts) = thread {
+            params.push(("thread_ts", ts));
+        }
+        store::Delivery::new(channel, "chat.postMessage", &params)
+    }
+
+    pub(super) fn reply_deliveries(
+        link: &Link,
+        text: &str,
+        progress: bool,
+    ) -> Vec<store::Delivery> {
+        if progress {
+            if let Some(blocks) = slack::progress_blocks(text) {
+                return vec![Self::message(
                     &link.channel,
                     Some(&link.thread_ts),
                     &slack::preview(text),
                     &blocks,
+                )];
+            }
+        }
+        slack::chunk_text(text, slack::MARKDOWN_LIMIT)
+            .into_iter()
+            .map(|chunk| {
+                Self::message(
+                    &link.channel,
+                    Some(&link.thread_ts),
+                    &slack::preview(&chunk),
+                    &slack::markdown_blocks(&chunk),
                 )
-                .map(|_| ()),
-            None => self.post_reply(link, text),
-        }
+            })
+            .collect()
     }
 
-    pub(super) fn post_reply(&self, link: &Link, text: &str) -> Result<()> {
-        for chunk in slack::chunk_text(text, slack::MARKDOWN_LIMIT) {
-            self.bot.post(
-                &link.channel,
-                Some(&link.thread_ts),
-                &slack::preview(&chunk),
-                &slack::markdown_blocks(&chunk),
-            )?;
-        }
-        Ok(())
-    }
-
-    /// Post a top-level message (no thread to put it in).
     pub(super) fn say(&self, channel: &str, text: &str) {
-        if let Err(e) = self
-            .bot
-            .post(channel, None, text, &slack::note_blocks(text))
-        {
-            log(&format!("could not post a message: {e:#}"));
+        if let Err(e) = self.queue(&[Self::message(
+            channel,
+            None,
+            text,
+            &slack::note_blocks(text),
+        )]) {
+            log(&format!("could not queue a message: {e:#}"));
         }
     }
 
     pub(super) fn note(&self, channel: &str, thread_ts: &str, text: &str) {
-        if let Err(e) = self
-            .bot
-            .post(channel, Some(thread_ts), text, &slack::note_blocks(text))
-        {
-            log(&format!("could not post a note: {e:#}"));
+        if let Err(e) = self.queue(&[Self::message(
+            channel,
+            Some(thread_ts),
+            text,
+            &slack::note_blocks(text),
+        )]) {
+            log(&format!("could not queue a note: {e:#}"));
         }
     }
 
-    /// Best-effort agent-session status; disabled after Slack rejects the
-    /// method (the app is not declared as an agent).
-    pub(super) fn session_status(&mut self, channel: &str, thread_ts: &str, status: SessionStatus) {
-        if !self.sessions_api {
-            return;
+    fn queue_reaction(&self, channel: &str, ts: &str, emoji: &str) {
+        if let Err(e) = self.queue(&[store::Delivery::new(
+            channel,
+            "reactions.add",
+            &[("channel", channel), ("timestamp", ts), ("name", emoji)],
+        )]) {
+            log(&format!("could not queue reaction: {e:#}"));
         }
-        if let Err(e) = self.bot.set_status(channel, thread_ts, status) {
-            self.sessions_api_failed(&e);
+    }
+
+    pub(super) fn status_delivery(
+        channel: &str,
+        thread_ts: &str,
+        status: SessionStatus,
+    ) -> store::Delivery {
+        store::Delivery::new(
+            channel,
+            "agents.sessions.setStatus",
+            &[
+                ("channel_id", channel),
+                ("thread_ts", thread_ts),
+                ("status", status.as_str()),
+            ],
+        )
+    }
+
+    pub(super) fn session_status(&mut self, channel: &str, thread_ts: &str, status: SessionStatus) {
+        if self.sessions_api {
+            if let Err(e) = self.queue(&[Self::status_delivery(channel, thread_ts, status)]) {
+                log(&format!("could not queue session status: {e:#}"));
+            }
         }
     }
 
     pub(super) fn session_title(&mut self, channel: &str, thread_ts: &str, title: &str) {
-        if !self.sessions_api {
-            return;
-        }
-        if let Err(e) = self.bot.rename(channel, thread_ts, title) {
-            self.sessions_api_failed(&e);
-        }
-    }
-
-    fn sessions_api_failed(&mut self, e: &anyhow::Error) {
-        if sessions_api_unavailable(slack::error_code(e)) {
-            self.sessions_api = false;
-            log(&format!(
-                "agent sessions unavailable ({e:#}); status and titles off"
-            ));
-        } else {
-            log(&format!("agent session update failed: {e:#}"));
+        if self.sessions_api {
+            if let Err(e) = self.queue(&[store::Delivery::new(
+                channel,
+                "agents.sessions.rename",
+                &[
+                    ("channel_id", channel),
+                    ("thread_ts", thread_ts),
+                    ("title", title),
+                ],
+            )]) {
+                log(&format!("could not queue session title: {e:#}"));
+            }
         }
     }
 }
@@ -816,7 +904,7 @@ impl Daemon {
 /// Slack error codes meaning the agent-session methods will never work for
 /// this app (not declared as an agent, scope missing), as opposed to a
 /// one-off failure.
-fn sessions_api_unavailable(code: Option<&str>) -> bool {
+pub(super) fn sessions_api_unavailable(code: Option<&str>) -> bool {
     matches!(
         code,
         Some("unknown_method" | "not_allowed" | "missing_scope" | "not_an_agent" | "invalid_auth")
@@ -1005,6 +1093,78 @@ pub(super) fn session_card(link: &Link, topic: Option<&str>) -> SessionCard {
 mod tests {
     use super::super::test_support::task;
     use super::*;
+
+    #[test]
+    fn output_burst_and_slow_http_do_not_delay_socket_acknowledgements() {
+        use std::sync::mpsc;
+        let dir = tempfile::tempdir().unwrap();
+        let state = store::open_state_in(&dir.path().join("private")).unwrap();
+        let worker_state = store::open_state_in(&dir.path().join("private")).unwrap();
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let bot = Slack::for_test(format!("http://{}", server.server_addr()));
+        let burst: Vec<_> = (0..100)
+            .map(|_| store::Delivery::new("D1", "chat.postMessage", &[("text", "progress")]))
+            .collect();
+        store::enqueue(&state, &burst).unwrap();
+        let (release, wait) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let pending = store::deliveries(&worker_state).unwrap();
+            let params: Vec<_> = pending[0]
+                .params
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            bot.call("chat.postMessage", &params).unwrap();
+            wait.recv().unwrap();
+        });
+        let stalled = server
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        let mut daemon = Daemon {
+            cfg: RcConfig::default(),
+            secrets: Secrets {
+                bot_token: String::new(),
+                app_token: String::new(),
+                user_id: "U1".into(),
+            },
+            bot: Slack::for_test("http://127.0.0.1:1".into()),
+            dm: "D1".into(),
+            db: Database::open(dir.path().join("tasks.db")).unwrap(),
+            state,
+            sessions_api: true,
+            seen: Seen::default(),
+            last_beat: None,
+            repos_cache: Some((Instant::now(), vec![])),
+            transcript_lens: HashMap::new(),
+            delivery: None,
+        };
+        let closing = crate::rc::test_support::link("closing", "9.9");
+        store::put_link(&daemon.state, &closing).unwrap();
+        daemon
+            .finish_link(closing, "closed", CardState::Disconnected)
+            .unwrap();
+        assert!(
+            store::link(&daemon.state, "closing")
+                .unwrap()
+                .unwrap()
+                .closed
+        );
+        assert_eq!(store::deliveries(&daemon.state).unwrap().len(), 103);
+        let mut frames = Vec::new();
+        daemon.dispatch_with(&mut |frame| { frames.push(frame); Ok(()) }, Envelope::Event {
+            envelope_id: "ack-now".into(), payload: json!({"event_id": "e1", "event": {"type": "message", "channel_type": "im", "channel": "D1", "user": "U1", "ts": "1.0", "text": "new session"}}),
+        }).unwrap();
+        assert_eq!(frames, vec![socket::ack_frame("ack-now", None)]);
+        assert_eq!(store::deliveries(&daemon.state).unwrap().len(), 104);
+        // The HTTP request was still waiting throughout dispatch. No timing
+        // threshold or real Slack/Zellij session is needed to prove isolation.
+        stalled
+            .respond(tiny_http::Response::from_string("{\"ok\":true}"))
+            .unwrap();
+        release.send(()).unwrap();
+        worker.join().unwrap();
+    }
 
     #[test]
     fn slash_help_names_the_command_that_was_typed() {

@@ -13,6 +13,10 @@
 //! - `rc:link:<task_id>`: a session ↔ Slack thread link ([`Link`]).
 //! - `rc:spawn:<thread_ts>`: a session started from Slack whose agent has
 //!   not registered yet ([`PendingSpawn`]).
+//! - `rc:delivery:<id>`: a queued Slack Web API call ([`Delivery`]),
+//!   including the message text it posts; `rc:delivery-sequence` orders them.
+//! - `rc:sessions-disabled`: set when Slack rejects the agent-session APIs,
+//!   so status and title calls stop queuing until the daemon restarts.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -22,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use crate::db::Database;
 
 const LINK_PREFIX: &str = "rc:link:";
+const DELIVERY_PREFIX: &str = "rc:delivery:";
 
 /// `$XDG_STATE_HOME/nibble/rc` (default `~/.local/state/nibble/rc`): the
 /// daemon's private state and lock, out of every sandbox's reach. Its own
@@ -156,6 +161,104 @@ impl Link {
     pub(crate) fn card_message(&self) -> &str {
         self.card_ts.as_deref().unwrap_or(&self.thread_ts)
     }
+}
+
+/// One independently acknowledged Web API call. Failed records remain available
+/// for diagnosis; transient errors are retried by the delivery worker.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(super) struct Delivery {
+    pub id: String,
+    pub sequence: u64,
+    pub method: String,
+    pub params: Vec<(String, String)>,
+    pub channel: String,
+    pub attempts: u32,
+    pub due: DateTime<Utc>,
+    pub failed: bool,
+    pub last_error: Option<String>,
+}
+
+impl Delivery {
+    pub(super) fn new(channel: &str, method: &str, params: &[(&str, &str)]) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            sequence: 0,
+            method: method.into(),
+            params: params
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            channel: channel.into(),
+            attempts: 0,
+            due: Utc::now(),
+            failed: false,
+            last_error: None,
+        }
+    }
+}
+
+fn insert_deliveries(db: &Database, deliveries: &[Delivery]) -> Result<()> {
+    let mut sequence: u64 = get(db, "rc:delivery-sequence")?.unwrap_or(0);
+    for delivery in deliveries {
+        sequence = sequence
+            .checked_add(1)
+            .context("delivery sequence exhausted")?;
+        let mut delivery = delivery.clone();
+        delivery.sequence = sequence;
+        put(db, &format!("{DELIVERY_PREFIX}{}", delivery.id), &delivery)?;
+    }
+    put(db, "rc:delivery-sequence", &sequence)
+}
+
+pub(super) fn enqueue(state: &StateDb, deliveries: &[Delivery]) -> Result<()> {
+    if deliveries.is_empty() {
+        return Ok(());
+    }
+    state
+        .0
+        .with_immediate_write_tx(|db| insert_deliveries(db, deliveries))
+}
+
+/// Atomically retain the effects before advancing the discovery cursor. A crash
+/// can replay a post with an uncertain outcome, but cannot silently lose it.
+pub(super) fn save_relay(state: &StateDb, link: &Link, deliveries: &[Delivery]) -> Result<()> {
+    state.0.with_immediate_write_tx(|db| {
+        insert_deliveries(db, deliveries)?;
+        put(db, &format!("{LINK_PREFIX}{}", link.task_id), link)
+    })
+}
+
+pub(super) fn deliveries(state: &StateDb) -> Result<Vec<Delivery>> {
+    let mut entries: Vec<Delivery> = all(&state.0, DELIVERY_PREFIX)?
+        .into_iter()
+        .map(|(_, d)| d)
+        .collect();
+    entries.sort_by_key(|d| d.sequence);
+    Ok(entries)
+}
+
+pub(super) fn save_delivery(state: &StateDb, delivery: &Delivery) -> Result<()> {
+    put(
+        &state.0,
+        &format!("{DELIVERY_PREFIX}{}", delivery.id),
+        delivery,
+    )
+}
+
+pub(super) fn sessions_disabled(state: &StateDb) -> Result<bool> {
+    Ok(get(&state.0, "rc:sessions-disabled")?.unwrap_or(false))
+}
+
+pub(super) fn disable_sessions(state: &StateDb) -> Result<()> {
+    put(&state.0, "rc:sessions-disabled", &true)
+}
+
+pub(super) fn reset_sessions(state: &StateDb) -> Result<()> {
+    state.0.kv_delete("rc:sessions-disabled")
+}
+
+pub(super) fn delete_delivery(state: &StateDb, id: &str) -> Result<()> {
+    state.0.kv_delete(&format!("{DELIVERY_PREFIX}{id}"))
 }
 
 /// What an agent asks the daemon to do with its own session.
@@ -392,6 +495,61 @@ mod tests {
 
     fn sample(task: &str, ts: &str) -> Link {
         crate::rc::test_support::link(task, ts)
+    }
+
+    #[test]
+    fn concurrent_producers_and_acknowledgements_do_not_lose_deliveries() {
+        let (dir, state) = state();
+        let path = dir.path().join("rc");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let mut threads = Vec::new();
+        for _ in 0..2 {
+            let state = open_state_in(&path).unwrap();
+            let barrier = barrier.clone();
+            threads.push(std::thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..100 {
+                    enqueue(&state, &[Delivery::new("D1", "chat.postMessage", &[])]).unwrap();
+                }
+            }));
+        }
+        barrier.wait();
+        for _ in 0..100 {
+            // Worker-style independent writes interleave with sequence reads.
+            state.0.kv_set("audit-ack", "acknowledged").unwrap();
+        }
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        let queued = deliveries(&state).unwrap();
+        assert_eq!(queued.len(), 200);
+        assert!(queued.windows(2).all(|w| w[0].sequence < w[1].sequence));
+    }
+
+    #[test]
+    fn relay_checkpoint_and_deliveries_commit_or_rollback_together() {
+        let (_dir, state) = state();
+        let mut l = sample("a", "1.1");
+        let delivery = Delivery::new("D1", "chat.postMessage", &[("text", "retained")]);
+        l.last_reply_id = Some("new".into());
+        save_relay(&state, &l, &[delivery]).unwrap();
+        assert_eq!(
+            link(&state, "a").unwrap().unwrap().last_reply_id.as_deref(),
+            Some("new")
+        );
+        assert_eq!(deliveries(&state).unwrap().len(), 1);
+        // A full sequence is a deterministic mid-transaction failure: neither
+        // the next checkpoint nor any partial delivery may be committed.
+        put(&state.0, "rc:delivery-sequence", &(u64::MAX - 1)).unwrap();
+        l.last_reply_id = Some("must-not-commit".into());
+        let a = Delivery::new("D1", "chat.postMessage", &[]);
+        let b = Delivery::new("D1", "chat.postMessage", &[]);
+        assert!(save_relay(&state, &l, &[a, b]).is_err());
+        assert_eq!(deliveries(&state).unwrap().len(), 1);
+        assert_eq!(
+            link(&state, "a").unwrap().unwrap().last_reply_id.as_deref(),
+            Some("new")
+        );
     }
 
     #[test]
