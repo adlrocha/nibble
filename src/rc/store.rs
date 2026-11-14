@@ -17,12 +17,18 @@
 //!   including the message text it posts; `rc:delivery-sequence` orders them.
 //! - `rc:sessions-disabled`: set when Slack rejects the agent-session APIs,
 //!   so status and title calls stop queuing until the daemon restarts.
+//! - `rc:report:<run id>`, zero-padded to 12 digits: a cron report card,
+//!   queued by `nibble cron` and posted by the daemon ([`ReportCard`]);
+//!   kept here so a sandbox cannot forge a card whose button starts a
+//!   session.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::cron::run::Finding;
+use crate::cron::store::RunStatus;
 use crate::db::Database;
 
 const LINK_PREFIX: &str = "rc:link:";
@@ -69,6 +75,85 @@ const REQ_PREFIX: &str = "rc:req:";
 const RES_PREFIX: &str = "rc:res:";
 const SPAWN_PREFIX: &str = "rc:spawn:";
 const HEARTBEAT_KEY: &str = "rc:heartbeat";
+/// What has been done from a card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ReportState {
+    Open,
+    Investigating,
+    Fixing,
+    Snoozed,
+}
+
+/// One run's report, as queued, posted and acted on (rendered and posted
+/// by [`super::reports`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ReportCard {
+    pub run_id: i64,
+    pub repo: String,
+    pub job: String,
+    pub label: String,
+    pub status: RunStatus,
+    pub summary: String,
+    pub findings: Vec<Finding>,
+    /// Fingerprints reported for the first time (or again) by this card.
+    pub new: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    /// Where it was posted: (channel, ts).
+    pub posted: Option<(String, String)>,
+    pub state: ReportState,
+    /// Failed posting attempts; the card is given up after a few
+    /// (`reports::MAX_ATTEMPTS`).
+    #[serde(default)]
+    pub attempts: u32,
+    /// No posting attempt before this time (after a failed one).
+    #[serde(default)]
+    pub retry_at: Option<DateTime<Utc>>,
+}
+
+const REPORT_PREFIX: &str = "rc:report:";
+
+fn report_key(run_id: i64) -> String {
+    // Zero-padded, so keys sort by run.
+    format!("{REPORT_PREFIX}{run_id:012}")
+}
+
+pub(crate) fn put_report(state: &StateDb, card: &ReportCard) -> Result<()> {
+    put(&state.0, &report_key(card.run_id), card)
+}
+
+/// Save a card's new state together with the deliveries that redraw it, so
+/// a crash cannot leave Slack showing a state the store never recorded.
+pub(super) fn save_report(
+    state: &StateDb,
+    card: &ReportCard,
+    deliveries: &[Delivery],
+) -> Result<()> {
+    state.0.with_immediate_write_tx(|db| {
+        insert_deliveries(db, deliveries)?;
+        put(db, &report_key(card.run_id), card)
+    })
+}
+
+pub(crate) fn report(state: &StateDb, run_id: i64) -> Result<Option<ReportCard>> {
+    get(&state.0, &report_key(run_id))
+}
+
+/// Every report card, by run (oldest first). Corrupt ones are skipped.
+pub(crate) fn reports(state: &StateDb) -> Result<Vec<ReportCard>> {
+    let mut all: Vec<(String, ReportCard)> = all(&state.0, REPORT_PREFIX)?;
+    all.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(all.into_iter().map(|(_, c)| c).collect())
+}
+
+pub(crate) fn delete_report(state: &StateDb, run_id: i64) -> Result<()> {
+    state.0.kv_delete(&report_key(run_id))
+}
+
+#[cfg(test)]
+pub(crate) fn put_raw_report(state: &StateDb, run_id: i64, raw: &str) -> Result<()> {
+    state.0.kv_set(&report_key(run_id), raw)
+}
 
 /// The session state the daemon last relayed for a link.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
