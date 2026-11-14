@@ -455,11 +455,26 @@ impl Daemon {
             }
             _ => return Ok(()),
         }
-        put(&self.state, &c)?;
-        self.bot
-            .update(&channel, &ts, &card_text(&c), &card_blocks(&c))
-            .context("could not update the report card")
+        store::save_report(&self.state, &c, &[card_update(&c, &channel, &ts)])
+            .context("could not save the report card")?;
+        self.wake_delivery();
+        Ok(())
     }
+}
+
+/// The queued `chat.update` that redraws a posted card in its current state.
+fn card_update(c: &ReportCard, channel: &str, ts: &str) -> store::Delivery {
+    let blocks = card_blocks(c).to_string();
+    store::Delivery::new(
+        channel,
+        "chat.update",
+        &[
+            ("channel", channel),
+            ("ts", ts),
+            ("text", &card_text(c)),
+            ("blocks", &blocks),
+        ],
+    )
 }
 
 #[cfg(test)]
@@ -710,6 +725,37 @@ mod tests {
             .map(|c| c.run_id)
             .collect();
         assert_eq!(got, [12]);
+    }
+
+    #[test]
+    fn acting_on_a_card_queues_its_redraw_with_the_new_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = store::open_state_in(dir.path()).unwrap();
+        let mut c = card_of(1, ReportState::Open);
+        c.posted = Some(("D1".into(), "1.0".into()));
+        put(&state, &c).unwrap();
+        c.state = ReportState::Snoozed;
+        store::save_report(&state, &c, &[card_update(&c, "D1", "1.0")]).unwrap();
+
+        assert_eq!(
+            card(&state, 7).unwrap().unwrap().state,
+            ReportState::Snoozed
+        );
+        let queued = store::deliveries(&state).unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].method, "chat.update");
+        let param = |k: &str| {
+            queued[0]
+                .params
+                .iter()
+                .find(|(key, _)| key == k)
+                .map(|(_, v)| v.clone())
+                .unwrap()
+        };
+        assert_eq!(param("channel"), "D1");
+        assert_eq!(param("ts"), "1.0");
+        assert_eq!(param("text"), card_text(&c));
+        assert_eq!(param("blocks"), card_blocks(&c).to_string());
     }
 
     #[test]

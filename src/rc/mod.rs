@@ -21,6 +21,7 @@
 //! the Slack app manifest are in `docs/rc.md`.
 
 mod daemon;
+mod delivery;
 mod modal;
 mod pane;
 mod relay;

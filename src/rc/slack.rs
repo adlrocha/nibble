@@ -2,10 +2,10 @@
 //!
 //! Every call is form-encoded (all Web API methods accept that; structured
 //! arguments such as `blocks` or `view` travel as JSON strings) and checked
-//! for Slack's `"ok": true`. Rate-limited calls (HTTP 429) are retried once
-//! after the `Retry-After` delay.
+//! for Slack's `"ok": true`. Calls return typed transport/rate-limit errors;
+//! the durable delivery worker schedules retries without blocking the socket.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::time::Duration;
 
@@ -13,13 +13,12 @@ const API_BASE: &str = "https://slack.com/api";
 /// Slack caps a `markdown` block's text (and all markdown blocks of one
 /// message together) at 12 000 characters; stay under it with headroom.
 pub(crate) const MARKDOWN_LIMIT: usize = 11_000;
-/// Longest wait honoured for a rate-limited call.
-const MAX_RETRY_AFTER: Duration = Duration::from_secs(30);
 
 /// A Web API client bound to one token.
 pub(crate) struct Slack {
     token: String,
     agent: ureq::Agent,
+    api_base: String,
 }
 
 /// Agent session states (`agents.sessions.setStatus`).
@@ -36,7 +35,7 @@ pub(crate) enum SessionStatus {
 }
 
 impl SessionStatus {
-    fn as_str(self) -> &'static str {
+    pub(super) fn as_str(self) -> &'static str {
         match self {
             SessionStatus::Processing => "processing",
             SessionStatus::Active => "active",
@@ -51,6 +50,7 @@ impl Slack {
     pub(crate) fn new(token: &str) -> Self {
         Self {
             token: token.to_string(),
+            api_base: API_BASE.to_string(),
             agent: ureq::AgentBuilder::new()
                 .timeout(Duration::from_secs(30))
                 .build(),
@@ -60,7 +60,7 @@ impl Slack {
     /// Call `method` with form `params`; returns the response body when
     /// Slack reports `ok`.
     pub(crate) fn call(&self, method: &str, params: &[(&str, &str)]) -> Result<Value> {
-        let url = format!("{API_BASE}/{method}");
+        let url = format!("{}/{method}", self.api_base);
         let auth = format!("Bearer {}", self.token);
         let send = || {
             self.agent
@@ -69,26 +69,36 @@ impl Slack {
                 .send_form(params)
                 .map_err(Box::new)
         };
-        let resp = match send() {
-            Ok(r) => r,
-            Err(e) => match *e {
-                ureq::Error::Status(429, r) => {
-                    let wait = r
-                        .header("Retry-After")
+        let resp = send().map_err(|e| {
+            let retry_after = match e.as_ref() {
+                ureq::Error::Status(429, r) => Some(
+                    r.header("Retry-After")
                         .and_then(|v| v.parse::<u64>().ok())
-                        .map(Duration::from_secs)
-                        .unwrap_or(Duration::from_secs(1))
-                        .min(MAX_RETRY_AFTER);
-                    std::thread::sleep(wait);
-                    send().map_err(|e| anyhow::anyhow!("Slack {method}: {e}"))?
-                }
-                other => bail!("Slack {method}: {other}"),
-            },
-        };
-        let body: Value = resp
-            .into_json()
-            .with_context(|| format!("Slack {method}: unreadable response"))?;
+                        .unwrap_or(1),
+                ),
+                _ => None,
+            };
+            let transient = matches!(e.as_ref(), ureq::Error::Transport(_))
+                || matches!(e.as_ref(), ureq::Error::Status(code, _) if *code == 429 || *code >= 500);
+            anyhow::Error::new(RequestError {
+                message: format!("Slack {method}: {e}"),
+                transient,
+                retry_after,
+            })
+        })?;
+        let body: Value = resp.into_json().map_err(|e| RequestError {
+            message: format!("Slack {method}: unreadable response: {e}"),
+            transient: true,
+            retry_after: None,
+        })?;
         check_ok(method, body)
+    }
+
+    #[cfg(test)]
+    pub(super) fn for_test(api_base: String) -> Self {
+        let mut client = Self::new("test-token");
+        client.api_base = api_base;
+        client
     }
 
     /// `auth.test`: who this token is. Returns `(team, bot user)`.
@@ -135,32 +145,6 @@ impl Slack {
             .context("chat.postMessage returned no ts")
     }
 
-    /// `chat.update`: replace a message's text and blocks.
-    pub(crate) fn update(&self, channel: &str, ts: &str, text: &str, blocks: &Value) -> Result<()> {
-        let blocks = blocks.to_string();
-        self.call(
-            "chat.update",
-            &[
-                ("channel", channel),
-                ("ts", ts),
-                ("text", text),
-                ("blocks", &blocks),
-            ],
-        )
-        .map(drop)
-    }
-
-    /// `reactions.add`; an emoji that is already there is not an error.
-    pub(crate) fn react(&self, channel: &str, ts: &str, emoji: &str) -> Result<()> {
-        match self.call(
-            "reactions.add",
-            &[("channel", channel), ("timestamp", ts), ("name", emoji)],
-        ) {
-            Err(e) if error_code(&e) == Some("already_reacted") => Ok(()),
-            other => other.map(drop),
-        }
-    }
-
     /// `chat.getPermalink` for a message.
     pub(crate) fn permalink(&self, channel: &str, ts: &str) -> Result<String> {
         let v = self.call(
@@ -173,43 +157,34 @@ impl Slack {
             .context("chat.getPermalink returned no permalink")
     }
 
-    /// `agents.sessions.setStatus` for the session on a thread.
-    pub(crate) fn set_status(
-        &self,
-        channel: &str,
-        thread_ts: &str,
-        status: SessionStatus,
-    ) -> Result<()> {
-        self.call(
-            "agents.sessions.setStatus",
-            &[
-                ("channel_id", channel),
-                ("thread_ts", thread_ts),
-                ("status", status.as_str()),
-            ],
-        )
-        .map(drop)
-    }
-
-    /// `agents.sessions.rename`: the session's title in Slack's agent view.
-    pub(crate) fn rename(&self, channel: &str, thread_ts: &str, title: &str) -> Result<()> {
-        self.call(
-            "agents.sessions.rename",
-            &[
-                ("channel_id", channel),
-                ("thread_ts", thread_ts),
-                ("title", title),
-            ],
-        )
-        .map(drop)
-    }
-
     /// `views.open`: show a modal in response to an interaction.
     pub(crate) fn open_view(&self, trigger_id: &str, view: &Value) -> Result<()> {
         let view = view.to_string();
         self.call("views.open", &[("trigger_id", trigger_id), ("view", &view)])
             .map(drop)
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+struct RequestError {
+    message: String,
+    transient: bool,
+    retry_after: Option<u64>,
+}
+
+/// None means a permanent error; Some is the minimum retry delay in seconds.
+/// Ambiguous transport failures can have delivered a POST: outbound delivery
+/// is at-least-once, never a promise of exactly-once execution.
+pub(super) fn retry_delay(error: &anyhow::Error) -> Option<u64> {
+    if let Some(e) = error.downcast_ref::<RequestError>() {
+        return e.transient.then_some(e.retry_after.unwrap_or(0));
+    }
+    matches!(
+        error_code(error),
+        Some("ratelimited" | "internal_error" | "fatal_error" | "service_unavailable")
+    )
+    .then_some(1)
 }
 
 /// A Web API call Slack answered with `"ok": false`.
