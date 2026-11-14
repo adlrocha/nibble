@@ -28,7 +28,7 @@ What it aims for:
 | 8 | **`--btw` sessions** | dx | `attach --btw` — side session that doesn't overwrite which session the main attach would continue (ad-hoc research, parallel work); kept on disk like any other |
 | 9 | **Session retention** | core | Sessions are never deleted — `--fresh` only renames the current file to `.jsonl.bak`; Claude's own 30-day purge is disabled via `cleanupPeriodDays` |
 | 10 | **Hermes Agent** | experimental | Singleton sandbox where you mount/unmount repos dynamically; `hermes gateway` as PID 1 |
-| 11 | **Cron jobs** | scheduling | Schedule prompts to run inside sandboxes on a cron expression; markdown file format; skip-if-running; expiry |
+| 11 | **Cron jobs** | scheduling | Prompts defined as files in the repo (`.nibble/cron/*.md`), approved per machine, with strict TOML settings and per-repo secrets kept outside sandboxes; run by hand with `nibble cron run` until the scheduler lands. See [docs/cron.md](docs/cron.md) |
 | 12 | **Status line** | dx | Claude Code terminal status bar showing dir, branch, model, context %, 5h and 7d rate limit bars |
 | 13 | **Health checks** | ops | `SandboxHealth` enum (Healthy/Degraded/Dead); `nibble prune` health-checks sandboxes — stopped → silent restart, unrestartable → exited, dead container → task pruned; manual (no periodic daemon since the listen daemon was removed) |
 | 14 | **Auto-resume on reboot** | ops | systemd user service (`nibble-resume.service`) restarts containers after host reboot |
@@ -626,7 +626,7 @@ Network is host-mode, so services started inside the container (e.g. `npm run de
 | `nibble web` | Web session inspector (port 7878, token auth) |
 | `nibble usage scan` / `report` / `pricing` | Collect token usage, print aggregated cost, show the pricing table |
 | `nibble memory <action>` | Search, write, load and sync cross-session memories and lessons |
-| `nibble cron <action>` | Add, list, edit, stop, start, kill or run scheduled sandbox prompts |
+| `nibble cron <action>` | Register repos and add, list, edit, stop, start, kill or run their scheduled jobs; manage job secrets ([docs/cron.md](docs/cron.md)) |
 | `nibble backup [--sessions]` | Zip all nibble state (optionally every agent transcript) |
 | `nibble import <zip>` | Restore a backup (current `~/.nibble` moved aside; transcripts merged, same-named ones replaced by the backup copy) |
 | `nibble lm <action>` | List and manage local LLM model files |
@@ -670,7 +670,7 @@ src/
 ├── usage/                   # Token usage scanning, pricing, reports
 ├── memory/                  # Cross-session memory store and summarization
 ├── web/                     # Web session inspector
-├── cron/                    # Scheduled sandbox prompts
+├── cron/                    # Scheduled jobs: repo job files, private state, secrets
 ├── backup.rs                # Backup / import
 ├── sdlc/                    # `nibble sdlc`: install and run the delivery flow
 ├── keybinds.rs, vert.rs     # zellij keybindings and the vert pane
