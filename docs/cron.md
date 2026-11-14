@@ -1,9 +1,5 @@
 # Scheduled jobs (`nibble cron`)
 
-> The scheduler that runs jobs on their schedules lands with
-> `nibble-cron.service` in the next change; until then `nibble cron run`
-> runs a job by hand.
-
 A cron job is a prompt that runs on a schedule against a repository. Jobs
 are files in the repository they belong to, so they are versioned with the
 code and any machine can run them: clone the repo, register it, done.
@@ -41,14 +37,8 @@ the repo's other jobs still run.
 | `timeout` | `"30m"` | Longest a run may take (`s`, `m`, `h`, `d`; at most `6h`) |
 | `model` | Claude Code's default | Model for the run |
 | `env` | `[]` | Names of variables the run gets from this machine's [secrets](#secrets) |
-| `notify` | `"slack"` | `"slack"` posts a report when the run finds something; `"none"` keeps it local |
+| `notify` | `"slack"` | `"slack"` posts a report when the run finds something; `"none"` keeps it local. Until Slack reports land (the next change), every report stays in `nibble cron runs` |
 | `read_only` | `true` | Withholds Claude Code's file-editing tools (Edit, Write, NotebookEdit). The run keeps Bash and is only asked not to change anything, so this guards against slips, not against a run set on changing files |
-
-For now `nibble cron run` types the prompt into the repo's running sandbox
-session, where `timeout`, `model`, `env`, `notify` and `read_only` do not
-apply yet. A manual run is one you asked for, so it also ignores
-`enabled`, `expires_at`, `skip_if_running` and a `nibble cron stop` pause;
-it only needs the job approved here.
 
 ## Commands
 
@@ -66,11 +56,17 @@ nibble cron edit deps-audit           # open the file in $EDITOR
 nibble cron edit deps-audit --schedule "0 9 * * *" --expires +30d
 nibble cron stop deps-audit           # pause on this machine only
 nibble cron start deps-audit          # resume
-nibble cron run deps-audit            # run now, in the repo's running sandbox
+nibble cron run deps-audit            # run now and print the report (fails if the run did)
+nibble cron runs [deps-audit]         # recent runs
+nibble cron show 12                   # one run's full report
 nibble cron kill deps-audit           # delete the job file
 nibble cron forget ~/src/shop         # stop running the repo's jobs here
 nibble cron import                    # move jobs from older nibble versions (see below)
+nibble cron daemon                    # the scheduler itself; nibble-cron.service runs it
 ```
+
+To stop the scheduler, `systemctl --user stop nibble-cron` (`disable` keeps
+it off after a reboot). Without systemd, run `nibble cron daemon` yourself.
 
 Your home directory, anything inside `~/.nibble`, and symlinked job files
 are refused: sandboxes can write `~/.nibble`, and a link could point a job
@@ -87,6 +83,61 @@ are read every time, with nothing to reload. Commit them to share them.
 
 `stop` and `start` only affect this machine. To turn a job off everywhere,
 set `enabled = false` in its file (`nibble cron edit <job> --disable`).
+These switches, and `expires_at`, are for the schedule: `nibble cron run`
+is a run you asked for, so it runs a disabled, expired or stopped job too.
+It only needs the job approved here, and still skips while a run is going
+(unless `skip_if_running = false`).
+
+## How a job runs
+
+`nibble-cron.service` (installed by `install.sh`, running `nibble cron
+daemon`) checks every 30 seconds for due jobs. It re-reads the files each
+time, so a `git pull` that brings new or changed jobs applies by itself,
+once you approve them (see below).
+
+Each run is a fresh headless Claude Code session (`claude -p`) in the repo's
+sandbox, started if none is running. It never touches the conversation you
+work in, and it shows in the sidebar as its own row (`… · cron <name>`)
+while it runs. The prompt gets notes saying the run is unattended, must not
+commit, push or change files, and must end with a report:
+
+- `status`: `ok`, `warn` or `critical`;
+- `summary`: what was checked and found;
+- `findings`: one per problem, each with a `fingerprint` that stays the same
+  across runs while the problem lasts, a severity, a title, evidence and a
+  suggested action.
+
+Claude Code is held to that shape with `--json-schema`. A run that times
+out, crashes or gives no valid report is recorded as `timeout` or `failed`
+with the reason. The timeout is enforced inside the container, and the host
+gives up 90 seconds later and kills what is left. Runs are kept (the newest
+200 per job) with their report, cost and session id; `nibble cron show`
+prints the id, to resume the session inside the sandbox.
+
+A slot missed while the machine was off runs once when it is back. A job
+whose previous run is still going is skipped (unless `skip_if_running =
+false`), whether that run came from the daemon or `nibble cron run`. At most
+four runs go at once; others wait for a free slot. Stopping or upgrading the
+service cuts the runs in flight off from nibble: their sessions in the
+sandbox go on until their timeout or the daemon's next start, which records
+them as failed and stops what is left.
+
+Before passing secrets, the runner checks with podman that the container
+really mounts the repo, since the record naming it is in `~/.nibble`, and
+then runs in that same container by id.
+
+The daemon logs to `$XDG_STATE_HOME/nibble/cron/daemon.log`
+(`~/.local/state/nibble/cron/daemon.log` by default).
+
+The service gets none of your shell's exports. When it has to start a
+repo's sandbox (after a reboot, or `nibble sandbox kill`), that sandbox
+only has the keys the service has, so put any your sandboxes need, such as
+`ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL` or `GITHUB_TOKEN`, in
+`~/.config/nibble/cron.env` (`NAME=value` lines, mode 0600) and run
+`systemctl --user restart nibble-cron`. A sandbox keeps the environment it
+was created with, so also `nibble sandbox kill` the repo's sandbox if the
+service already started one without those keys; the next run starts a new
+one.
 
 ## Approving jobs
 

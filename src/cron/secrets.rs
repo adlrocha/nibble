@@ -46,6 +46,26 @@ pub fn load_from(path: &Path) -> Result<Table> {
     toml::from_str(&text).with_context(|| format!("{} is not valid TOML", path.display()))
 }
 
+/// The values `names` resolve to for `repo`. Every name must be set.
+pub fn resolve(table: &Table, repo: &str, names: &[String]) -> Result<Vec<(String, String)>> {
+    let mine = table.get(repo);
+    let missing: Vec<&str> = names
+        .iter()
+        .filter(|n| mine.is_none_or(|m| !m.contains_key(*n)))
+        .map(String::as_str)
+        .collect();
+    if let Some(first) = missing.first() {
+        bail!(
+            "no value for {} for this repo; set it with: nibble cron secret set {first} --repo {repo}",
+            missing.join(", ")
+        );
+    }
+    Ok(names
+        .iter()
+        .filter_map(|n| mine.and_then(|m| m.get(n)).map(|v| (n.clone(), v.clone())))
+        .collect())
+}
+
 /// Write the file atomically with mode 0600.
 pub fn save_to(path: &Path, table: &Table) -> Result<()> {
     if let Some(dir) = path.parent() {
@@ -70,6 +90,25 @@ pub fn save_to(path: &Path, table: &Table) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn values_are_scoped_to_their_repo() {
+        let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let mut t = Table::new();
+        t.entry("/a".into())
+            .or_default()
+            .insert("TOKEN".into(), "a-secret".into());
+        assert_eq!(
+            resolve(&t, "/a", &names(&["TOKEN"])).unwrap(),
+            [("TOKEN".to_string(), "a-secret".to_string())]
+        );
+        let err = resolve(&t, "/b", &names(&["TOKEN"]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no value for TOKEN"), "{err}");
+        assert!(resolve(&t, "/a", &names(&["TOKEN", "OTHER"])).is_err());
+        assert!(resolve(&t, "/b", &[]).unwrap().is_empty());
+    }
 
     #[test]
     fn save_load_round_trip_and_permissions() {

@@ -246,11 +246,22 @@ pub const SANDBOX_PROMPT_ARGS: &str = r#""${nibble_prompt[@]}""#;
 /// cmd.args(exec_with_sandbox_prompt()).arg("pi").args(["--session", s, "-p", msg]);
 /// ```
 pub fn exec_with_sandbox_prompt() -> [String; 3] {
+    exec_with_prefix("")
+}
+
+/// [`exec_with_sandbox_prompt`] with the program run under
+/// `timeout -k 30 <secs>`, inside the container, so the timeout stops the
+/// program itself and not only the `podman exec` client (cron runs).
+pub fn exec_with_sandbox_prompt_under_timeout(secs: u64) -> [String; 3] {
+    exec_with_prefix(&format!("timeout -k 30 {secs} "))
+}
+
+fn exec_with_prefix(prefix: &str) -> [String; 3] {
     [
         "/bin/bash".to_string(),
         "-c".to_string(),
         format!(
-            r#"{}; exec "$0" {SANDBOX_PROMPT_ARGS} "$@""#,
+            r#"{}; exec {prefix}"$0" {SANDBOX_PROMPT_ARGS} "$@""#,
             sandbox_prompt_setup()
         ),
     ]
