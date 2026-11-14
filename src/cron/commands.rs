@@ -765,6 +765,13 @@ pub(crate) fn cmd_run(db: &Database, store: &CronStore, job: &str) -> Result<()>
     let record = super::run::run_job(db, store, &repo, &def, super::run::Trigger::Manual)?
         .with_context(|| format!("{} is already running", def.name))?;
     print_record(&record);
+    // A report that cannot be queued is noted, not this command's failure:
+    // the exit status is the run's own.
+    match super::notify::after_run(store, &def, &record) {
+        Ok(true) => println!("\nReported to Slack (nibble rc posts it)."),
+        Ok(false) => {}
+        Err(e) => eprintln!("Could not queue the Slack report: {e:#}"),
+    }
     // The run's own failure is this command's failure, for scripts.
     match record.status {
         super::store::RunStatus::Failed | super::store::RunStatus::TimedOut => {

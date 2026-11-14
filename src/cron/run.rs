@@ -27,6 +27,15 @@ pub enum Severity {
 }
 
 impl Severity {
+    /// Read back what [`Self::as_str`] wrote; anything else is `warn`.
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "ok" => Severity::Ok,
+            "critical" => Severity::Critical,
+            _ => Severity::Warn,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Severity::Ok => "ok",

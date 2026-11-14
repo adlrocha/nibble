@@ -37,7 +37,7 @@ the repo's other jobs still run.
 | `timeout` | `"30m"` | Longest a run may take (`s`, `m`, `h`, `d`; at most `6h`) |
 | `model` | Claude Code's default | Model for the run |
 | `env` | `[]` | Names of variables the run gets from this machine's [secrets](#secrets) |
-| `notify` | `"slack"` | `"slack"` posts a report when the run finds something; `"none"` keeps it local. Until Slack reports land (the next change), every report stays in `nibble cron runs` |
+| `notify` | `"slack"` | `"slack"` posts a report when the run finds something; `"none"` keeps it local (see [Reports in Slack](#reports-in-slack)) |
 | `read_only` | `true` | Withholds Claude Code's file-editing tools (Edit, Write, NotebookEdit). The run keeps Bash and is only asked not to change anything, so this guards against slips, not against a run set on changing files |
 
 ## Commands
@@ -138,6 +138,45 @@ only has the keys the service has, so put any your sandboxes need, such as
 was created with, so also `nibble sandbox kill` the repo's sandbox if the
 service already started one without those keys; the next run starts a new
 one.
+
+## Reports in Slack
+
+With [`nibble rc`](rc.md) set up, a run that finds something posts a card
+to your DM with the Slack app: the job, the summary, up to eight findings
+(new ones first, marked) and three buttons.
+
+- **Investigate** starts a sandbox session in the card's thread, given the
+  report, to confirm the cause and propose a fix without changing anything.
+  Reply in the thread to steer it, or ask it to fix.
+- **Fix → PR** starts one told to fix the findings and open a pull request
+  through the repo's delivery flow (the `nibble-sdlc` skill where
+  `.nibble/sdlc.toml` exists). It stops at the PR; merging stays yours.
+  The sandbox has no `~/.config/gh` or SSH keys: it can push and open the
+  PR only with a `GITHUB_TOKEN` in the environment of whatever created it,
+  your shell, `nibble-rc.service` or `nibble-cron.service` (`cron.env`),
+  so set it wherever your sandboxes get started.
+- **Snooze 7d** silences the card's findings on this machine for a week.
+
+Both sessions run like any other started from Slack: in a new tab of the
+`nibble mux` session, relayed to the thread. The report is passed as data
+to check, since it was written from logs and tool output.
+
+A problem is reported when it first appears, again when it gets worse (warn
+→ critical), and once a day while it lasts. A problem that goes away and
+comes back is reported again. A run that fails or times out is a problem of
+its own, reported the same way (so a job that keeps failing is reported
+daily); it leaves the job's other findings as they were. So is a `warn` or
+`critical` report that lists no findings. A run cut off by a restart is
+reported as its job was approved, whatever its file says now.
+`notify = "none"` keeps a job's reports out of Slack; they stay in `nibble
+cron runs`.
+
+Cards wait in `nibble rc`'s private queue, so a report made while the Slack
+daemon is down is posted when it is back (cards older than 30 days are
+dropped). A card Slack refuses is retried after 1, 5, 15, 60 and 360
+minutes, then given up.
+Without `nibble rc` set up nothing is queued, and reports stay in `nibble
+cron runs`.
 
 ## Approving jobs
 
