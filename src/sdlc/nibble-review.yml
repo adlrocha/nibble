@@ -33,7 +33,8 @@ jobs:
         github.event.comment.user.type != 'Bot' &&
         contains(github.event.comment.body, '@nibble-review'))
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Two 30-minute review attempts plus setup, so a timed-out first attempt can still fall back.
+    timeout-minutes: 75
     concurrency:
       group: nibble-review-${{ github.event.pull_request.number || github.event.issue.number || github.event.inputs.pr_number }}
       cancel-in-progress: true
