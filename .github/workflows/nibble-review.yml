@@ -31,7 +31,8 @@ jobs:
         github.event.comment.user.type != 'Bot' &&
         contains(github.event.comment.body, '@nibble-review'))
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Two 30-minute review attempts plus setup, so a timed-out first attempt can still fall back.
+    timeout-minutes: 75
     concurrency:
       group: nibble-review-${{ github.event.pull_request.number || github.event.issue.number || github.event.inputs.pr_number }}
       cancel-in-progress: true
@@ -39,7 +40,7 @@ jobs:
       # Pinned to the full commit SHA of a release (mutable tags on an action holding
       # write permissions + secrets are a supply-chain risk). Bump deliberately.
       # Requires the OPENCODE_API_KEY repository secret — see README before first run.
-      - uses: adlrocha/nibble-review@325792c4bd3a92d494ac684df980171cc2e21986 # v1.1.2
+      - uses: adlrocha/nibble-review@ae7bc82986303cf0514856093e65ae4c005070ba # v1.2.0
         with:
           land: "true"
           api-key: ${{ secrets.OPENCODE_API_KEY }}
