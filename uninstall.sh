@@ -243,8 +243,16 @@ if [ "$KEEP_CONFIG" = false ]; then
         ok "Removed $CRON_STATE/"
     fi
     rmdir "${XDG_STATE_HOME:-$HOME/.local/state}/nibble" 2>/dev/null || true
+    # `nibble session search`'s transcript text cache (kept outside
+    # ~/.nibble so sandboxes cannot read it).
+    SEARCH_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/nibble/session-search.json"
+    if [ -f "$SEARCH_CACHE" ]; then
+        rm -f "$SEARCH_CACHE"
+        ok "Removed $SEARCH_CACHE"
+    fi
+    rmdir "$(dirname "$SEARCH_CACHE")" 2>/dev/null || true
 else
-    warn "Keeping $HOME/.nibble/, the Slack and cron credentials, and their state (--keep-config)"
+    warn "Keeping $HOME/.nibble/, the Slack and cron credentials, their state and the session search cache (--keep-config)"
 fi
 
 # ── 9b. Remove the one-command install's source checkout ─────────────────────

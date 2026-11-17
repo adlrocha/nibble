@@ -72,16 +72,9 @@ pub(crate) fn cmd_session_list(
     // Session → repo/task links from the task DB, built before listing:
     // the repo/sandbox filters need them to map sandbox sessions (whose
     // workspace is a container path like /nibble) back to the host repo.
-    let TaskLinks {
-        claude_task_repo,
-        pi_task_repo,
-        claude_session_to_task,
-        pi_path_to_task,
-    } = TaskLinks::from_db(db);
+    let links = TaskLinks::from_db(db);
 
-    let repo_pred = repo
-        .as_deref()
-        .map(|r| repo_predicate(r, &claude_task_repo, &pi_task_repo));
+    let repo_pred = repo.as_deref().map(|r| repo_predicate(r, &links));
     let repo_pred_dyn = repo_pred
         .as_ref()
         .map(|f| f as &dyn Fn(&session::SessionInfo) -> bool);
@@ -111,9 +104,9 @@ pub(crate) fn cmd_session_list(
     let groups = if let Some(repo) = &sandbox_repo {
         let mut filtered = groups;
         for group in &mut filtered {
-            group.sessions.retain(|s| {
-                session_repo(s, &claude_task_repo, &pi_task_repo) == Some(repo.as_str())
-            });
+            group
+                .sessions
+                .retain(|s| links.repo(s) == Some(repo.as_str()));
         }
         filtered.retain(|g| !g.sessions.is_empty());
         filtered
@@ -121,39 +114,45 @@ pub(crate) fn cmd_session_list(
         groups
     };
 
+    // Titles for every listed session in one title-cache pass.
+    let all: Vec<session::SessionInfo> = groups
+        .iter()
+        .flat_map(|g| g.sessions.iter().cloned())
+        .collect();
+    let titles: HashMap<&str, String> = all
+        .iter()
+        .map(|s| s.session_id.as_str())
+        .zip(session::get_session_titles(&all))
+        .collect();
+    let title_of = |s: &session::SessionInfo| {
+        titles
+            .get(s.session_id.as_str())
+            .cloned()
+            .unwrap_or_default()
+    };
+
     // Compute max title width for alignment
-    let mut max_title_width = 40;
-    for group in &groups {
-        for s in &group.sessions {
-            let title = session::get_session_title(s);
-            max_title_width = max_title_width.max(title.len().min(60));
-        }
-    }
-    max_title_width = max_title_width.max(20);
+    let max_title_width = titles
+        .values()
+        .map(|t| t.len().min(60))
+        .fold(40, usize::max)
+        .max(20);
 
     for group in &groups {
         println!("\n{} ({})", group.label, group.sessions.len());
         println!("{}", "─".repeat(max_title_width + 67));
         for s in &group.sessions {
             let time = session::format_time(s.effective_time());
-            let title = session::get_session_title(s);
+            let title = title_of(s);
             let sid = &s.session_id[..s.session_id.len().min(8)];
 
             // Resolve workspace: prefer task project_path for sandbox sessions
-            let resolved_ws = session_repo(s, &claude_task_repo, &pi_task_repo).map(str::to_string);
-            let ws = session::format_workspace(resolved_ws.as_deref().or(s.workspace.as_deref()));
+            let ws = session::format_workspace(links.repo(s).or(s.workspace.as_deref()));
 
             let agent_short = memory::format::agent_short_name(&s.agent);
             // Resolve task_id for memory badge lookup
-            let task_id_for_mem = match s.agent.as_str() {
-                "claude" => claude_session_to_task.get(&s.session_id).cloned(),
-                "pi" | "omp" => pi_path_to_task
-                    .get(&s.path.to_string_lossy().to_string())
-                    .cloned(),
-                _ => None,
-            };
+            let task_id_for_mem = links.task_id(s);
             let mem_count = task_id_for_mem
-                .as_ref()
                 .and_then(|tid| memory_counts.get(tid).copied())
                 .unwrap_or(0);
             let mem_badge = if mem_count > 0 {
@@ -164,10 +163,7 @@ pub(crate) fn cmd_session_list(
             // Show which sandbox task this session is linked to (the
             // session the next attach would resume), so recovering the
             // right conversation after a reboot doesn't require guessing.
-            let linked_task = task_id_for_mem
-                .as_deref()
-                .map(|t| &t[..t.len().min(8)])
-                .unwrap_or("—");
+            let linked_task = task_id_for_mem.map(|t| &t[..t.len().min(8)]).unwrap_or("—");
             println!(
                 "  {:<6} {:<10} {:<8}  {:<width$}  {:<12} {:<8} {:>5} {}",
                 time,
@@ -232,9 +228,17 @@ impl TaskLinks {
         links
     }
 
-    /// Host repo of a session (see [`session_repo`]).
+    /// Host repo (project path) of a session via the task DB: claude
+    /// sessions by session ID, pi/omp sessions by transcript path. Sandbox
+    /// sessions record a container cwd (e.g. `/nibble`), so this is the
+    /// only way to map them back to the host repo they belong to.
     pub(crate) fn repo(&self, s: &session::SessionInfo) -> Option<&str> {
-        session_repo(s, &self.claude_task_repo, &self.pi_task_repo)
+        match s.agent.as_str() {
+            "claude" => self.claude_task_repo.get(&s.session_id),
+            "pi" | "omp" => self.pi_task_repo.get(&*s.path.to_string_lossy()),
+            _ => None,
+        }
+        .map(String::as_str)
     }
 
     /// Task ID a session is linked to, if any.
@@ -248,24 +252,6 @@ impl TaskLinks {
     }
 }
 
-/// Resolve a session to its repo (host project path) via the task DB:
-/// claude sessions by session ID, pi/omp sessions by transcript path.
-/// Sandbox sessions record a container cwd (e.g. `/nibble`), so this is the
-/// only way to map them back to the host repo they belong to.
-fn session_repo<'a>(
-    s: &session::SessionInfo,
-    claude_task_repo: &'a HashMap<String, String>,
-    pi_task_repo: &'a HashMap<String, String>,
-) -> Option<&'a str> {
-    match s.agent.as_str() {
-        "claude" => claude_task_repo.get(&s.session_id).map(String::as_str),
-        "pi" | "omp" => pi_task_repo
-            .get(&s.path.to_string_lossy().to_string())
-            .map(String::as_str),
-        _ => None,
-    }
-}
-
 /// Build the repo filter predicate for `session list --repo`.
 ///
 /// Inputs that resolve to an existing path (`.`, `~/x`, relative dirs) are
@@ -276,8 +262,7 @@ fn session_repo<'a>(
 /// matched through the task DB maps instead.
 pub(crate) fn repo_predicate<'a>(
     filter: &str,
-    claude_task_repo: &'a HashMap<String, String>,
-    pi_task_repo: &'a HashMap<String, String>,
+    links: &'a TaskLinks,
 ) -> impl Fn(&session::SessionInfo) -> bool + 'a {
     let (filter, is_path) = match resolve_sandbox_repo_path(filter) {
         Ok(canon) => (canon, true),
@@ -291,8 +276,7 @@ pub(crate) fn repo_predicate<'a>(
                 !filter.is_empty() && w.contains(filter.as_str())
             }
         };
-        s.workspace.as_deref().is_some_and(matches_repo)
-            || session_repo(s, claude_task_repo, pi_task_repo).is_some_and(matches_repo)
+        s.workspace.as_deref().is_some_and(matches_repo) || links.repo(s).is_some_and(matches_repo)
     }
 }
 
@@ -549,7 +533,7 @@ mod tests {
     }
 
     #[test]
-    fn clean_summary_drops_bookkeeping_lines() {
+    fn summary_body_drops_bookkeeping_lines() {
         let content =
             "**Turns**: 2 user\n\n**Tools used**: Bash, Read\n\n**Started with**: fix cron";
         assert_eq!(
@@ -649,10 +633,9 @@ mod tests {
         let sibling = temp.path().join("nibble-review");
         std::fs::create_dir_all(&sibling).unwrap();
         let canon = repo.canonicalize().unwrap().to_string_lossy().to_string();
-        let empty_claude: HashMap<String, String> = HashMap::new();
-        let empty_pi: HashMap<String, String> = HashMap::new();
+        let empty = TaskLinks::default();
 
-        let pred = repo_predicate(&canon, &empty_claude, &empty_pi);
+        let pred = repo_predicate(&canon, &empty);
         assert!(pred(&mk_session("pi", "s1", Some(&canon), "/x/s1.jsonl")));
         assert!(pred(&mk_session(
             "pi",
@@ -687,9 +670,16 @@ mod tests {
             "/home/node/.pi/agent/sessions/--nibble--/t.jsonl".to_string(),
             canon.clone(),
         );
-        let empty: HashMap<String, String> = HashMap::new();
+        let claude_links = TaskLinks {
+            claude_task_repo: claude_map,
+            ..TaskLinks::default()
+        };
+        let pi_links = TaskLinks {
+            pi_task_repo: pi_map,
+            ..TaskLinks::default()
+        };
 
-        let pred = repo_predicate(&canon, &claude_map, &empty);
+        let pred = repo_predicate(&canon, &claude_links);
         assert!(pred(&mk_session(
             "claude",
             "sess-1",
@@ -703,7 +693,7 @@ mod tests {
             "/x/sess-9.jsonl"
         )));
 
-        let pred = repo_predicate(&canon, &empty, &pi_map);
+        let pred = repo_predicate(&canon, &pi_links);
         assert!(pred(&mk_session(
             "pi",
             "t",
@@ -715,9 +705,8 @@ mod tests {
     #[test]
     fn repo_predicate_substring_fallback_for_non_paths() {
         // Inputs that don't exist on disk keep substring semantics.
-        let empty_claude: HashMap<String, String> = HashMap::new();
-        let empty_pi: HashMap<String, String> = HashMap::new();
-        let pred = repo_predicate("does-not-exist-anywhere", &empty_claude, &empty_pi);
+        let empty = TaskLinks::default();
+        let pred = repo_predicate("does-not-exist-anywhere", &empty);
         assert!(pred(&mk_session(
             "pi",
             "s1",
@@ -731,7 +720,7 @@ mod tests {
             "/x/s2.jsonl"
         )));
         // Empty filter must not match everything (the old `.` bug class).
-        let pred = repo_predicate("", &empty_claude, &empty_pi);
+        let pred = repo_predicate("", &empty);
         assert!(!pred(&mk_session(
             "pi",
             "s3",

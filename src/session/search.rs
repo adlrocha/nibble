@@ -430,7 +430,8 @@ fn save_cache(path: &Path, entries: HashMap<String, CachedBody>) -> Result<()> {
         version: CACHE_VERSION,
         entries,
     };
-    let tmp = path.with_extension("json.tmp");
+    // Per-process temp name: concurrent searches must not share one.
+    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
     write_private(&tmp, &serde_json::to_vec(&cache)?)
         .with_context(|| format!("could not write {}", tmp.display()))?;
     std::fs::rename(&tmp, path).with_context(|| format!("could not replace {}", path.display()))

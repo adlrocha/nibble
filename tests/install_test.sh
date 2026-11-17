@@ -223,7 +223,7 @@ mkdir -p "$STUBS" "$WORK/home"
 for cmd in systemctl podman nibble; do printf '#!/bin/sh\nexit 0\n' >"$STUBS/$cmd" && chmod +x "$STUBS/$cmd"; done
 # Runs uninstall.sh ($1, default this repository's) like a user would.
 uninstall() {
-    env -u XDG_DATA_HOME -u XDG_CONFIG_HOME -u XDG_STATE_HOME HOME="$WORK/home" PATH="$STUBS:$PATH" \
+    env -u XDG_DATA_HOME -u XDG_CONFIG_HOME -u XDG_STATE_HOME -u XDG_CACHE_HOME HOME="$WORK/home" PATH="$STUBS:$PATH" \
         bash "${1:-$ROOT/uninstall.sh}" </dev/null >"$WORK/out" 2>&1
 }
 [ -f "$NIBBLE_SRC_DIR/.git/nibble-installer-managed" ] || fail "no managed checkout to uninstall"
@@ -231,7 +231,11 @@ uninstall() {
 mkdir -p "$WORK/home/.config/nibble" "$WORK/home/.local/state/nibble/cron"
 touch "$WORK/home/.config/nibble/cron-secrets.toml" "$WORK/home/.config/nibble/cron.env" \
     "$WORK/home/.local/state/nibble/cron/cron.db"
+# So does `nibble session search`'s transcript cache.
+mkdir -p "$WORK/home/.cache/nibble"
+touch "$WORK/home/.cache/nibble/session-search.json"
 uninstall || fail "uninstall: $(cat "$WORK/out")"
+[ ! -e "$WORK/home/.cache/nibble/session-search.json" ] || fail "uninstall left the session search cache"
 [ ! -e "$WORK/home/.config/nibble" ] || fail "uninstall left cron's secrets: $(ls -A "$WORK/home/.config/nibble")"
 [ ! -e "$WORK/home/.local/state/nibble" ] || fail "uninstall left cron's state"
 [ ! -e "$NIBBLE_SRC_DIR" ] || fail "uninstall left the managed checkout"
