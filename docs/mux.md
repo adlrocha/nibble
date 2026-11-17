@@ -35,9 +35,11 @@ session. The record is kept in `~/.nibble/tasks.db` (`kv_store`, key
   or in a sandbox. Hermes and omp panes are left out.
 
 One watcher runs per session (a lock in `~/.nibble/mux/NAME.lock`). It exits
-when the session has been gone for two samples, or after about a minute of
-failed samples (e.g. zellij missing from its `PATH`). A watcher started for a
-freshly rebuilt session waits up to 90 seconds for the previous one to exit,
+when the session has been gone for two samples, or after 20 failed samples in
+a row: about a minute when zellij fails fast (e.g. missing from its `PATH`),
+about three when every zellij query hangs and is killed after 5 seconds. A
+watcher started for a freshly rebuilt session waits up to 180 seconds for the
+previous one to exit,
 so reopening right after a crash is still recorded.
 
 ## What happens on open
