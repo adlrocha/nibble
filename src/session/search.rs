@@ -73,6 +73,9 @@ pub struct SearchDoc {
     /// Host repo the session belongs to (resolved through the task DB for
     /// sandbox sessions), else the transcript's own workspace.
     pub repo: Option<String>,
+    /// The repo as a host path, when that is known: what Ctrl-F narrows
+    /// on. `None` when `repo` is only a sandbox container cwd (or unknown).
+    pub host_repo: Option<String>,
     /// Transcript text; `None` until the background indexer has loaded it.
     pub body: Option<Body>,
     title_lower: String,
@@ -89,6 +92,7 @@ impl SearchDoc {
             title,
             summary,
             repo,
+            host_repo: None,
             body: None,
         }
     }

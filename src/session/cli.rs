@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;
+use std::path::Path;
 
 use crate::commands::resolve_sandbox_repo_path;
 use crate::db::Database;
@@ -374,6 +375,7 @@ fn load_search_docs(db: &Database, repo: Option<&str>) -> Result<Vec<session::se
     sessions.sort_by_key(|s| std::cmp::Reverse(s.effective_time()));
     let summaries = session_summaries();
     let titles = session::get_session_titles(&sessions);
+    let home = dirs::home_dir();
     Ok(sessions
         .into_iter()
         .zip(titles)
@@ -385,13 +387,26 @@ fn load_search_docs(db: &Database, repo: Option<&str>) -> Result<Vec<session::se
                 .or_else(|| links.task_id(&s).and_then(|t| summaries.get(t)))
                 .cloned()
                 .unwrap_or_default();
-            let repo = links
-                .repo(&s)
-                .map(str::to_string)
-                .or_else(|| s.workspace.clone());
-            session::search::SearchDoc::new(s, title, summary, repo)
+            let linked = links.repo(&s).map(str::to_string);
+            let host_repo = host_repo(linked.as_deref(), s.workspace.as_deref(), home.as_deref());
+            let repo = linked.or_else(|| s.workspace.clone());
+            let mut doc = session::search::SearchDoc::new(s, title, summary, repo);
+            doc.host_repo = host_repo;
+            doc
         })
         .collect())
+}
+
+/// The host repo of a session, for narrowing the search on it. A repo from
+/// the task DB is a host path. Otherwise the transcript's workspace is one
+/// only when it is under the home directory: an unlinked sandbox session
+/// records its container cwd, `/<repo name>` (`/nibble`, `/workspace`),
+/// which is never under home even when a host folder of that name exists.
+/// Checkouts deleted since still count.
+fn host_repo(linked: Option<&str>, workspace: Option<&str>, home: Option<&Path>) -> Option<String> {
+    linked
+        .or_else(|| workspace.filter(|w| home.is_some_and(|h| Path::new(w).starts_with(h))))
+        .map(str::to_string)
 }
 
 /// Session-summary memory text by session ID. The newest summary wins, and
@@ -724,6 +739,28 @@ mod tests {
             Some("/nibble"),
             "/home/node/.pi/agent/sessions/--nibble--/t.jsonl"
         )));
+    }
+
+    #[test]
+    fn host_repo_trusts_task_links_and_home_workspaces_only() {
+        let home = Some(Path::new("/home/u"));
+        // Linked sessions: the task DB's host path, whatever the cwd.
+        assert_eq!(
+            host_repo(Some("/home/u/nibble"), Some("/nibble"), home).as_deref(),
+            Some("/home/u/nibble")
+        );
+        // Unlinked host sessions, including a checkout deleted since.
+        assert_eq!(
+            host_repo(None, Some("/home/u/gone-worktree"), home).as_deref(),
+            Some("/home/u/gone-worktree")
+        );
+        // Container cwds, even ones named like host folders, and
+        // look-alike prefixes of home are not host repos.
+        for ws in ["/nibble", "/tmp", "/home", "/home/user2/x", "/home/u2"] {
+            assert_eq!(host_repo(None, Some(ws), home), None, "{ws}");
+        }
+        assert_eq!(host_repo(None, None, home), None);
+        assert_eq!(host_repo(None, Some("/home/u/x"), None), None);
     }
 
     #[test]

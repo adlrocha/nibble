@@ -62,6 +62,11 @@ struct App {
     warning: Option<String>,
     /// The `--repo` filter, shown in the input title.
     scope: Option<String>,
+    /// Repo path that Ctrl-F narrowed the results to: that repo and its
+    /// subdirectories.
+    repo_filter: Option<String>,
+    /// Why the last key did nothing, shown in the title until the next key.
+    notice: Option<String>,
 }
 
 impl App {
@@ -77,6 +82,8 @@ impl App {
             indexing: true,
             warning: None,
             scope: None,
+            repo_filter: None,
+            notice: None,
         };
         app.rerank();
         app
@@ -85,6 +92,15 @@ impl App {
     fn rerank(&mut self) {
         let keep = self.selected_doc();
         self.hits = self.ranker.rank(&self.docs, &self.query);
+        if let Some(repo) = &self.repo_filter {
+            let docs = &self.docs;
+            self.hits.retain(|h| {
+                docs[h.index]
+                    .repo
+                    .as_deref()
+                    .is_some_and(|r| super::workspace_matches_repo(r, repo))
+            });
+        }
         // Keep the same session selected while bodies stream in; reset to
         // the top when the query changed it away.
         let pos = keep
@@ -126,6 +142,7 @@ impl App {
         if key.kind == KeyEventKind::Release {
             return Action::None;
         }
+        self.notice = None;
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Esc => Action::Quit,
@@ -144,6 +161,7 @@ impl App {
                 self.preview_scroll = self.preview_scroll.saturating_add(10);
                 Action::None
             }
+            KeyCode::Char('f') if ctrl => self.toggle_repo_filter(),
             KeyCode::Char('u') if ctrl => self.edit(|_| String::new()),
             KeyCode::Char('w') if ctrl => self.edit(|q| {
                 let kept = q.trim_end();
@@ -170,12 +188,46 @@ impl App {
         self.edit(|q| format!("{q}{flat}"))
     }
 
+    /// Ctrl-F: narrow the results to the highlighted session's host repo
+    /// (see `SearchDoc::host_repo`), or clear that narrowing again (back to
+    /// the `--repo` set, if any). When the session has no known host repo,
+    /// the title says why.
+    fn toggle_repo_filter(&mut self) -> Action {
+        if self.repo_filter.take().is_none() {
+            let Some(doc) = self.selected_doc().map(|i| &self.docs[i]) else {
+                return Action::None;
+            };
+            let host = doc
+                .host_repo
+                .as_deref()
+                .filter(|r| !r.trim_end_matches('/').is_empty());
+            match host {
+                Some(repo) => self.repo_filter = Some(repo.to_string()),
+                None => {
+                    self.notice = Some(match doc.repo.as_deref() {
+                        Some(r) if !r.trim().is_empty() => {
+                            format!("ctrl-f: {r} is not a host repo (sandbox session?)")
+                        }
+                        _ => "ctrl-f: no repo known for this session".to_string(),
+                    });
+                    return Action::None;
+                }
+            }
+        }
+        self.preview_scroll = 0;
+        self.rerank();
+        Action::None
+    }
+
     fn step(&mut self, delta: isize) -> Action {
         self.move_selection(delta);
         Action::None
     }
 
     fn edit(&mut self, f: impl FnOnce(&str) -> String) -> Action {
+        // Typed or pasted text can move the highlight off the session a
+        // Ctrl-F notice was about.
+        self.notice = None;
         let query = f(&self.query);
         if query != self.query {
             self.set_query(query);
@@ -324,7 +376,7 @@ fn render(f: &mut Frame, app: &mut App) {
     render_preview(f, app, preview);
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            " ↑↓ move · enter details · ctrl-o read transcript · pgup/pgdn scroll preview · ctrl-u clear · esc quit",
+            " ↑↓ move · enter details · ctrl-o transcript · ctrl-f toggle repo · pgup/pgdn scroll · ctrl-u clear · esc quit",
             Style::default().fg(MUTED),
         ))),
         help,
@@ -340,7 +392,12 @@ fn render_input(f: &mut Frame, app: &App, area: Rect) {
             app.docs.len()
         ));
     }
-    let heading = match &app.scope {
+    let repo = app
+        .repo_filter
+        .as_deref()
+        .map(|r| super::format_workspace(Some(r)))
+        .or_else(|| app.scope.clone());
+    let heading = match repo {
         Some(repo) => format!(" search sessions in {repo} "),
         None => " search sessions ".to_string(),
     };
@@ -348,6 +405,9 @@ fn render_input(f: &mut Frame, app: &App, area: Rect) {
         heading,
         Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
     )];
+    if let Some(n) = &app.notice {
+        title.push(Span::styled(format!(" {n} "), Style::default().fg(MUTED)));
+    }
     if let Some(w) = &app.warning {
         title.push(Span::styled(format!(" {w} "), Style::default().fg(WARN)));
     }
@@ -744,6 +804,89 @@ mod tests {
             index: 99,
             body: Body::default(),
         });
+    }
+
+    #[test]
+    fn ctrl_f_narrows_to_the_selected_repo_and_back() {
+        // Ctrl-F narrows on `host_repo`, which the loader sets only when
+        // the repo is known to be a host path; `repo` is what is shown.
+        let mut app = app();
+        let set = |app: &mut App, i: usize, repo: &str, host: bool| {
+            app.docs[i].repo = Some(repo.to_string());
+            app.docs[i].host_repo = host.then(|| repo.to_string());
+        };
+        set(&mut app, 0, "/home/u/nibble", true);
+        set(&mut app, 1, "/home/u/nibble-review", true);
+        set(&mut app, 2, "/home/u/nibble/scripts", true);
+        app.rerank();
+        assert_eq!(app.hits.len(), 3);
+
+        // From the nibble session: its repo and subdirectories, not the
+        // sibling repo sharing a prefix. The query still applies.
+        assert_eq!(app.handle_key(ctrl('f')), Action::None);
+        let shown = |app: &App| app.hits.iter().map(|h| h.index).collect::<Vec<_>>();
+        assert_eq!(shown(&app), vec![0, 2]);
+        assert_eq!(app.selected_doc(), Some(0));
+        assert!(draw(&mut app, 140, 20).contains(" search sessions in nibble "));
+        type_str(&mut app, "zellij");
+        assert!(app.hits.is_empty());
+        app.handle_key(ctrl('u'));
+        assert_eq!(shown(&app), vec![0, 2]);
+        // A body streaming in while narrowed reranks inside the narrowing.
+        assert!(app.apply(IndexEvent::Body {
+            index: 1,
+            body: Body::new("more text".to_string()),
+        }));
+        app.rerank();
+        assert_eq!(shown(&app), vec![0, 2]);
+
+        // Ctrl-F again clears it; the selection stays put.
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(ctrl('f'));
+        assert_eq!(app.hits.len(), 3);
+        assert_eq!(app.selected_doc(), Some(2));
+        assert!(draw(&mut app, 140, 20).contains(" search sessions "));
+
+        // The narrowed repo wins over the --repo label in the title, and
+        // clearing it shows the --repo label again.
+        app.scope = Some("work".to_string());
+        app.handle_key(ctrl('f'));
+        assert!(draw(&mut app, 140, 20).contains(" search sessions in scripts "));
+        app.handle_key(ctrl('f'));
+        assert!(draw(&mut app, 140, 20).contains(" search sessions in work "));
+
+        // No-ops that say why: a container cwd (shown, but not a host
+        // repo), the root, no known repo.
+        for (repo, host, why) in [
+            (Some("/tmp"), false, "/tmp is not a host repo"),
+            (Some("/"), true, "/ is not a host repo"),
+            (None, false, "no repo known"),
+        ] {
+            app.docs[2].repo = repo.map(str::to_string);
+            app.docs[2].host_repo = repo.filter(|_| host).map(str::to_string);
+            app.handle_key(ctrl('f'));
+            assert!(app.repo_filter.is_none());
+            assert_eq!(app.hits.len(), 3);
+            assert!(draw(&mut app, 140, 20).contains(why), "{why}");
+        }
+        // The notice goes away on the next key, and on a paste.
+        app.handle_key(key(KeyCode::Up));
+        assert!(app.notice.is_none());
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(ctrl('f'));
+        assert!(app.notice.is_some());
+        app.paste("x");
+        assert!(app.notice.is_none());
+        // No selection: nothing happens and nothing is said.
+        type_str(&mut app, "nothing-matches-this");
+        app.handle_key(ctrl('f'));
+        assert!(app.repo_filter.is_none() && app.notice.is_none());
+    }
+
+    #[test]
+    fn help_line_fits_a_120_column_terminal() {
+        let mut app = app();
+        assert!(draw(&mut app, 120, 20).contains("esc quit"));
     }
 
     #[test]
