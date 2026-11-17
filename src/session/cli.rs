@@ -1,6 +1,6 @@
 //! CLI command handlers for `nibble session list` / `nibble session read`.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::collections::HashMap;
 
 use crate::commands::resolve_sandbox_repo_path;
@@ -69,45 +69,15 @@ pub(crate) fn cmd_session_list(
 
     let effective_limit = last.unwrap_or(limit);
 
-    // Build lookup maps from session identifiers → project_path before
-    // listing: the repo/sandbox filters need them to map sandbox sessions
-    // (whose workspace is a container path like /nibble) back to the host
-    // repo they belong to.
-    let tasks = db.list_tasks().unwrap_or_default();
-    let mut claude_task_repo: HashMap<String, String> = HashMap::new();
-    let mut pi_task_repo: HashMap<String, String> = HashMap::new();
-    // Reverse maps: agent session_id → task_id (for memory badge linkage)
-    let mut claude_session_to_task: HashMap<String, String> = HashMap::new();
-    let mut pi_path_to_task: HashMap<String, String> = HashMap::new();
-    let home_dir = dirs::home_dir();
-    for task in &tasks {
-        if let Some(ctx) = &task.context {
-            if let Some(path) = &ctx.project_path {
-                if let Some(sid) = &ctx.claude_session_id {
-                    claude_task_repo.insert(sid.clone(), path.clone());
-                    claude_session_to_task.insert(sid.clone(), task.task_id.clone());
-                }
-                if let Some(serde_json::Value::String(p)) = ctx.extra.get("pi_session_path") {
-                    // pi_session_path is stored as a container path when the
-                    // sandbox attach logic discovers it. Convert it back to a
-                    // host path so it matches the paths returned by session
-                    // discovery (which scans ~/.pi on the host).
-                    let host_path = if let Some(home) = &home_dir {
-                        let home_str = home.to_string_lossy();
-                        if let Some(rest) = p.strip_prefix("/home/node/") {
-                            format!("{}/{}", home_str, rest)
-                        } else {
-                            p.clone()
-                        }
-                    } else {
-                        p.clone()
-                    };
-                    pi_task_repo.insert(host_path.clone(), path.clone());
-                    pi_path_to_task.insert(host_path, task.task_id.clone());
-                }
-            }
-        }
-    }
+    // Session → repo/task links from the task DB, built before listing:
+    // the repo/sandbox filters need them to map sandbox sessions (whose
+    // workspace is a container path like /nibble) back to the host repo.
+    let TaskLinks {
+        claude_task_repo,
+        pi_task_repo,
+        claude_session_to_task,
+        pi_path_to_task,
+    } = TaskLinks::from_db(db);
 
     let repo_pred = repo
         .as_deref()
@@ -216,6 +186,68 @@ pub(crate) fn cmd_session_list(
     Ok(())
 }
 
+/// Links from agent sessions to nibble tasks, built from the task DB.
+#[derive(Default)]
+pub(crate) struct TaskLinks {
+    /// claude session ID → host project path
+    claude_task_repo: HashMap<String, String>,
+    /// pi/omp transcript host path → host project path
+    pi_task_repo: HashMap<String, String>,
+    /// claude session ID → task ID
+    claude_session_to_task: HashMap<String, String>,
+    /// pi/omp transcript host path → task ID
+    pi_path_to_task: HashMap<String, String>,
+}
+
+impl TaskLinks {
+    pub(crate) fn from_db(db: &Database) -> Self {
+        let mut links = Self::default();
+        let home_dir = dirs::home_dir();
+        for task in db.list_tasks().unwrap_or_default() {
+            let Some(ctx) = &task.context else { continue };
+            let Some(path) = &ctx.project_path else {
+                continue;
+            };
+            if let Some(sid) = &ctx.claude_session_id {
+                links.claude_task_repo.insert(sid.clone(), path.clone());
+                links
+                    .claude_session_to_task
+                    .insert(sid.clone(), task.task_id.clone());
+            }
+            if let Some(serde_json::Value::String(p)) = ctx.extra.get("pi_session_path") {
+                // pi_session_path is stored as a container path when the
+                // sandbox attach logic discovers it. Convert it back to a
+                // host path so it matches the paths returned by session
+                // discovery (which scans ~/.pi on the host).
+                let host_path = match (&home_dir, p.strip_prefix("/home/node/")) {
+                    (Some(home), Some(rest)) => format!("{}/{}", home.to_string_lossy(), rest),
+                    _ => p.clone(),
+                };
+                links.pi_task_repo.insert(host_path.clone(), path.clone());
+                links
+                    .pi_path_to_task
+                    .insert(host_path, task.task_id.clone());
+            }
+        }
+        links
+    }
+
+    /// Host repo of a session (see [`session_repo`]).
+    pub(crate) fn repo(&self, s: &session::SessionInfo) -> Option<&str> {
+        session_repo(s, &self.claude_task_repo, &self.pi_task_repo)
+    }
+
+    /// Task ID a session is linked to, if any.
+    pub(crate) fn task_id(&self, s: &session::SessionInfo) -> Option<&str> {
+        match s.agent.as_str() {
+            "claude" => self.claude_session_to_task.get(&s.session_id),
+            "pi" | "omp" => self.pi_path_to_task.get(&*s.path.to_string_lossy()),
+            _ => None,
+        }
+        .map(String::as_str)
+    }
+}
+
 /// Resolve a session to its repo (host project path) via the task DB:
 /// claude sessions by session ID, pi/omp sessions by transcript path.
 /// Sandbox sessions record a container cwd (e.g. `/nibble`), so this is the
@@ -285,8 +317,12 @@ pub(crate) fn cmd_session_info(id: &str) -> Result<()> {
                 .join("\n")
         );
     }
-    let s = &matches[0];
+    print_session_info(&matches[0]);
+    Ok(())
+}
 
+/// Print a session's full ID, repo, transcript path and resume command.
+pub(crate) fn print_session_info(s: &session::SessionInfo) {
     // Ready-to-paste resume command for the session's agent. pi-format
     // transcripts (pi, hermes) resume with pi's --session flag; omp is a
     // pi fork that uses --resume like claude.
@@ -309,7 +345,6 @@ pub(crate) fn cmd_session_info(id: &str) -> Result<()> {
     println!();
     println!("Resume from the host (run in the session's repo directory):");
     println!("  {}", resume_cmd);
-    Ok(())
 }
 
 pub(crate) fn cmd_session_read(id: &str, raw: bool) -> Result<()> {
@@ -317,25 +352,195 @@ pub(crate) fn cmd_session_read(id: &str, raw: bool) -> Result<()> {
         let content = session::read_session_raw(id)?;
         println!("{}", content);
     } else {
-        let content = session::read_session(id)?;
-        // Use pager for formatted output
-        let pager = std::env::var("PAGER").unwrap_or_else(|_| "less".to_string());
-        let mut child = std::process::Command::new(&pager)
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-            .unwrap_or_else(|_| {
-                std::process::Command::new("cat")
-                    .stdin(std::process::Stdio::piped())
-                    .spawn()
-                    .expect("cat should always work")
-            });
-        if let Some(mut stdin) = child.stdin.take() {
-            use std::io::Write;
-            let _ = stdin.write_all(content.as_bytes());
-        }
-        let _ = child.wait();
+        page(&session::read_session(id)?);
     }
     Ok(())
+}
+
+/// Show text in `$PAGER` (default `less`), falling back to `cat`.
+fn page(content: &str) {
+    let pager = std::env::var("PAGER").unwrap_or_else(|_| "less".to_string());
+    let mut child = std::process::Command::new(&pager)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|_| {
+            std::process::Command::new("cat")
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .expect("cat should always work")
+        });
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        let _ = stdin.write_all(content.as_bytes());
+    }
+    let _ = child.wait();
+}
+
+/// Load every session as a search document, newest first: title, summary
+/// (from the session-summary memories) and host repo. Bodies are loaded
+/// separately by the background indexer.
+fn load_search_docs(db: &Database) -> Result<Vec<session::search::SearchDoc>> {
+    let mut sessions = session::list_all_sessions()?;
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.effective_time()));
+    let links = TaskLinks::from_db(db);
+    let summaries = session_summaries();
+    let titles = session::get_session_titles(&sessions);
+    Ok(sessions
+        .into_iter()
+        .zip(titles)
+        .map(|(s, title)| {
+            // Summaries are keyed by the agent session ID, or by the task
+            // ID for sessions summarized through their sandbox task.
+            let summary = summaries
+                .get(&s.session_id)
+                .or_else(|| links.task_id(&s).and_then(|t| summaries.get(t)))
+                .cloned()
+                .unwrap_or_default();
+            let repo = links
+                .repo(&s)
+                .map(str::to_string)
+                .or_else(|| s.workspace.clone());
+            session::search::SearchDoc::new(s, title, summary, repo)
+        })
+        .collect())
+}
+
+/// Session-summary memory text by session ID. The newest summary wins, and
+/// the generated bookkeeping lines (turn counts, tool names) are dropped so
+/// a search for "read" or "bash" does not match every summary.
+fn session_summaries() -> HashMap<String, String> {
+    let memories = memory::store::list_memories(
+        None,
+        Some(&memory::models::MemoryType::SessionSummary),
+        None,
+        None,
+    )
+    .unwrap_or_default();
+    let mut out = HashMap::new();
+    // list_memories is newest first; keep the first summary per session.
+    for m in memories {
+        if let Some(sid) = m.session_id {
+            out.entry(sid).or_insert_with(|| clean_summary(&m.content));
+        }
+    }
+    out
+}
+
+fn clean_summary(content: &str) -> String {
+    content
+        .lines()
+        .filter(|l| {
+            let l = l.trim_start();
+            !l.starts_with("**Turns**") && !l.starts_with("**Tools used**")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+/// `nibble session search`: the interactive search UI on a terminal, or a
+/// ranked plain-text list when output is piped (handy for scripts and
+/// agents).
+pub(crate) fn cmd_session_search(db: &Database, query: &[String], limit: usize) -> Result<()> {
+    use std::io::IsTerminal;
+    let query = query.join(" ");
+    let docs = load_search_docs(db)?;
+    if docs.is_empty() {
+        println!("No sessions found.");
+        return Ok(());
+    }
+    let sessions: Vec<session::SessionInfo> = docs.iter().map(|d| d.session.clone()).collect();
+    let (bodies, indexer) = session::search::spawn_indexer(sessions, session::search::cache_path());
+
+    if !(std::io::stdout().is_terminal() && std::io::stdin().is_terminal()) {
+        return print_search_results(docs, &query, &bodies, limit);
+    }
+    let result = session::search_tui::run(docs, query, &bodies, |doc| {
+        page(&session::format_session(&doc.session)?);
+        Ok(())
+    });
+    // Quitting before indexing finished stops the indexer; wait for it to
+    // save what it extracted so the next search starts warm.
+    drop(bodies);
+    let _ = indexer.join();
+    let (outcome, docs) = result?;
+    if let session::search_tui::Outcome::Selected(i) = outcome {
+        print_session_info(&docs[i].session);
+    }
+    Ok(())
+}
+
+/// Wait for every body, then print the best `limit` matches.
+fn print_search_results(
+    mut docs: Vec<session::search::SearchDoc>,
+    query: &str,
+    bodies: &std::sync::mpsc::Receiver<session::search::IndexEvent>,
+    limit: usize,
+) -> Result<()> {
+    use session::search::IndexEvent;
+    for event in bodies {
+        match event {
+            IndexEvent::Body { index, body } => docs[index].body = Some(body),
+            IndexEvent::Failed { index, error } => eprintln!(
+                "warning: could not index {}: {error}",
+                docs[index].session.path.display()
+            ),
+            IndexEvent::Done { cache_error } => {
+                if let Some(e) = cache_error {
+                    eprintln!("warning: search cache not saved: {e}");
+                }
+                break;
+            }
+        }
+    }
+    // A closed pipe (`| head`) is not an error worth reporting.
+    match std::io::Write::write_all(
+        &mut std::io::stdout(),
+        format_search_results(&docs, query, limit).as_bytes(),
+    ) {
+        Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => {
+            Err(e).context("could not write search results")
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Plain-text ranked results: where each match was found (S summary,
+/// T title, B body), date, agent, short ID, title and repo.
+fn format_search_results(docs: &[session::search::SearchDoc], query: &str, limit: usize) -> String {
+    let hits = session::search::Ranker::default().rank(docs, query);
+    if hits.is_empty() {
+        return "No sessions match.\n".to_string();
+    }
+    let mut out = String::new();
+    for hit in hits.iter().take(limit) {
+        let d = &docs[hit.index];
+        let flag = |on: bool, c: char| if on { c } else { '·' };
+        let date = d.session.effective_time().map_or_else(
+            || "unknown".to_string(),
+            |t| {
+                chrono::DateTime::<chrono::Local>::from(t)
+                    .format("%Y-%m-%d")
+                    .to_string()
+            },
+        );
+        out.push_str(&format!(
+            "{}{}{}  {}  {:<2} {}  {}  {}\n",
+            flag(hit.in_summary, 'S'),
+            flag(hit.in_title, 'T'),
+            flag(hit.body_count > 0, 'B'),
+            date,
+            memory::format::agent_short_name(&d.session.agent),
+            d.session.session_id.chars().take(8).collect::<String>(),
+            d.title,
+            session::format_workspace(d.repo.as_deref()),
+        ));
+    }
+    if hits.len() > limit {
+        out.push_str(&format!("… {} more (raise --limit)\n", hits.len() - limit));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -353,6 +558,94 @@ mod tests {
             content_time: None,
             size_bytes: 0,
         }
+    }
+
+    #[test]
+    fn clean_summary_drops_bookkeeping_lines() {
+        let content =
+            "**Turns**: 2 user\n\n**Tools used**: Bash, Read\n\n**Started with**: fix cron";
+        assert_eq!(clean_summary(content), "**Started with**: fix cron");
+        assert_eq!(clean_summary(""), "");
+    }
+
+    #[test]
+    fn task_links_resolve_claude_by_id_and_pi_by_path() {
+        let mut links = TaskLinks::default();
+        links
+            .claude_task_repo
+            .insert("c1".to_string(), "/repo/a".to_string());
+        links
+            .claude_session_to_task
+            .insert("c1".to_string(), "task-a".to_string());
+        links
+            .pi_task_repo
+            .insert("/p/t.jsonl".to_string(), "/repo/b".to_string());
+        links
+            .pi_path_to_task
+            .insert("/p/t.jsonl".to_string(), "pi-task".to_string());
+        let claude = mk_session("claude", "c1", Some("/workspace"), "/x/c1.jsonl");
+        assert_eq!(links.repo(&claude), Some("/repo/a"));
+        assert_eq!(links.task_id(&claude), Some("task-a"));
+        let pi = mk_session("omp", "p1", None, "/p/t.jsonl");
+        assert_eq!(links.repo(&pi), Some("/repo/b"));
+        assert_eq!(links.task_id(&pi), Some("pi-task"));
+        let hermes = mk_session("hermes", "c1", None, "/p/t.jsonl");
+        assert_eq!(links.task_id(&hermes), None);
+        assert_eq!(links.repo(&hermes), None);
+    }
+
+    fn search_doc(sid: &str, title: &str, summary: &str) -> session::search::SearchDoc {
+        let mut s = mk_session("claude", sid, None, "/x.jsonl");
+        s.modified =
+            Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(86_400 * 400 + 43_200));
+        session::search::SearchDoc::new(
+            s,
+            title.to_string(),
+            summary.to_string(),
+            Some("/home/u/nibble".to_string()),
+        )
+    }
+
+    #[test]
+    fn format_search_results_flags_fields_and_limits() {
+        let docs = vec![
+            search_doc("aaaaaaaa-1", "cron runner", "cron daemon"),
+            search_doc("bbbbbbbb-2", "cron title only", ""),
+        ];
+        let out = format_search_results(&docs, "cron", 1);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("ST·  1971-02-05  c  aaaaaaaa  cron runner  nibble"));
+        assert_eq!(lines[1], "… 1 more (raise --limit)");
+        assert_eq!(
+            format_search_results(&docs, "zzz", 5),
+            "No sessions match.\n"
+        );
+        let mut undated = docs;
+        undated[0].session.modified = None;
+        assert!(format_search_results(&undated, "runner", 5).contains("unknown"));
+    }
+
+    #[test]
+    fn print_search_results_applies_every_index_event() {
+        use session::search::{Body, IndexEvent};
+        let docs = vec![search_doc("a", "one", ""), search_doc("b", "two", "")];
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(IndexEvent::Body {
+            index: 0,
+            body: Body::new("body".to_string()),
+        })
+        .unwrap();
+        tx.send(IndexEvent::Failed {
+            index: 1,
+            error: "unreadable".to_string(),
+        })
+        .unwrap();
+        tx.send(IndexEvent::Done {
+            cache_error: Some("read-only".to_string()),
+        })
+        .unwrap();
+        assert!(print_search_results(docs, "body", &rx, 5).is_ok());
     }
 
     #[test]

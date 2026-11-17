@@ -799,6 +799,17 @@ pub enum SessionAction {
         id: String,
     },
 
+    /// Search every session interactively: fuzzy over summaries and titles,
+    /// plain text over transcripts, best matches first (summary > title >
+    /// transcript). Prints a ranked list instead when output is piped.
+    Search {
+        /// Initial query (more words narrow it: every word must match)
+        query: Vec<String>,
+        /// Maximum results in piped output
+        #[arg(short, long, default_value = "20")]
+        limit: usize,
+    },
+
     /// Read and display a session transcript by its ID
     Read {
         /// Session ID (from `nibble session list`)

@@ -423,6 +423,9 @@ nibble sandbox list
 # Browse agent sessions (pi/omp/claude)
 nibble session list
 
+# Search every session (summary, title and transcript), interactively
+nibble session search
+
 # Prune stale tasks (dead PIDs / gone containers → mark exited)
 nibble prune
 ```
@@ -616,6 +619,7 @@ Network is host-mode, so services started inside the container (e.g. `npm run de
 | `nibble sandbox resume --all` | Resume agents after reboot |
 | `nibble sandbox bash <repo>` | Open a bash shell inside a running sandbox |
 | `nibble session list` | Browse/search agent sessions (pi/omp/claude) |
+| `nibble session search [query]` | Search every session interactively; ranked list when piped |
 | `nibble session info <id>` / `read <id>` | Show a session's transcript path and resume command, or print its transcript |
 | `nibble inject <id> <msg>` | Send a message into a running sandbox agent |
 | `nibble quota-watch` | Quota auto-continue daemon (`--once` for a single pass) |

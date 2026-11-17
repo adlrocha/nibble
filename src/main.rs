@@ -448,6 +448,9 @@ fn main() -> Result<()> {
                 &db, agent, repo, sandbox, today, yesterday, week, month, last, limit,
             )?,
             cli::SessionAction::Info { id } => session::cli::cmd_session_info(&id)?,
+            cli::SessionAction::Search { query, limit } => {
+                session::cli::cmd_session_search(&db, &query, limit)?
+            }
             cli::SessionAction::Read { id, raw } => session::cli::cmd_session_read(&id, raw)?,
         },
         Commands::Backup { output, sessions } => {

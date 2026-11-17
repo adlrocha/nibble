@@ -128,6 +128,7 @@ session files are immutable, so nothing existing is overwritten or deleted.
 
 ```bash
 nibble session list                       # grouped by day, with titles
+nibble session search [query]             # search summaries, titles, transcripts
 nibble session info <id-or-prefix>        # full ID + resume command
 nibble session read <id>                  # formatted transcript
 nibble session read <id> --raw            # raw JSONL
@@ -149,3 +150,31 @@ nibble web                                # browser UI on :7878 (search + viewer
 - **Sandboxes don't come back after reboot at all.** Check
   `loginctl show-user $USER --property=Linger` (needs `Linger=yes`) and
   `systemctl --user status nibble-resume.service`.
+
+## Searching all sessions
+
+`nibble session search` opens a search over every claude, pi and omp session
+on this machine. Type to filter; each word must match the session somewhere.
+Results are ranked by where the words appear: the session summary counts
+most, then the title, then the transcript itself, with newer sessions first
+on ties. The `S T B` badges on each row show which of the three matched.
+
+Summaries and titles are matched fuzzily, so a typo such as `sesion` still
+finds "session". Transcripts are matched as plain case-insensitive text and
+only cover what you and the agent wrote, not tool output. The first run
+reads every transcript (a few seconds for gigabytes of history) and caches
+the text in `~/.nibble/cache/session-search.json`; later runs only re-read
+transcripts that changed. Results appear right away and the transcript
+matches fill in while that runs.
+
+| Key | Action |
+| --- | --- |
+| type / Backspace / Ctrl-W / Ctrl-U | edit the query (Ctrl-U clears it) |
+| ↑ ↓ (Ctrl-P/N, Ctrl-K/J) | move through results |
+| PgUp / PgDn | scroll the preview |
+| Ctrl-O | read the transcript in `$PAGER`, then come back |
+| Enter | quit and print the session's ID, path and resume command |
+| Esc / Ctrl-C | quit |
+
+When output is piped, it prints a ranked list instead, which suits scripts
+and agents: `nibble session search cron slack | head`.
