@@ -188,20 +188,25 @@ impl App {
         self.edit(|q| format!("{q}{flat}"))
     }
 
-    /// Ctrl-F: narrow the results to the highlighted session's repo, or
-    /// clear that narrowing again (back to the `--repo` set, if any). When
-    /// the session has no host repo to narrow on, the title says why.
+    /// Ctrl-F: narrow the results to the highlighted session's host repo
+    /// (see `SearchDoc::host_repo`), or clear that narrowing again (back to
+    /// the `--repo` set, if any). When the session has no known host repo,
+    /// the title says why.
     fn toggle_repo_filter(&mut self) -> Action {
         if self.repo_filter.take().is_none() {
             let Some(doc) = self.selected_doc().map(|i| &self.docs[i]) else {
                 return Action::None;
             };
-            match doc.repo.as_deref().filter(|r| is_host_repo(r)) {
+            let host = doc
+                .host_repo
+                .as_deref()
+                .filter(|r| !r.trim_end_matches('/').is_empty());
+            match host {
                 Some(repo) => self.repo_filter = Some(repo.to_string()),
                 None => {
                     self.notice = Some(match doc.repo.as_deref() {
                         Some(r) if !r.trim().is_empty() => {
-                            format!("ctrl-f: {r} is not a repo path on this machine")
+                            format!("ctrl-f: {r} is not a host repo (sandbox session?)")
                         }
                         _ => "ctrl-f: no repo known for this session".to_string(),
                     });
@@ -220,6 +225,9 @@ impl App {
     }
 
     fn edit(&mut self, f: impl FnOnce(&str) -> String) -> Action {
+        // Typed or pasted text can move the highlight off the session a
+        // Ctrl-F notice was about.
+        self.notice = None;
         let query = f(&self.query);
         if query != self.query {
             self.set_query(query);
@@ -255,22 +263,6 @@ impl App {
             }
         }
     }
-}
-
-/// Whether Ctrl-F can narrow on `repo`. A session's repo is a host path,
-/// except for a sandbox session nibble cannot link to its task: that one
-/// only knows its container cwd, `/<repo name>` (see
-/// `sandbox::container_working_dir`), whose top-level folder does not exist
-/// on the host. Narrowing on it would hide the repo's host sessions. A host
-/// path whose repo was since deleted (a removed worktree, a moved
-/// checkout) still counts. The root matches nothing, so it never does.
-fn is_host_repo(repo: &str) -> bool {
-    let path = std::path::Path::new(repo.trim_end_matches('/'));
-    let mut parts = path.components();
-    matches!(parts.next(), Some(std::path::Component::RootDir))
-        && parts
-            .next()
-            .is_some_and(|top| std::path::Path::new("/").join(top).is_dir())
 }
 
 fn short_id(id: &str) -> String {
@@ -384,7 +376,7 @@ fn render(f: &mut Frame, app: &mut App) {
     render_preview(f, app, preview);
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            " ↑↓ move · enter details · ctrl-o transcript · ctrl-f repo/all · pgup/pgdn scroll · ctrl-u clear · esc quit",
+            " ↑↓ move · enter details · ctrl-o transcript · ctrl-f toggle repo · pgup/pgdn scroll · ctrl-u clear · esc quit",
             Style::default().fg(MUTED),
         ))),
         help,
@@ -816,17 +808,16 @@ mod tests {
 
     #[test]
     fn ctrl_f_narrows_to_the_selected_repo_and_back() {
-        // Repos must be host directories for Ctrl-F to narrow on them.
-        let temp = tempfile::tempdir().unwrap();
-        let dir = |name: &str| {
-            let p = temp.path().join(name);
-            std::fs::create_dir_all(&p).unwrap();
-            p.to_string_lossy().to_string()
-        };
+        // Ctrl-F narrows on `host_repo`, which the loader sets only when
+        // the repo is known to be a host path; `repo` is what is shown.
         let mut app = app();
-        app.docs[0].repo = Some(dir("nibble"));
-        app.docs[1].repo = Some(dir("nibble-review"));
-        app.docs[2].repo = Some(dir("nibble/scripts"));
+        let set = |app: &mut App, i: usize, repo: &str, host: bool| {
+            app.docs[i].repo = Some(repo.to_string());
+            app.docs[i].host_repo = host.then(|| repo.to_string());
+        };
+        set(&mut app, 0, "/home/u/nibble", true);
+        set(&mut app, 1, "/home/u/nibble-review", true);
+        set(&mut app, 2, "/home/u/nibble/scripts", true);
         app.rerank();
         assert_eq!(app.hits.len(), 3);
 
@@ -864,33 +855,27 @@ mod tests {
         app.handle_key(ctrl('f'));
         assert!(draw(&mut app, 140, 20).contains(" search sessions in work "));
 
-        // A repo deleted from this machine (a removed worktree) still
-        // narrows: its path is a host path.
-        let gone = temp.path().join("removed-worktree");
-        app.docs[2].repo = Some(gone.to_string_lossy().to_string());
-        app.handle_key(ctrl('f'));
-        assert_eq!(app.repo_filter, app.docs[2].repo);
-        assert_eq!(shown(&app), vec![2]);
-        app.handle_key(ctrl('f'));
-
-        // No-ops that say why: a container cwd, the root, no known repo.
-        for (repo, why) in [
-            (
-                Some("/no-such-top-dir/sub"),
-                "/no-such-top-dir/sub is not a repo path",
-            ),
-            (Some("/"), "/ is not a repo path"),
-            (Some("relative/dir"), "relative/dir is not a repo path"),
-            (None, "no repo known"),
+        // No-ops that say why: a container cwd (shown, but not a host
+        // repo), the root, no known repo.
+        for (repo, host, why) in [
+            (Some("/tmp"), false, "/tmp is not a host repo"),
+            (Some("/"), true, "/ is not a host repo"),
+            (None, false, "no repo known"),
         ] {
             app.docs[2].repo = repo.map(str::to_string);
+            app.docs[2].host_repo = repo.filter(|_| host).map(str::to_string);
             app.handle_key(ctrl('f'));
             assert!(app.repo_filter.is_none());
             assert_eq!(app.hits.len(), 3);
             assert!(draw(&mut app, 140, 20).contains(why), "{why}");
         }
-        // The notice goes away on the next key.
+        // The notice goes away on the next key, and on a paste.
         app.handle_key(key(KeyCode::Up));
+        assert!(app.notice.is_none());
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(ctrl('f'));
+        assert!(app.notice.is_some());
+        app.paste("x");
         assert!(app.notice.is_none());
         // No selection: nothing happens and nothing is said.
         type_str(&mut app, "nothing-matches-this");

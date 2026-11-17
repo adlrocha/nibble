@@ -184,11 +184,14 @@ that repo and its subdirectories, including its sandbox sessions, and any
 other text matches the workspace path as a substring. The title shows the
 repo being searched: `nibble session search -r . cron`. Inside the search,
 Ctrl-F narrows to the highlighted session's repo without restarting, on
-top of `--repo` when one was given. It also works for repos no longer on
-disk, such as a removed worktree. It does nothing, and says why in the
-title, for a session with no known repo, or a sandbox session nibble
-cannot link to its host repo (its only known folder is the container's,
-like `/nibble`). Use `--repo` with a name for those.
+top of `--repo` when one was given. It narrows on the host repo nibble
+knows for the session: the one its sandbox task records, or the
+session's own folder when that is under your home directory (also when
+the checkout was deleted since, such as a removed worktree). It does
+nothing, and says why in the title, for a session with no known repo, a
+sandbox session nibble cannot link to its task (its only known folder is
+the container's, like `/nibble`), or a session started outside your home
+directory. Use `--repo` for those.
 
 When output is piped, it prints a ranked list instead, which suits scripts
 and agents: `nibble session search cron slack | head`.
