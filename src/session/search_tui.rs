@@ -62,6 +62,9 @@ struct App {
     warning: Option<String>,
     /// The `--repo` filter, shown in the input title.
     scope: Option<String>,
+    /// Repo path that Ctrl-F narrowed the results to: that repo and its
+    /// subdirectories.
+    repo_filter: Option<String>,
 }
 
 impl App {
@@ -77,6 +80,7 @@ impl App {
             indexing: true,
             warning: None,
             scope: None,
+            repo_filter: None,
         };
         app.rerank();
         app
@@ -85,6 +89,15 @@ impl App {
     fn rerank(&mut self) {
         let keep = self.selected_doc();
         self.hits = self.ranker.rank(&self.docs, &self.query);
+        if let Some(repo) = &self.repo_filter {
+            let docs = &self.docs;
+            self.hits.retain(|h| {
+                docs[h.index]
+                    .repo
+                    .as_deref()
+                    .is_some_and(|r| super::workspace_matches_repo(r, repo))
+            });
+        }
         // Keep the same session selected while bodies stream in; reset to
         // the top when the query changed it away.
         let pos = keep
@@ -144,6 +157,7 @@ impl App {
                 self.preview_scroll = self.preview_scroll.saturating_add(10);
                 Action::None
             }
+            KeyCode::Char('f') if ctrl => self.toggle_repo_filter(),
             KeyCode::Char('u') if ctrl => self.edit(|_| String::new()),
             KeyCode::Char('w') if ctrl => self.edit(|q| {
                 let kept = q.trim_end();
@@ -168,6 +182,28 @@ impl App {
     fn paste(&mut self, text: &str) -> Action {
         let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
         self.edit(|q| format!("{q}{flat}"))
+    }
+
+    /// Ctrl-F: narrow the results to the highlighted session's repo, or
+    /// show every repo again when already narrowed. A session with no
+    /// known repo (or the filesystem root, which matches nothing) leaves
+    /// the results as they are.
+    fn toggle_repo_filter(&mut self) -> Action {
+        let next = match self.repo_filter {
+            Some(_) => None,
+            None => match self
+                .selected_doc()
+                .and_then(|i| self.docs[i].repo.clone())
+                .filter(|r| !r.trim_end_matches('/').is_empty())
+            {
+                Some(repo) => Some(repo),
+                None => return Action::None,
+            },
+        };
+        self.repo_filter = next;
+        self.preview_scroll = 0;
+        self.rerank();
+        Action::None
     }
 
     fn step(&mut self, delta: isize) -> Action {
@@ -324,7 +360,7 @@ fn render(f: &mut Frame, app: &mut App) {
     render_preview(f, app, preview);
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            " ↑↓ move · enter details · ctrl-o read transcript · pgup/pgdn scroll preview · ctrl-u clear · esc quit",
+            " ↑↓ move · enter details · ctrl-o read transcript · ctrl-f this repo only · pgup/pgdn scroll preview · ctrl-u clear · esc quit",
             Style::default().fg(MUTED),
         ))),
         help,
@@ -340,7 +376,12 @@ fn render_input(f: &mut Frame, app: &App, area: Rect) {
             app.docs.len()
         ));
     }
-    let heading = match &app.scope {
+    let repo = app
+        .repo_filter
+        .as_deref()
+        .map(|r| super::format_workspace(Some(r)))
+        .or_else(|| app.scope.clone());
+    let heading = match repo {
         Some(repo) => format!(" search sessions in {repo} "),
         None => " search sessions ".to_string(),
     };
@@ -744,6 +785,53 @@ mod tests {
             index: 99,
             body: Body::default(),
         });
+    }
+
+    #[test]
+    fn ctrl_f_narrows_to_the_selected_repo_and_back() {
+        let mut app = app();
+        app.docs[1].repo = Some("/home/u/nibble-review".to_string());
+        app.docs[2].repo = Some("/home/u/nibble/scripts".to_string());
+        app.rerank();
+        assert_eq!(app.hits.len(), 3);
+
+        // From the nibble session: its repo and subdirectories, not the
+        // sibling repo sharing a prefix. The query still applies.
+        assert_eq!(app.handle_key(ctrl('f')), Action::None);
+        let shown = |app: &App| app.hits.iter().map(|h| h.index).collect::<Vec<_>>();
+        assert_eq!(shown(&app), vec![0, 2]);
+        assert_eq!(app.selected_doc(), Some(0));
+        assert!(draw(&mut app, 140, 20).contains(" search sessions in nibble "));
+        type_str(&mut app, "zellij");
+        assert!(app.hits.is_empty());
+        app.handle_key(ctrl('u'));
+        assert_eq!(shown(&app), vec![0, 2]);
+
+        // Ctrl-F again shows every repo; the selection stays put.
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(ctrl('f'));
+        assert_eq!(app.hits.len(), 3);
+        assert_eq!(app.selected_doc(), Some(2));
+        assert!(draw(&mut app, 140, 20).contains(" search sessions "));
+
+        // The narrowed repo wins over the --repo label in the title.
+        app.scope = Some("work".to_string());
+        app.handle_key(ctrl('f'));
+        assert!(draw(&mut app, 140, 20).contains(" search sessions in scripts "));
+        app.handle_key(ctrl('f'));
+
+        // A session with no known repo, a root repo (it would match
+        // nothing), or no selection changes nothing.
+        app.docs[2].repo = Some("/".to_string());
+        app.handle_key(ctrl('f'));
+        assert!(app.repo_filter.is_none());
+        app.docs[2].repo = None;
+        app.handle_key(ctrl('f'));
+        assert!(app.repo_filter.is_none());
+        assert_eq!(app.hits.len(), 3);
+        type_str(&mut app, "nothing-matches-this");
+        app.handle_key(ctrl('f'));
+        assert!(app.repo_filter.is_none());
     }
 
     #[test]
