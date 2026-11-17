@@ -174,7 +174,7 @@ matches fill in while that runs.
 | ↑ ↓ (Ctrl-P/N, Ctrl-K/J) | move through results |
 | PgUp / PgDn | scroll the preview |
 | Ctrl-O | read the transcript in `$PAGER`, then come back |
-| Ctrl-F | show only the highlighted session's repo (and its subdirectories); again to show all repos |
+| Ctrl-F | narrow to the highlighted session's repo (and its subdirectories); again to clear it (back to the `--repo` set, if any) |
 | Enter | quit and print the session's ID, path and resume command |
 | Esc / Ctrl-C | quit |
 
@@ -183,7 +183,10 @@ way as `nibble session list --repo`: a path (`.`, `~/x`, relative) matches
 that repo and its subdirectories, including its sandbox sessions, and any
 other text matches the workspace path as a substring. The title shows the
 repo being searched: `nibble session search -r . cron`. Inside the search,
-Ctrl-F does the same for the highlighted session's repo without restarting.
+Ctrl-F narrows to the highlighted session's repo without restarting, on
+top of `--repo` when one was given. It does nothing for a sandbox session
+that nibble cannot link to its host repo, whose only known folder is the
+container's.
 
 When output is piped, it prints a ranked list instead, which suits scripts
 and agents: `nibble session search cron slack | head`.

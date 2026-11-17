@@ -185,16 +185,20 @@ impl App {
     }
 
     /// Ctrl-F: narrow the results to the highlighted session's repo, or
-    /// show every repo again when already narrowed. A session with no
-    /// known repo (or the filesystem root, which matches nothing) leaves
-    /// the results as they are.
+    /// clear that narrowing again (back to the `--repo` set, if any).
+    ///
+    /// Only a host directory counts as a repo. An unlinked sandbox session
+    /// falls back to its container cwd (`/workspace`, `/nibble`), which
+    /// would hide the repo's host sessions, so Ctrl-F leaves the results
+    /// as they are there, as it does for no repo or the filesystem root
+    /// (which matches nothing).
     fn toggle_repo_filter(&mut self) -> Action {
         let next = match self.repo_filter {
             Some(_) => None,
             None => match self
                 .selected_doc()
                 .and_then(|i| self.docs[i].repo.clone())
-                .filter(|r| !r.trim_end_matches('/').is_empty())
+                .filter(|r| !r.trim_end_matches('/').is_empty() && std::path::Path::new(r).is_dir())
             {
                 Some(repo) => Some(repo),
                 None => return Action::None,
@@ -360,7 +364,7 @@ fn render(f: &mut Frame, app: &mut App) {
     render_preview(f, app, preview);
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            " ↑↓ move · enter details · ctrl-o read transcript · ctrl-f this repo only · pgup/pgdn scroll preview · ctrl-u clear · esc quit",
+            " ↑↓ move · enter details · ctrl-o transcript · ctrl-f this repo · pgup/pgdn scroll · ctrl-u clear · esc quit",
             Style::default().fg(MUTED),
         ))),
         help,
@@ -789,9 +793,17 @@ mod tests {
 
     #[test]
     fn ctrl_f_narrows_to_the_selected_repo_and_back() {
+        // Repos must be host directories for Ctrl-F to narrow on them.
+        let temp = tempfile::tempdir().unwrap();
+        let dir = |name: &str| {
+            let p = temp.path().join(name);
+            std::fs::create_dir_all(&p).unwrap();
+            p.to_string_lossy().to_string()
+        };
         let mut app = app();
-        app.docs[1].repo = Some("/home/u/nibble-review".to_string());
-        app.docs[2].repo = Some("/home/u/nibble/scripts".to_string());
+        app.docs[0].repo = Some(dir("nibble"));
+        app.docs[1].repo = Some(dir("nibble-review"));
+        app.docs[2].repo = Some(dir("nibble/scripts"));
         app.rerank();
         assert_eq!(app.hits.len(), 3);
 
@@ -806,32 +818,50 @@ mod tests {
         assert!(app.hits.is_empty());
         app.handle_key(ctrl('u'));
         assert_eq!(shown(&app), vec![0, 2]);
+        // A body streaming in while narrowed reranks inside the narrowing.
+        assert!(app.apply(IndexEvent::Body {
+            index: 1,
+            body: Body::new("more text".to_string()),
+        }));
+        app.rerank();
+        assert_eq!(shown(&app), vec![0, 2]);
 
-        // Ctrl-F again shows every repo; the selection stays put.
+        // Ctrl-F again clears it; the selection stays put.
         app.handle_key(key(KeyCode::Down));
         app.handle_key(ctrl('f'));
         assert_eq!(app.hits.len(), 3);
         assert_eq!(app.selected_doc(), Some(2));
         assert!(draw(&mut app, 140, 20).contains(" search sessions "));
 
-        // The narrowed repo wins over the --repo label in the title.
+        // The narrowed repo wins over the --repo label in the title, and
+        // clearing it shows the --repo label again.
         app.scope = Some("work".to_string());
         app.handle_key(ctrl('f'));
         assert!(draw(&mut app, 140, 20).contains(" search sessions in scripts "));
         app.handle_key(ctrl('f'));
+        assert!(draw(&mut app, 140, 20).contains(" search sessions in work "));
 
-        // A session with no known repo, a root repo (it would match
-        // nothing), or no selection changes nothing.
-        app.docs[2].repo = Some("/".to_string());
-        app.handle_key(ctrl('f'));
-        assert!(app.repo_filter.is_none());
-        app.docs[2].repo = None;
-        app.handle_key(ctrl('f'));
-        assert!(app.repo_filter.is_none());
-        assert_eq!(app.hits.len(), 3);
+        // No-ops: a container cwd (not a host directory), the root (it
+        // would match nothing), no known repo, and no selection.
+        for repo in [
+            Some("/workspace-not-on-host".to_string()),
+            Some("/".to_string()),
+            None,
+        ] {
+            app.docs[2].repo = repo;
+            app.handle_key(ctrl('f'));
+            assert!(app.repo_filter.is_none());
+            assert_eq!(app.hits.len(), 3);
+        }
         type_str(&mut app, "nothing-matches-this");
         app.handle_key(ctrl('f'));
         assert!(app.repo_filter.is_none());
+    }
+
+    #[test]
+    fn help_line_fits_a_120_column_terminal() {
+        let mut app = app();
+        assert!(draw(&mut app, 120, 20).contains("esc quit"));
     }
 
     #[test]
