@@ -129,6 +129,7 @@ session files are immutable, so nothing existing is overwritten or deleted.
 ```bash
 nibble session list                       # grouped by day, with titles
 nibble session search [query]             # search summaries, titles, transcripts
+nibble session search --repo . [query]    # only sessions in this repo
 nibble session info <id-or-prefix>        # full ID + resume command
 nibble session read <id>                  # formatted transcript
 nibble session read <id> --raw            # raw JSONL
@@ -175,6 +176,12 @@ matches fill in while that runs.
 | Ctrl-O | read the transcript in `$PAGER`, then come back |
 | Enter | quit and print the session's ID, path and resume command |
 | Esc / Ctrl-C | quit |
+
+`--repo` (`-r`) limits the search to one repo's sessions, matched the same
+way as `nibble session list --repo`: a path (`.`, `~/x`, relative) matches
+that repo and its subdirectories, including its sandbox sessions, and any
+other text matches the workspace path as a substring. The title shows the
+repo being searched: `nibble session search -r . cron`.
 
 When output is piped, it prints a ranked list instead, which suits scripts
 and agents: `nibble session search cron slack | head`.

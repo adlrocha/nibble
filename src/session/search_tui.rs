@@ -60,6 +60,8 @@ struct App {
     indexing: bool,
     /// Last indexer problem, shown in the status line.
     warning: Option<String>,
+    /// The `--repo` filter, shown in the input title.
+    scope: Option<String>,
 }
 
 impl App {
@@ -74,6 +76,7 @@ impl App {
             indexed: 0,
             indexing: true,
             warning: None,
+            scope: None,
         };
         app.rerank();
         app
@@ -214,16 +217,19 @@ fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
-/// Run the search UI until the user quits or picks a session. `bodies`
+/// Run the search UI until the user quits or picks a session. `scope`
+/// names the `--repo` filter, if any, for the title. `bodies`
 /// streams transcript bodies in from the background indexer; `read` opens
 /// a transcript in the pager while the UI is suspended.
 pub fn run(
     docs: Vec<SearchDoc>,
     query: String,
+    scope: Option<String>,
     bodies: &mpsc::Receiver<IndexEvent>,
     read: impl Fn(&SearchDoc) -> Result<()>,
 ) -> Result<(Outcome, Vec<SearchDoc>)> {
     let mut app = App::new(docs, query);
+    app.scope = scope;
     let mut terminal = init_terminal();
     let result = event_loop(&mut terminal, &mut app, bodies, &read);
     restore_terminal();
@@ -334,8 +340,12 @@ fn render_input(f: &mut Frame, app: &App, area: Rect) {
             app.docs.len()
         ));
     }
+    let heading = match &app.scope {
+        Some(repo) => format!(" search sessions in {repo} "),
+        None => " search sessions ".to_string(),
+    };
     let mut title = vec![Span::styled(
-        " search sessions ",
+        heading,
         Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
     )];
     if let Some(w) = &app.warning {
@@ -749,6 +759,11 @@ mod tests {
         assert!(screen.contains("added the cron daemon"));
         assert!(screen.contains("No matches in the transcript."));
         assert!(screen.contains("nibble"));
+        assert!(screen.contains(" search sessions "));
+        assert!(!screen.contains("search sessions in"));
+
+        app.scope = Some("nibble".to_string());
+        assert!(draw(&mut app, 140, 20).contains(" search sessions in nibble "));
     }
 
     #[test]

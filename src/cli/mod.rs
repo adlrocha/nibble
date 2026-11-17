@@ -805,6 +805,11 @@ pub enum SessionAction {
     Search {
         /// Initial query (more words narrow it: every word must match)
         query: Vec<String>,
+        /// Only search sessions in this repo: paths (".", "~", relative)
+        /// match the repo plus its subdirectories; plain strings match
+        /// workspace substrings (same as `session list --repo`)
+        #[arg(short, long)]
+        repo: Option<String>,
         /// Maximum results in piped output
         #[arg(short, long, default_value = "20")]
         limit: usize,
