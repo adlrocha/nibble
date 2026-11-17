@@ -821,7 +821,9 @@ mod tests {
         let mut d = doc("x", "t", "", None);
         d.session.modified = None;
         assert_eq!(when(&d), "—");
-        d.session.modified = Some(std::time::SystemTime::UNIX_EPOCH);
-        assert_eq!(when(&d), "1970-01");
+        // Mid-1970 is 1970-07 in every timezone.
+        d.session.modified =
+            Some(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(86_400 * 190));
+        assert_eq!(when(&d), "1970-07");
     }
 }

@@ -341,7 +341,9 @@ pub fn extract_body(path: &Path) -> Result<String> {
         .with_context(|| format!("could not open transcript {}", path.display()))?;
     let mut out = String::new();
     for line in reader.lines() {
-        let line = line.with_context(|| format!("could not read {}", path.display()))?;
+        // An unreadable line (e.g. a write cut mid-character) costs only
+        // that line, not the whole transcript.
+        let Ok(line) = line else { continue };
         let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
@@ -396,13 +398,15 @@ struct BodyCache {
     entries: HashMap<String, CachedBody>,
 }
 
-/// Where extracted bodies are cached: `~/.nibble/cache/session-search.json`.
+/// Where extracted bodies are cached: `$XDG_CACHE_HOME/nibble/session-search.json`
+/// (`~/.cache/nibble/…`). Deliberately outside `~/.nibble`, which every
+/// sandbox mounts read-write: the cache holds the text of every session on
+/// the host, including repos and agents a sandbox cannot otherwise see.
 pub fn cache_path() -> PathBuf {
-    let memory = crate::config::memory_dir();
-    memory
-        .parent()
-        .map_or_else(|| memory.clone(), Path::to_path_buf)
-        .join("cache")
+    dirs::cache_dir()
+        .or_else(|| dirs::home_dir().map(|h| h.join(".cache")))
+        .unwrap_or_else(|| PathBuf::from(".cache"))
+        .join("nibble")
         .join("session-search.json")
 }
 
@@ -427,9 +431,25 @@ fn save_cache(path: &Path, entries: HashMap<String, CachedBody>) -> Result<()> {
         entries,
     };
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec(&cache)?)
+    write_private(&tmp, &serde_json::to_vec(&cache)?)
         .with_context(|| format!("could not write {}", tmp.display()))?;
     std::fs::rename(&tmp, path).with_context(|| format!("could not replace {}", path.display()))
+}
+
+/// Write `data` to `path` readable by the owner only (0600): the cache
+/// holds full conversation text.
+fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    // `mode` only applies on creation; tighten a leftover file too.
+    file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    file.write_all(data)
 }
 
 fn mtime_secs(t: Option<SystemTime>) -> u64 {
@@ -736,6 +756,14 @@ mod tests {
             "fix the cron bug\n\nLooking at it.\n\nDone."
         );
         assert!(extract_body(&temp.path().join("missing.jsonl")).is_err());
+
+        // Invalid UTF-8 on one line skips that line only.
+        let mut bytes = br#"{"message":{"role":"user","content":"kept"}}"#.to_vec();
+        bytes.extend_from_slice(b"\n\xff\xfe broken\n");
+        bytes.extend_from_slice(br#"{"message":{"role":"assistant","content":"also kept"}}"#);
+        let mixed = temp.path().join("mixed.jsonl");
+        std::fs::write(&mixed, bytes).unwrap();
+        assert_eq!(extract_body(&mixed).unwrap(), "kept\n\nalso kept");
     }
 
     fn session_at(path: &Path) -> SessionInfo {
@@ -781,6 +809,9 @@ mod tests {
         assert_eq!(failed, vec![1]);
         assert!(err.is_none());
         assert!(cache.exists());
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&cache).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "cache must be owner-only");
 
         // Same mtime and size: served from the cache, even if the content
         // on disk were different. Prove it by poisoning the cached text.
@@ -854,6 +885,8 @@ mod tests {
 
     #[test]
     fn cache_path_lives_next_to_memory() {
-        assert!(cache_path().ends_with(".nibble/cache/session-search.json"));
+        let path = cache_path();
+        assert!(path.ends_with("nibble/session-search.json"));
+        assert!(!path.to_string_lossy().contains(".nibble"));
     }
 }

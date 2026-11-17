@@ -420,23 +420,11 @@ fn session_summaries() -> HashMap<String, String> {
     // list_memories is newest first; keep the first summary per session.
     for m in memories {
         if let Some(sid) = m.session_id {
-            out.entry(sid).or_insert_with(|| clean_summary(&m.content));
+            out.entry(sid)
+                .or_insert_with(|| memory::summarize::summary_body(&m.content));
         }
     }
     out
-}
-
-fn clean_summary(content: &str) -> String {
-    content
-        .lines()
-        .filter(|l| {
-            let l = l.trim_start();
-            !l.starts_with("**Turns**") && !l.starts_with("**Tools used**")
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_string()
 }
 
 /// `nibble session search`: the interactive search UI on a terminal, or a
@@ -564,8 +552,11 @@ mod tests {
     fn clean_summary_drops_bookkeeping_lines() {
         let content =
             "**Turns**: 2 user\n\n**Tools used**: Bash, Read\n\n**Started with**: fix cron";
-        assert_eq!(clean_summary(content), "**Started with**: fix cron");
-        assert_eq!(clean_summary(""), "");
+        assert_eq!(
+            memory::summarize::summary_body(content),
+            "**Started with**: fix cron"
+        );
+        assert_eq!(memory::summarize::summary_body(""), "");
     }
 
     #[test]
@@ -615,7 +606,9 @@ mod tests {
         let out = format_search_results(&docs, "cron", 1);
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 2);
-        assert!(lines[0].starts_with("ST·  1971-02-05  c  aaaaaaaa  cron runner  nibble"));
+        // The date is local time; check the rest of the line around it.
+        assert!(lines[0].starts_with("ST·  1971-02-0"), "{}", lines[0]);
+        assert!(lines[0].ends_with("  c  aaaaaaaa  cron runner  nibble"));
         assert_eq!(lines[1], "… 1 more (raise --limit)");
         assert_eq!(
             format_search_results(&docs, "zzz", 5),

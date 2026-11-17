@@ -163,7 +163,7 @@ Summaries and titles are matched fuzzily, so a typo such as `sesion` still
 finds "session". Transcripts are matched as plain case-insensitive text and
 only cover what you and the agent wrote, not tool output. The first run
 reads every transcript (a few seconds for gigabytes of history) and caches
-the text in `~/.nibble/cache/session-search.json`; later runs only re-read
+the text in `~/.cache/nibble/session-search.json` (owner-only, outside the sandbox-mounted `~/.nibble`); later runs only re-read
 transcripts that changed. Results appear right away and the transcript
 matches fill in while that runs.
 

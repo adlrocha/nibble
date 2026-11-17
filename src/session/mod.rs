@@ -246,12 +246,7 @@ fn extract_claude_title(lines: &[&str]) -> String {
 }
 
 fn truncate_title(text: &str) -> String {
-    let cleaned = text.lines().next().unwrap_or(text).trim();
-    if cleaned.chars().count() <= 60 {
-        cleaned.to_string()
-    } else {
-        format!("{}…", cleaned.chars().take(57).collect::<String>())
-    }
+    crate::memory::format::truncate_title(text, 60)
 }
 
 // ── Listing with browser-history UX ──────────────────────────────────────────
@@ -1060,7 +1055,7 @@ mod tests {
         );
         let title = truncate_title(&text);
         assert!(title.ends_with('…'));
-        assert_eq!(title.chars().count(), 58);
+        assert_eq!(title.chars().count(), 60);
         assert_eq!(truncate_title("short"), "short");
         assert_eq!(truncate_title("first line\nsecond"), "first line");
     }
