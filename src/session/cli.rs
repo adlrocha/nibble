@@ -360,13 +360,18 @@ fn page(content: &str) {
     let _ = child.wait();
 }
 
-/// Load every session as a search document, newest first: title, summary
-/// (from the session-summary memories) and host repo. Bodies are loaded
-/// separately by the background indexer.
-fn load_search_docs(db: &Database) -> Result<Vec<session::search::SearchDoc>> {
+/// Load every session (or only those in `repo`, matched like
+/// `session list --repo`) as a search document, newest first: title,
+/// summary (from the session-summary memories) and host repo. Bodies are
+/// loaded separately by the background indexer.
+fn load_search_docs(db: &Database, repo: Option<&str>) -> Result<Vec<session::search::SearchDoc>> {
     let mut sessions = session::list_all_sessions()?;
-    sessions.sort_by_key(|s| std::cmp::Reverse(s.effective_time()));
     let links = TaskLinks::from_db(db);
+    if let Some(filter) = repo {
+        let in_repo = repo_predicate(filter, &links);
+        sessions.retain(|s| in_repo(s));
+    }
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.effective_time()));
     let summaries = session_summaries();
     let titles = session::get_session_titles(&sessions);
     Ok(sessions
@@ -411,15 +416,33 @@ fn session_summaries() -> HashMap<String, String> {
     out
 }
 
+/// Short name for a `--repo` filter in the search UI: the directory name
+/// when it resolves to a path (so "." shows as the repo's name), else the
+/// filter text itself.
+fn repo_label(filter: &str) -> String {
+    match resolve_sandbox_repo_path(filter) {
+        Ok(path) => session::format_workspace(Some(&path)),
+        Err(_) => filter.to_string(),
+    }
+}
+
 /// `nibble session search`: the interactive search UI on a terminal, or a
 /// ranked plain-text list when output is piped (handy for scripts and
 /// agents).
-pub(crate) fn cmd_session_search(db: &Database, query: &[String], limit: usize) -> Result<()> {
+pub(crate) fn cmd_session_search(
+    db: &Database,
+    query: &[String],
+    repo: Option<&str>,
+    limit: usize,
+) -> Result<()> {
     use std::io::IsTerminal;
     let query = query.join(" ");
-    let docs = load_search_docs(db)?;
+    let docs = load_search_docs(db, repo)?;
     if docs.is_empty() {
-        println!("No sessions found.");
+        match repo {
+            Some(r) => println!("No sessions found in repo '{r}'."),
+            None => println!("No sessions found."),
+        }
         return Ok(());
     }
     let sessions: Vec<session::SessionInfo> = docs.iter().map(|d| d.session.clone()).collect();
@@ -428,7 +451,8 @@ pub(crate) fn cmd_session_search(db: &Database, query: &[String], limit: usize) 
     if !(std::io::stdout().is_terminal() && std::io::stdin().is_terminal()) {
         return print_search_results(docs, &query, &bodies, limit);
     }
-    let result = session::search_tui::run(docs, query, &bodies, |doc| {
+    let scope = repo.map(repo_label);
+    let result = session::search_tui::run(docs, query, scope, &bodies, |doc| {
         page(&session::format_session(&doc.session)?);
         Ok(())
     });
@@ -700,6 +724,18 @@ mod tests {
             Some("/nibble"),
             "/home/node/.pi/agent/sessions/--nibble--/t.jsonl"
         )));
+    }
+
+    #[test]
+    fn repo_label_names_resolved_paths_and_keeps_plain_filters() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("my-repo");
+        std::fs::create_dir(&repo).unwrap();
+        assert_eq!(repo_label(&repo.to_string_lossy()), "my-repo");
+        assert_eq!(
+            repo_label("does-not-exist-anywhere"),
+            "does-not-exist-anywhere"
+        );
     }
 
     #[test]

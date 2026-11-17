@@ -472,12 +472,14 @@ pub enum IndexEvent {
 
 /// Load the bodies of `sessions` on a background thread, from the cache at
 /// `cache` when the transcript's mtime and size are unchanged, else by
-/// extracting them. The cache is rewritten at the end with exactly the
-/// given sessions, which drops entries for deleted transcripts.
+/// extracting them. The cache is rewritten at the end with the given
+/// sessions plus the old entries for transcripts outside them (a `--repo`
+/// search) that still exist on disk; entries for deleted transcripts go.
 ///
 /// Dropping the receiver stops the indexer after its current transcript; it
-/// still saves what it extracted (keeping old entries for the transcripts it
-/// did not reach), so join the handle before exiting to keep that work.
+/// still saves what it extracted (keeping the old entries for the
+/// transcripts it did not reach), so join the handle before exiting to keep
+/// that work.
 pub fn spawn_indexer(
     sessions: Vec<SessionInfo>,
     cache: PathBuf,
@@ -489,8 +491,8 @@ pub fn spawn_indexer(
 
 fn index_bodies(sessions: &[SessionInfo], cache: &Path, tx: &mpsc::Sender<IndexEvent>) {
     let mut old = load_cache(cache);
-    let mut new = HashMap::with_capacity(sessions.len());
-    let mut changed = old.len() != sessions.len();
+    let mut new = HashMap::with_capacity(old.len().max(sessions.len()));
+    let mut changed = false;
     for (index, s) in sessions.iter().enumerate() {
         let key = s.path.to_string_lossy().to_string();
         let mtime = mtime_secs(s.modified);
@@ -520,15 +522,18 @@ fn index_bodies(sessions: &[SessionInfo], cache: &Path, tx: &mpsc::Sender<IndexE
             },
         );
         if tx.send(IndexEvent::Body { index, body }).is_err() {
-            // The UI quit early: keep the still-valid old entries for the
-            // transcripts not reached, then save below.
-            for rest in &sessions[index + 1..] {
-                let key = rest.path.to_string_lossy().to_string();
-                if let Some(c) = old.remove(&key) {
-                    new.insert(key, c);
-                }
-            }
+            // The UI quit early: the entries not reached are kept below.
             break;
+        }
+    }
+    // Keep the entries this run did not index (sessions outside a --repo
+    // filter, or not reached before an early quit) while their transcript
+    // still exists, so the next search starts warm. Drop deleted ones.
+    for (key, c) in old {
+        if Path::new(&key).exists() {
+            new.insert(key, c);
+        } else {
+            changed = true;
         }
     }
     let cache_error = if changed {
@@ -859,6 +864,35 @@ mod tests {
         assert_eq!(saved[&key(&a)].text, "first", "work done is saved");
         assert!(!saved.contains_key(&key(&b)), "unreached and uncached");
         assert_eq!(saved[&key(&c)].text, "third", "unreached cached entry kept");
+    }
+
+    #[test]
+    fn filtered_run_keeps_other_sessions_and_drops_deleted_ones() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("c.json");
+        let line =
+            |t: &str| serde_json::json!({"type":"user","message":{"role":"user","content":t}});
+        let a = write(temp.path(), "a.jsonl", &[line("first")]);
+        let b = write(temp.path(), "b.jsonl", &[line("second")]);
+        let c = write(temp.path(), "c.jsonl", &[line("third")]);
+        let (rx, h) = spawn_indexer(
+            vec![session_at(&a), session_at(&b), session_at(&c)],
+            cache.clone(),
+        );
+        collect(&rx);
+        h.join().unwrap();
+
+        // A --repo search indexes only `a`; `c` was deleted meanwhile.
+        std::fs::remove_file(&c).unwrap();
+        let (rx, h) = spawn_indexer(vec![session_at(&a)], cache.clone());
+        let (bodies, _, err) = collect(&rx);
+        h.join().unwrap();
+        assert_eq!(bodies, vec![(0, "first".to_string())]);
+        assert!(err.is_none());
+        let saved = load_cache(&cache);
+        let key = |p: &Path| p.to_string_lossy().to_string();
+        assert_eq!(saved[&key(&b)].text, "second", "out-of-scope entry kept");
+        assert!(!saved.contains_key(&key(&c)), "deleted transcript dropped");
     }
 
     #[test]
