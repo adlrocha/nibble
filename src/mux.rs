@@ -38,13 +38,14 @@ const POLL_INTERVAL: Duration = Duration::from_secs(3);
 const STARTUP_POLLS: u32 = 20;
 /// Consecutive "session not found" polls before the watcher exits.
 const GONE_POLLS: u32 = 2;
-/// Consecutive failed samples (zellij missing, unparseable output) before
-/// the watcher gives up and releases its lock (~1 min).
+/// Consecutive failed samples (zellij missing or hanging past its timeout,
+/// unparseable output) before the watcher gives up and releases its lock
+/// (~1 min of fast errors; ~3 min when every sample hangs).
 const ERROR_POLLS: u32 = 20;
 /// How long a new watcher waits for the previous one (still sampling a
 /// session that just died) to release the lock. Covers its gone-detection
-/// and its sample-error budget.
-const LOCK_WAIT: Duration = Duration::from_secs(90);
+/// and its sample-error budget, including samples that hang to their timeout.
+const LOCK_WAIT: Duration = Duration::from_secs(180);
 /// The flag a restored pane passes back to nibble; see [`resume_invocation`].
 const RESUME_FLAG: &str = "--resume";
 /// kv_store key prefix for session snapshots.

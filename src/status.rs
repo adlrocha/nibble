@@ -516,16 +516,22 @@ pub(crate) fn cmd_goto(db: &Database, target: &str) -> Result<()> {
 /// pane nobody sees. Renaming to the sidebar name is idempotent for
 /// nibble-managed panes; any other failure is assumed transient.
 fn pane_alive(pane_id: u32) -> bool {
-    let out = std::process::Command::new("zellij")
-        .args([
-            "action",
-            "rename-pane",
-            "--pane-id",
-            &pane_ref(pane_id),
-            SIDEBAR_PANE_NAME,
-        ])
-        .output();
-    match out {
+    pane_alive_via("zellij", pane_id, ZELLIJ_CALL_TIMEOUT)
+}
+
+/// [`pane_alive`] with the zellij binary and time budget passed in, so tests
+/// can stand in a fake that hangs. A probe that times out is "assume alive":
+/// the render loop keeps going and probes again on a later frame.
+fn pane_alive_via(program: &str, pane_id: u32, timeout: std::time::Duration) -> bool {
+    let mut cmd = std::process::Command::new(program);
+    cmd.args([
+        "action",
+        "rename-pane",
+        "--pane-id",
+        &pane_ref(pane_id),
+        SIDEBAR_PANE_NAME,
+    ]);
+    match output_within(&mut cmd, timeout) {
         Ok(o) => {
             let text = format!(
                 "{}{}",
@@ -957,6 +963,101 @@ pub(crate) fn cmd_sidebar(install: bool, uninstall: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An executable `zellij` stand-in running `body` under `sh`.
+    fn fake_zellij(dir: &tempfile::TempDir, body: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.path().join("zellij");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    /// Budget for fakes that hang: short, so the tests stay fast.
+    const SHORT: std::time::Duration = std::time::Duration::from_millis(300);
+    /// Budget for fakes that answer: generous, so a loaded CI box never
+    /// mistakes a slow `sh` start-up for a hang.
+    const AMPLE: std::time::Duration = std::time::Duration::from_secs(10);
+
+    #[test]
+    fn output_within_returns_output_of_a_child_that_finishes() {
+        let out = output_within(
+            std::process::Command::new("sh").args(["-c", "echo out; echo err >&2; exit 3"]),
+            AMPLE,
+        )
+        .unwrap();
+        assert_eq!(out.stdout, b"out\n");
+        assert_eq!(out.stderr, b"err\n");
+        assert_eq!(out.status.code(), Some(3));
+    }
+
+    #[test]
+    fn output_within_kills_a_child_that_hangs() {
+        let started = std::time::Instant::now();
+        let err = output_within(
+            std::process::Command::new("sh").args(["-c", "exec sleep 30"]),
+            SHORT,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn output_within_reports_a_missing_program() {
+        let err = output_within(
+            &mut std::process::Command::new("/nonexistent/zellij"),
+            AMPLE,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn hung_list_panes_is_a_failed_sample_not_a_wedged_watcher() {
+        let dir = tempfile::tempdir().unwrap();
+        let zellij = fake_zellij(&dir, "exec sleep 30");
+        let started = std::time::Instant::now();
+        let err = list_zellij_panes_via(&zellij, Some("main"), SHORT).unwrap_err();
+        assert!(
+            matches!(&err, PaneListError::Failed(d) if d.contains("hung")),
+            "{err:?}"
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn list_panes_via_parses_and_classifies_answers() {
+        let dir = tempfile::tempdir().unwrap();
+        let ok = fake_zellij(&dir, "echo '[]'");
+        assert!(list_zellij_panes_via(&ok, None, AMPLE).is_ok_and(|p| p.is_empty()));
+
+        let dir = tempfile::tempdir().unwrap();
+        let gone = fake_zellij(&dir, "echo 'Session main not found' >&2; exit 1");
+        assert!(matches!(
+            list_zellij_panes_via(&gone, Some("main"), AMPLE),
+            Err(PaneListError::Gone(_))
+        ));
+
+        let missing = list_zellij_panes_via("/nonexistent/zellij", None, AMPLE).unwrap_err();
+        assert!(
+            matches!(&missing, PaneListError::Failed(d) if d.contains("not available")),
+            "{missing:?}"
+        );
+    }
+
+    #[test]
+    fn hung_pane_probe_assumes_alive_and_returns() {
+        let dir = tempfile::tempdir().unwrap();
+        let zellij = fake_zellij(&dir, "exec sleep 30");
+        let started = std::time::Instant::now();
+        assert!(pane_alive_via(&zellij, 7, SHORT));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+
+        let dir = tempfile::tempdir().unwrap();
+        let gone = fake_zellij(&dir, "echo 'Pane not found' >&2; exit 1");
+        assert!(!pane_alive_via(&gone, 7, AMPLE));
+    }
 
     #[test]
     fn zellij_config_dir_follows_zellij_lookup_order() {
@@ -1618,14 +1719,91 @@ pub(crate) enum PaneListError {
 pub(crate) fn list_zellij_panes(
     session: Option<&str>,
 ) -> std::result::Result<Vec<ZellijPane>, PaneListError> {
-    let mut cmd = std::process::Command::new("zellij");
+    list_zellij_panes_via("zellij", session, ZELLIJ_CALL_TIMEOUT)
+}
+
+/// How long one zellij query may run before we give up on it. A healthy
+/// `list-panes` or `rename-pane` answers in milliseconds; zellij has been
+/// seen to hang on one forever at 100% CPU (sampled as a session was being
+/// created), which wedged the mux watcher — and its session lock — for days.
+const ZELLIJ_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Run `cmd` to completion like [`std::process::Command::output`], but kill
+/// it and return an [`std::io::ErrorKind::TimedOut`] error if it is still
+/// running after `timeout`. stdin is closed.
+fn output_within(
+    cmd: &mut std::process::Command,
+    timeout: std::time::Duration,
+) -> std::io::Result<std::process::Output> {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    // Drain both pipes concurrently so a chatty child never blocks on a
+    // full pipe while we wait for it to exit.
+    fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut p) = pipe {
+                let _ = p.read_to_end(&mut buf);
+            }
+            buf
+        })
+    }
+    let out = drain(child.stdout.take());
+    let err = drain(child.stderr.take());
+
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e);
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait(); // reap; the drain threads end on pipe EOF
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("no answer after {}s, killed it", timeout.as_secs_f32()),
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: out.join().unwrap_or_default(),
+        stderr: err.join().unwrap_or_default(),
+    })
+}
+
+/// [`list_zellij_panes`] with the zellij binary and time budget passed in,
+/// so tests can stand in a fake that hangs.
+fn list_zellij_panes_via(
+    program: &str,
+    session: Option<&str>,
+    timeout: std::time::Duration,
+) -> std::result::Result<Vec<ZellijPane>, PaneListError> {
+    let mut cmd = std::process::Command::new(program);
     if let Some(name) = session {
         cmd.args(["--session", name]);
     }
-    let output = cmd
-        .args(["action", "list-panes", "--all", "--json"])
-        .output()
-        .map_err(|e| PaneListError::Failed(format!("zellij not available ({e})")))?;
+    cmd.args(["action", "list-panes", "--all", "--json"]);
+    let output = output_within(&mut cmd, timeout).map_err(|e| {
+        PaneListError::Failed(if e.kind() == std::io::ErrorKind::TimedOut {
+            format!("zellij list-panes hung ({e})")
+        } else {
+            format!("zellij not available ({e})")
+        })
+    })?;
     if !output.status.success() {
         let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(
