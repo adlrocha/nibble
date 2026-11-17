@@ -1004,6 +1004,18 @@ mod tests {
     }
 
     #[test]
+    fn output_within_is_bounded_when_a_descendant_holds_the_pipe() {
+        let started = std::time::Instant::now();
+        let err = output_within(
+            std::process::Command::new("sh").args(["-c", "sleep 30 & echo '[]'"]),
+            SHORT,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
     fn output_within_reports_a_missing_program() {
         let err = output_within(
             &mut std::process::Command::new("/nonexistent/zellij"),
@@ -1726,26 +1738,26 @@ pub(crate) fn list_zellij_panes(
 /// `list-panes` or `rename-pane` answers in milliseconds; zellij has been
 /// seen to hang on one forever at 100% CPU (sampled as a session was being
 /// created), which wedged the mux watcher — and its session lock — for days.
-const ZELLIJ_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+pub(crate) const ZELLIJ_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Run `cmd` to completion like [`std::process::Command::output`], but kill
-/// it and return an [`std::io::ErrorKind::TimedOut`] error if it is still
-/// running after `timeout`. stdin is closed.
+/// Run `cmd` to completion like [`std::process::Command::output`], but give
+/// up with an [`std::io::ErrorKind::TimedOut`] error if it has not exited
+/// and closed its output within `timeout`. stdin is closed. The child runs in
+/// its own process group, so on timeout the whole group is killed: a
+/// descendant still holding stdout/stderr dies with it, and the pipe-drain
+/// threads end instead of leaking.
 fn output_within(
     cmd: &mut std::process::Command,
     timeout: std::time::Duration,
 ) -> std::io::Result<std::process::Output> {
     use std::io::Read;
+    use std::os::unix::process::CommandExt;
     use std::process::Stdio;
+    use std::thread::JoinHandle;
 
-    let mut child = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
     // Drain both pipes concurrently so a chatty child never blocks on a
     // full pipe while we wait for it to exit.
-    fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> std::thread::JoinHandle<Vec<u8>> {
+    fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> JoinHandle<Vec<u8>> {
         std::thread::spawn(move || {
             let mut buf = Vec::new();
             if let Some(mut p) = pipe {
@@ -1754,35 +1766,54 @@ fn output_within(
             buf
         })
     }
+
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()?;
+    let pgid = child.id() as libc::pid_t;
     let out = drain(child.stdout.take());
     let err = drain(child.stderr.take());
 
     let deadline = std::time::Instant::now() + timeout;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {}
-            Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(e);
+    let mut status = None;
+    // Done once the child has exited *and* both pipes hit EOF; a descendant
+    // that inherited a pipe keeps it open past the child's exit.
+    let outcome = loop {
+        if status.is_none() {
+            match child.try_wait() {
+                Ok(s) => status = s,
+                Err(e) => break Err(e),
             }
         }
+        if let Some(s) = status.filter(|_| out.is_finished() && err.is_finished()) {
+            break Ok(s);
+        }
         if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait(); // reap; the drain threads end on pipe EOF
-            return Err(std::io::Error::new(
+            break Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 format!("no answer after {}s, killed it", timeout.as_secs_f32()),
             ));
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     };
-    Ok(std::process::Output {
-        status,
-        stdout: out.join().unwrap_or_default(),
-        stderr: err.join().unwrap_or_default(),
-    })
+    match outcome {
+        Ok(status) => Ok(std::process::Output {
+            status,
+            stdout: out.join().unwrap_or_default(),
+            stderr: err.join().unwrap_or_default(),
+        }),
+        Err(e) => {
+            // SAFETY: plain kill(2) on the group we created; the group id
+            // cannot be reused while any member (the unreaped child or a
+            // descendant) is alive, and ESRCH when none is left is harmless.
+            unsafe { libc::kill(-pgid, libc::SIGKILL) };
+            let _ = child.wait(); // reap it if it was still running
+            Err(e)
+        }
+    }
 }
 
 /// [`list_zellij_panes`] with the zellij binary and time budget passed in,

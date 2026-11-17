@@ -46,6 +46,13 @@ const ERROR_POLLS: u32 = 20;
 /// session that just died) to release the lock. Covers its gone-detection
 /// and its sample-error budget, including samples that hang to their timeout.
 const LOCK_WAIT: Duration = Duration::from_secs(180);
+// LOCK_WAIT must outlast the previous watcher's error budget when every
+// sample hangs to its timeout.
+const _: () = assert!(
+    LOCK_WAIT.as_secs()
+        >= ERROR_POLLS as u64
+            * (POLL_INTERVAL.as_secs() + crate::status::ZELLIJ_CALL_TIMEOUT.as_secs())
+);
 /// The flag a restored pane passes back to nibble; see [`resume_invocation`].
 const RESUME_FLAG: &str = "--resume";
 /// kv_store key prefix for session snapshots.
