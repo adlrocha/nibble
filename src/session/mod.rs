@@ -6,6 +6,8 @@
 pub(crate) mod cli;
 pub(crate) mod files;
 pub(crate) mod pi;
+pub(crate) mod search;
+pub(crate) mod search_tui;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -121,30 +123,42 @@ fn save_title_cache(cache: &HashMap<String, SessionTitleCache>) -> Result<()> {
 
 /// Get or generate a title for a session.
 pub fn get_session_title(session: &SessionInfo) -> String {
+    get_session_titles(std::slice::from_ref(session))
+        .pop()
+        .unwrap_or_default()
+}
+
+/// Titles for many sessions, in order, reading and writing the title cache
+/// once instead of once per session.
+pub fn get_session_titles(sessions: &[SessionInfo]) -> Vec<String> {
     let mut cache = load_title_cache();
-
-    // Return cached title if available and recent (< 30 days old)
-    if let Some(entry) = cache.get(&session.session_id) {
-        let age = chrono::Utc::now() - entry.generated_at;
-        if age.num_days() < 30 {
-            return entry.title.clone();
-        }
+    let mut changed = false;
+    let titles = sessions
+        .iter()
+        .map(|session| {
+            // Return cached title if available and recent (< 30 days old)
+            if let Some(entry) = cache.get(&session.session_id) {
+                let age = chrono::Utc::now() - entry.generated_at;
+                if age.num_days() < 30 {
+                    return entry.title.clone();
+                }
+            }
+            let title = generate_title(session);
+            cache.insert(
+                session.session_id.clone(),
+                SessionTitleCache {
+                    title: title.clone(),
+                    generated_at: chrono::Utc::now(),
+                },
+            );
+            changed = true;
+            title
+        })
+        .collect();
+    if changed {
+        let _ = save_title_cache(&cache);
     }
-
-    // Generate title from session content
-    let title = generate_title(session);
-
-    // Cache it
-    cache.insert(
-        session.session_id.clone(),
-        SessionTitleCache {
-            title: title.clone(),
-            generated_at: chrono::Utc::now(),
-        },
-    );
-    let _ = save_title_cache(&cache);
-
-    title
+    titles
 }
 
 fn generate_title(session: &SessionInfo) -> String {
@@ -232,12 +246,7 @@ fn extract_claude_title(lines: &[&str]) -> String {
 }
 
 fn truncate_title(text: &str) -> String {
-    let cleaned = text.lines().next().unwrap_or(text).trim();
-    if cleaned.len() <= 60 {
-        cleaned.to_string()
-    } else {
-        format!("{}…", &cleaned[..57])
-    }
+    crate::memory::format::truncate_title(text, 60)
 }
 
 // ── Listing with browser-history UX ──────────────────────────────────────────
@@ -538,7 +547,11 @@ pub fn read_session(id: &str) -> Result<String> {
 fn read_session_with_home(id: &str, home: &std::path::Path) -> Result<String> {
     let session = find_session_by_id_with_home(id, home)
         .ok_or_else(|| anyhow::anyhow!("Session not found: {}", id))?;
+    format_session(&session)
+}
 
+/// Read and pretty-print an already discovered session.
+pub fn format_session(session: &SessionInfo) -> Result<String> {
     let content = read_session_text(&session.path)
         .with_context(|| format!("Failed to read session file: {}", session.path.display()))?;
 
@@ -1029,6 +1042,22 @@ mod tests {
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(content.as_bytes()).unwrap();
         path
+    }
+
+    // ── Title truncation ──────────────────────────────────────────────────────
+
+    #[test]
+    fn truncate_title_respects_char_boundaries() {
+        // A multi-byte char straddling byte 57 used to panic `session list`.
+        let text = format!(
+            "{}“quoted” and more text to go past the limit",
+            "a".repeat(55)
+        );
+        let title = truncate_title(&text);
+        assert!(title.ends_with('…'));
+        assert_eq!(title.chars().count(), 60);
+        assert_eq!(truncate_title("short"), "short");
+        assert_eq!(truncate_title("first line\nsecond"), "first line");
     }
 
     // ── Pi header extraction ───────────────────────────────────────────────────

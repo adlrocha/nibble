@@ -71,9 +71,25 @@ pub fn compute_max_title_width(titles: &[String], min: usize, max: usize) -> usi
 /// Truncate and clean a title for single-line display.
 pub fn truncate_title(text: &str, max_len: usize) -> String {
     let cleaned = text.lines().next().unwrap_or(text).trim();
-    if cleaned.len() <= max_len {
+    if cleaned.chars().count() <= max_len {
         cleaned.to_string()
     } else {
-        format!("{}…", &cleaned[..max_len.saturating_sub(1)])
+        let kept: String = cleaned.chars().take(max_len.saturating_sub(1)).collect();
+        format!("{kept}…")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_title_counts_chars_not_bytes() {
+        // `nibble memory list` used to panic when a multi-byte char sat at
+        // the cut.
+        let text = format!("{}“quoted” tail", "a".repeat(8));
+        assert_eq!(truncate_title(&text, 10), "aaaaaaaa“…");
+        assert_eq!(truncate_title("ünïcödé", 7), "ünïcödé");
+        assert_eq!(truncate_title("one\ntwo", 10), "one");
     }
 }

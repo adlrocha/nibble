@@ -554,6 +554,26 @@ fn heuristic_extraction(events: &[CaptureEvent]) -> ExtractionResult {
     ExtractionResult { memories, lessons }
 }
 
+/// Prefix of the turn-count line in generated session summaries.
+pub const TURNS_PREFIX: &str = "**Turns**";
+/// Prefix of the tool-list line in generated session summaries.
+pub const TOOLS_PREFIX: &str = "**Tools used**";
+
+/// A session summary without its generated bookkeeping lines (turn counts,
+/// tool names), leaving the text that describes the session.
+pub fn summary_body(content: &str) -> String {
+    content
+        .lines()
+        .filter(|l| {
+            let l = l.trim_start();
+            !l.starts_with(TURNS_PREFIX) && !l.starts_with(TOOLS_PREFIX)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
 /// Build a session summary with a human-readable title.
 /// Returns (title, full_summary_text).
 fn build_session_summary(events: &[CaptureEvent]) -> (String, String) {
@@ -573,7 +593,7 @@ fn build_session_summary(events: &[CaptureEvent]) -> (String, String) {
 
     let mut summary = String::new();
     summary.push_str(&format!(
-        "**Turns**: {} user, {} assistant, {} tool calls\n\n",
+        "{TURNS_PREFIX}: {} user, {} assistant, {} tool calls\n\n",
         user_msgs.len(),
         assistant_msgs.len(),
         tool_events.len()
@@ -589,7 +609,7 @@ fn build_session_summary(events: &[CaptureEvent]) -> (String, String) {
         tool_names.sort_unstable();
         tool_names.dedup();
         if !tool_names.is_empty() {
-            summary.push_str(&format!("**Tools used**: {}\n\n", tool_names.join(", ")));
+            summary.push_str(&format!("{TOOLS_PREFIX}: {}\n\n", tool_names.join(", ")));
         }
     }
 

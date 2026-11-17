@@ -41,6 +41,9 @@ flate2 = "1.1.10"
 tungstenite = { version = "0.27", default-features = false, features = ["handshake"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
 rustls-native-certs = "0.7"
+ratatui = "0.30"
+crossterm = "0.29"
+nucleo-matcher = "0.3"
 
 [dev-dependencies]
 filetime = "0.2.29"
