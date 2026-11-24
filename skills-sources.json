@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "skills": {
+    "git-commit-pr": {
+      "repository": "https://github.com/we-are-singular/skills.git",
+      "branch": "main",
+      "path": "skills/git-commit-pr",
+      "revision": "d397f7cc0c91b95117baf3d677ff31d2647be506",
+      "license": "MIT",
+      "license_file": "LICENSE"
+    },
+    "inference-optimisation": {
+      "repository": "https://github.com/adlrocha/inference-optimisation-skill.git",
+      "branch": "main",
+      "path": "skills/inference-optimisation",
+      "revision": "e8e2232dfe349a0c7de46b4c0ea20603ea5bc030",
+      "license": "MIT",
+      "license_file": "LICENSE"
+    },
+    "skill-distill": {
+      "repository": "https://github.com/adlrocha/skill-distill.git",
+      "branch": "main",
+      "path": "skills/skill-distill",
+      "revision": "014a0aea7493cd1b199aa91f2068c3c9d2b042b8",
+      "license": "MIT",
+      "license_file": "LICENSE"
+    }
+  }
+}

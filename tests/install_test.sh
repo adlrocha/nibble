@@ -216,6 +216,28 @@ rm -f "$RECORD"
 [ "$(field rebuild)" = "./install.sh --rebuild" ] || fail "clone hint from inside: $(field rebuild)"
 pass "a clone's hints name its own install.sh"
 
+# Exercise the installer's real skill-copy function in an isolated HOME.
+awk '/^install_skill\(\) \{/ { copying=1 } copying { print } copying && /^}/ { exit }' "$INSTALLER" >"$WORK/install-skill.sh"
+mkdir -p "$WORK/skill-source/example/references" "$WORK/skill-dest"
+printf 'version 1\n' >"$WORK/skill-source/example/SKILL.md"
+printf 'reference\n' >"$WORK/skill-source/example/references/guide.md"
+(
+    # Used indirectly by the extracted installer function.
+    # shellcheck disable=SC2329
+    ok() { :; }
+    # This file is generated from install.sh above.
+    # shellcheck disable=SC1091
+    source "$WORK/install-skill.sh"
+    install_skill "$WORK/skill-source/example/" "$WORK/skill-dest"
+    [ -f "$WORK/skill-dest/example/references/guide.md" ] || fail "install omitted a reference"
+    printf 'version 2\n' >"$WORK/skill-source/example/SKILL.md"
+    rm "$WORK/skill-source/example/references/guide.md"
+    install_skill "$WORK/skill-source/example/" "$WORK/skill-dest"
+    grep -q 'version 2' "$WORK/skill-dest/example/SKILL.md" || fail "install did not upgrade skill"
+    [ ! -e "$WORK/skill-dest/example/references/guide.md" ] || fail "install left an old reference"
+)
+pass "install refreshes complete skill directories"
+
 # uninstall.sh deletes the managed checkout and nothing else. It runs with a
 # throwaway HOME and stubs for the commands that reach system state.
 STUBS="$WORK/stubs"
@@ -234,7 +256,18 @@ touch "$WORK/home/.config/nibble/cron-secrets.toml" "$WORK/home/.config/nibble/c
 # So does `nibble session search`'s transcript cache.
 mkdir -p "$WORK/home/.cache/nibble"
 touch "$WORK/home/.cache/nibble/session-search.json"
+# Bundled skills are removed, while unrelated third-party skills remain.
+for dir in "$WORK/home/.claude/skills" "$WORK/home/.nibble/skills" "$WORK/home/.pi/agent/skills"; do
+    mkdir -p "$dir/inference-optimisation" "$dir/skill-distill" "$dir/third-party"
+done
 uninstall || fail "uninstall: $(cat "$WORK/out")"
+for dir in "$WORK/home/.claude/skills" "$WORK/home/.nibble/skills" "$WORK/home/.pi/agent/skills"; do
+    [ ! -e "$dir/inference-optimisation" ] || fail "uninstall left inference-optimisation in $dir"
+    [ ! -e "$dir/skill-distill" ] || fail "uninstall left skill-distill in $dir"
+    if [ "$dir" != "$WORK/home/.nibble/skills" ]; then
+        [ -d "$dir/third-party" ] || fail "uninstall removed an unrelated skill from $dir"
+    fi
+done
 [ ! -e "$WORK/home/.cache/nibble/session-search.json" ] || fail "uninstall left the session search cache"
 [ ! -e "$WORK/home/.config/nibble" ] || fail "uninstall left cron's secrets: $(ls -A "$WORK/home/.config/nibble")"
 [ ! -e "$WORK/home/.local/state/nibble" ] || fail "uninstall left cron's state"
@@ -248,6 +281,15 @@ uninstall || fail "uninstall with a clone: $(cat "$WORK/out")"
 [ -f "$NIBBLE_SRC_DIR/Cargo.toml" ] || fail "uninstall deleted a clone it didn't create"
 grep -q "not created by install.sh" "$WORK/out" || fail "keep message: $(cat "$WORK/out")"
 pass "uninstall.sh removes the managed checkout and keeps any other"
+
+# New bundled skill names are discovered even when uninstall is symlinked.
+mkdir -p "$WORK/skill-checkout/skills/future-skill" "$WORK/home/.claude/skills/future-skill"
+printf '%s\n' '---' >"$WORK/skill-checkout/skills/future-skill/SKILL.md"
+cp "$ROOT/uninstall.sh" "$WORK/skill-checkout/uninstall.sh"
+ln -s "$WORK/skill-checkout/uninstall.sh" "$WORK/bin/uninstall.sh"
+uninstall "$WORK/bin/uninstall.sh" || fail "symlinked uninstall: $(cat "$WORK/out")"
+[ ! -e "$WORK/home/.claude/skills/future-skill" ] || fail "symlinked uninstall left a discovered skill"
+pass "uninstall discovers bundled skills through a symlink"
 
 # A checkout installed to a custom NIBBLE_SRC_DIR is removed by its own
 # uninstall.sh without setting the variable again.

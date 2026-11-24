@@ -147,9 +147,23 @@ fi
 # ── 7. Remove nibble-installed skills ─────────────────────────────────────────
 step "Removing nibble-installed skills"
 
-# Everything install.sh ships in skills/, plus legacy factory/fable5 installs.
-NIBBLE_SKILLS="engineering git-commit-pr nibble-memory nibble-pr-review \
-nibble-no-ai-slop nibble-sdlc omarchy-migration"
+# Retain known names as a fallback if the source tree is unavailable, and
+# discover additional bundled skills from the checkout next to this script.
+NIBBLE_SKILLS="engineering git-commit-pr inference-optimisation nibble-memory nibble-pr-review \
+nibble-no-ai-slop nibble-sdlc omarchy-migration skill-distill"
+SELF="${BASH_SOURCE[0]}"
+while [ -L "$SELF" ]; do
+    LINK="$(readlink "$SELF")"
+    case "$LINK" in
+        /*) SELF="$LINK" ;;
+        *) SELF="$(dirname "$SELF")/$LINK" ;;
+    esac
+done
+SELF_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+for skill_dir in "$SELF_DIR"/skills/*/; do
+    [ -f "$skill_dir/SKILL.md" ] || continue
+    NIBBLE_SKILLS="$NIBBLE_SKILLS $(basename "$skill_dir")"
+done
 STALE_SKILLS="factory-pipeline factory-spec factory-verify factory-qa-gate \
 factory-lessons fable5-emulation"
 
@@ -263,15 +277,7 @@ fi
 # The checkout to remove: the one this script is in when install.sh created
 # it (so a custom NIBBLE_SRC_DIR is found without setting it again), else
 # NIBBLE_SRC_DIR or its default.
-SELF="${BASH_SOURCE[0]}"
-while [ -L "$SELF" ]; do
-    LINK="$(readlink "$SELF")"
-    case "$LINK" in
-        /*) SELF="$LINK" ;;
-        *) SELF="$(dirname "$SELF")/$LINK" ;;
-    esac
-done
-SELF_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+# SELF_DIR was resolved before removing skills above.
 # Whether this nibble came from the one-command install, for the reinstall
 # hint at the end; a clone's own install.sh otherwise.
 INSTALLED_BY_PIPE=false

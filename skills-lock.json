@@ -10,12 +10,20 @@
       "computedHash": "1e6fcaec01028e5b0cb720bd444fa20b200a1136bf1b45995792f71500043795"
     },
     "git-commit-pr": {
-      "source": "we-are-singular/skills",
-      "sourceType": "github",
+      "source": "https://github.com/we-are-singular/skills.git",
+      "sourceType": "git",
       "skillPath": "skills/git-commit-pr/SKILL.md",
-      "version": "vendored-2026-07",
+      "version": "d397f7cc0c91b95117baf3d677ff31d2647be506",
       "license": "MIT",
       "computedHash": "0346a8ca919a00d94646fe611480ea72c567a5a7c8cc079b17b269e52223e437"
+    },
+    "inference-optimisation": {
+      "source": "https://github.com/adlrocha/inference-optimisation-skill.git",
+      "sourceType": "git",
+      "skillPath": "skills/inference-optimisation/SKILL.md",
+      "version": "e8e2232dfe349a0c7de46b4c0ea20603ea5bc030",
+      "license": "MIT",
+      "computedHash": "6932c1dc8b2c588f0303333b0772d5d0c062d86180a46e26a040eb0899cb548c"
     },
     "nibble-memory": {
       "source": "vendored:local",
@@ -56,6 +64,14 @@
       "version": "unpinned",
       "license": "proprietary",
       "computedHash": "420352f62efeaafed2185089f824a82e761cc58fd606e37d2420ef7238e8b9c8"
+    },
+    "skill-distill": {
+      "source": "https://github.com/adlrocha/skill-distill.git",
+      "sourceType": "git",
+      "skillPath": "skills/skill-distill/SKILL.md",
+      "version": "014a0aea7493cd1b199aa91f2068c3c9d2b042b8",
+      "license": "MIT",
+      "computedHash": "c143b5dabcf9afea6d4e47bd099eb42b31ca17f2c63fd9fc4913cb1566c96d10"
     }
   }
 }

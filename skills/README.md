@@ -2,8 +2,9 @@
 
 Skills shipped to every nibble sandbox (copied by `install.sh` to
 `~/.claude/skills/`, `~/.nibble/skills/`, and `~/.pi/agent/skills/`). Provenance
-and integrity are tracked in [`../skills-lock.json`](../skills-lock.json); run
-`scripts/skills-lock.sh` to regenerate and `--check` to detect drift.
+and each `SKILL.md` hash are tracked in [`../skills-lock.json`](../skills-lock.json);
+run `scripts/skills-lock.sh` to regenerate and `--check` to detect drift in those
+files or their metadata.
 
 Only each skill's name + description are in the agent's system prompt
 (progressive disclosure). Full content loads on demand — so prefer few,
@@ -31,6 +32,8 @@ skill for the commit/PR workflow.
 
 | Skill | Purpose |
 |-------|---------|
+| `inference-optimisation` | Measure and improve local LLM serving performance. |
+| `skill-distill` | Turn a successful agent session into a reusable skill for another model. |
 | `nibble-memory` | Cross-session memory capture/search (pairs with the nibble-memory extension). |
 | `nibble-pr-review` | Track and review GitHub PRs where you're a reviewer. |
 | `nibble-sdlc` | Take a spec to a reviewed PR with nibble-review. |
@@ -38,13 +41,44 @@ skill for the commit/PR workflow.
 
 ## Installation
 
-`install.sh` copies each `skills/*/` directory (including its `references/`) to
-the host skill dirs above, which Claude Code and Pi scan automatically.
+`install.sh` replaces each installed `skills/*/` directory with the complete
+copy from its checkout, including scripts, references and licenses. It does not
+fetch upstream skills. From a development clone, update the clone first; the
+one-command installer fetches nibble before installing it.
+
+## Updating external skills
+
+`skills-sources.json` records each external repository, branch, skill path,
+license path and last imported commit. Nibble-owned skills have no external
+source and stay in this checkout. To check upstreams and open an update PR:
+
+```bash
+./scripts/skills-update-pr.sh
+```
+
+This needs git, gh (authenticated with push and PR access), Python 3.10+, pytest,
+jq and the Rust toolchain. It fetches `origin/main`, checks upstreams in a
+temporary worktree, runs the checks and opens a PR only when content changed.
+It does not touch the calling worktree or merge the PR. An existing branch for
+the same update must be resolved or removed before trying again.
+
+Local edits to a vendored skill are merged against its pinned upstream base;
+conflicts stop the update without changing the calling worktree. If an upstream
+is unavailable, the bundled copy remains usable. After the PR is reviewed and
+merged, update the nibble checkout and run its installer to apply the copies.
 
 ## Adding a skill
 
-1. Create `skills/<name>/SKILL.md` (frontmatter: `name`, `description`).
-2. Add on-demand depth under `references/` if needed.
-3. Add a provenance entry to `PROVENANCE` in `scripts/skills-lock.sh`.
-4. Run `scripts/skills-lock.sh` to update `skills-lock.json`.
-5. Add it to `NIBBLE_SKILLS` in `uninstall.sh` so uninstalling removes it.
+For a nibble-owned skill, create `skills/<name>/SKILL.md` (frontmatter: `name`,
+`description`), add any references or scripts inside the directory, then run
+`scripts/skills-lock.sh`.
+
+For an external skill, add an entry to `skills-sources.json` with `repository`,
+`branch`, the repository-relative `path` to the skill directory, an empty
+`revision`, and the `license` identifier. Set `license_file` to a
+repository-relative license file when needed. Run `python3 scripts/skills-sync.py`
+to import the complete directory and pin its commit, then review and submit
+those changes through a PR. The local sync command writes to the current
+checkout; it refuses to import over an existing directory without a base.
+Once merged, the PR command above checks it alongside the other sources.
+Uninstall discovers bundled skills from the checkout automatically.
