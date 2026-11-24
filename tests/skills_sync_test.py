@@ -1,5 +1,7 @@
 """Integration tests for syncing vendored skills from git repositories."""
 
+from __future__ import annotations
+
 import json
 import os
 import runpy
@@ -188,6 +190,41 @@ def test_lock_rejects_bad_registry_without_modifying_lock(
         result = run("bash", "scripts/skills-lock.sh", *args, cwd=checkout, check=False)
         assert result.returncode != 0
         assert lock.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("name", "../escape"),
+        ("name", "valid\n"),
+        ("revision", "d397f7c"),
+        ("revision", "A" * 40),
+        ("revision", "f" * 39 + "\n"),
+        ("path", "../escape"),
+        ("path", "foo/../escape"),
+        ("path", "/absolute"),
+        ("license_file", "../license"),
+    ],
+)
+def test_lock_rejects_registry_values_the_sync_rejects(
+    repos: tuple[Path, Path, str], field: str, value: str
+) -> None:
+    _, checkout, _ = repos
+    run("bash", "scripts/skills-lock.sh", cwd=checkout)
+    lock_path = checkout / "skills-lock.json"
+    before = lock_path.read_bytes()
+    path = checkout / "skills-sources.json"
+    registry = json.loads(path.read_text())
+    if field == "name":
+        registry["skills"][value] = registry["skills"].pop("example")
+    else:
+        registry["skills"]["example"][field] = value
+    path.write_text(json.dumps(registry))
+    for args in ((), ("--check",)):
+        result = run("bash", "scripts/skills-lock.sh", *args, cwd=checkout, check=False)
+        assert result.returncode != 0
+        assert lock_path.read_bytes() == before
+    assert sync(checkout).returncode != 0
 
 
 def test_ignores_unrelated_upstream_commit(repos: tuple[Path, Path, str]) -> None:

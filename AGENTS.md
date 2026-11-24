@@ -76,7 +76,7 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 Every change lands through a pull request that iterates with the nibble-review reviewer until it approves, agent-authored changes included:
 
-1. One branch per change. Implement with tests; run `cargo test`, `cargo clippy --all-targets -- -D warnings`, and `cargo fmt` before pushing (plus `tests/install_test.sh` when `install.sh` or `uninstall.sh` changed). Also run `pytest -q tests/skills_sync_test.py` and `scripts/skills-lock.sh --check`.
+1. One branch per change. Implement with tests; run `cargo test`, `cargo clippy --all-targets -- -D warnings`, and `cargo fmt` before pushing (plus `tests/install_test.sh` when `install.sh` or `uninstall.sh` changed). Also run `pytest -q tests/skills_sync_test.py` and `scripts/skills-lock.sh --check` (Python 3.10+ and pytest; see Development in README.md).
 2. Open the PR ready for review — drafts skip the review entirely.
 3. Iterate with the nibble-review action until it LGTMs the **current head** and the `review` check is green. On a ⚠️ or ⛔ verdict, read every finding and resolve each one by fixing it or replying with evidence why it does not apply; never silently ignore one. Re-reviews trigger only on a push or an explicit `@nibble-review` comment — a reply alone never re-runs the reviewer. After a reply-only resolution, post `@nibble-review` to request the re-review, and wait for it before concluding.
 4. Stop and hand off for merge. Report the verdict, CI state, and anything the user must decide. Do not merge, enable auto-merge, or push to `main`; merging is a human decision.

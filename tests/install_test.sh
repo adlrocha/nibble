@@ -291,6 +291,18 @@ uninstall "$WORK/bin/uninstall.sh" || fail "symlinked uninstall: $(cat "$WORK/ou
 [ ! -e "$WORK/home/.claude/skills/future-skill" ] || fail "symlinked uninstall left a discovered skill"
 pass "uninstall discovers bundled skills through a symlink"
 
+# Discovered names are literal, even if they contain whitespace or glob characters.
+mkdir -p "$WORK/names-cwd/globZskill" "$WORK/home/.claude/skills/globZskill"
+for name in 'odd skill' 'glob*skill'; do
+    mkdir -p "$WORK/skill-checkout/skills/$name" "$WORK/home/.claude/skills/$name"
+    printf '%s\n' '---' >"$WORK/skill-checkout/skills/$name/SKILL.md"
+done
+(cd "$WORK/names-cwd" && uninstall "$WORK/bin/uninstall.sh") || fail "uninstall with unusual skill names: $(cat "$WORK/out")"
+[ ! -e "$WORK/home/.claude/skills/odd skill" ] || fail "uninstall left a space-containing bundled skill"
+[ ! -e "$WORK/home/.claude/skills/glob*skill" ] || fail "uninstall left a glob-containing bundled skill"
+[ -d "$WORK/home/.claude/skills/globZskill" ] || fail "uninstall expanded a skill name and removed a third-party skill"
+pass "uninstall treats discovered skill names literally"
+
 # A piped uninstaller must not treat the caller's project as its own checkout.
 mkdir -p "$WORK/foreign/skills/third-party" "$WORK/home/.claude/skills/third-party" "$WORK/home/.pi/agent/skills/third-party"
 printf '%s\n' '---' >"$WORK/foreign/skills/third-party/SKILL.md"

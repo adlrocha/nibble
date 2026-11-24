@@ -359,6 +359,9 @@ mod sandbox_prompt_tests {
         let out = build_sandbox_prompt("proj", &[]);
         assert!(out.contains("## Skills"));
         assert!(out.contains("/home/node/.claude/skills/"));
+        assert!(out.contains("overwritten by the next install"));
+        assert!(out.contains("nibble memory lesson-add"));
+        assert!(out.contains("nibble source checkout"));
     }
 
     #[test]

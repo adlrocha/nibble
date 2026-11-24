@@ -24,15 +24,21 @@ SOURCES="$REPO_DIR/skills-sources.json"
 [ -f "$SOURCES" ] || { echo "skills-sources.json is missing" >&2; exit 1; }
 # Parse once and fail before writing anything if provenance is malformed.
 if ! SOURCES_JSON="$(jq -ec '
+  def relative_path:
+    type == "string" and length > 0 and (startswith("/") | not) and
+    (split("/") | all(.[]; . != ".."));
   select(type == "object" and .version == 1 and (.skills | type == "object") and
-    all(.skills[];
-      type == "object" and
-      (.repository | type == "string" and length > 0) and
-      (.branch | type == "string" and length > 0) and
-      (.path | type == "string" and length > 0) and
-      (.revision | type == "string") and
-      (.license | type == "string" and length > 0) and
-      ((has("license_file") | not) or (.license_file | type == "string" and length > 0))
+    all(.skills | to_entries[];
+      (.key | test("\\A[a-z0-9]+(-[a-z0-9]+)*\\z")) and
+      (.value |
+        type == "object" and
+        (.repository | type == "string" and length > 0) and
+        (.branch | type == "string" and length > 0) and
+        (.path | relative_path) and
+        (.revision | type == "string" and test("\\A([0-9a-f]{40})?\\z")) and
+        (.license | type == "string" and length > 0) and
+        ((has("license_file") | not) or (.license_file | relative_path))
+      )
     )) | .skills' "$SOURCES")"; then
   echo "skills-sources.json is invalid" >&2
   exit 1

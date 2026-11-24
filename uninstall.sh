@@ -163,23 +163,28 @@ if [ -n "$SELF" ] && [ -f "$SELF" ]; then
         esac
     done
     SELF_DIR="$(cd "$(dirname "$SELF")" && pwd)"
-    for skill_dir in "$SELF_DIR"/skills/*/; do
-        [ -f "$skill_dir/SKILL.md" ] || continue
-        NIBBLE_SKILLS="$NIBBLE_SKILLS $(basename "$skill_dir")"
-    done
 fi
 STALE_SKILLS="factory-pipeline factory-spec factory-verify factory-qa-gate \
 factory-lessons fable5-emulation"
 
-for skills_dir in "$HOME/.claude/skills" "$HOME/.nibble/skills" "$HOME/.pi/agent/skills"; do
-    [ -d "$skills_dir" ] || continue
-    for skill in $NIBBLE_SKILLS $STALE_SKILLS; do
+remove_skill() {
+    local skill="$1" skills_dir
+    for skills_dir in "$HOME/.claude/skills" "$HOME/.nibble/skills" "$HOME/.pi/agent/skills"; do
         if [ -d "$skills_dir/$skill" ]; then
             rm -rf "${skills_dir:?}/$skill"
             ok "Removed $skills_dir/$skill"
         fi
     done
+}
+for skill in $NIBBLE_SKILLS $STALE_SKILLS; do
+    remove_skill "$skill"
 done
+if [ -n "$SELF_DIR" ]; then
+    for skill_dir in "$SELF_DIR"/skills/*/; do
+        [ -f "$skill_dir/SKILL.md" ] || continue
+        remove_skill "$(basename "$skill_dir")"
+    done
+fi
 
 # ── 7b. Remove nibble-installed pi/omp extensions ─────────────────────────────
 step "Removing nibble pi/omp extensions"
