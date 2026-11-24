@@ -110,6 +110,61 @@ def test_imports_new_skill_and_license(repos: tuple[Path, Path, str]) -> None:
     )
 
 
+@pytest.mark.parametrize("upstream_changed", [False, True])
+def test_restores_missing_pinned_skill(
+    repos: tuple[Path, Path, str], upstream_changed: bool
+) -> None:
+    upstream, checkout, revision = repos
+    run("bash", "scripts/skills-lock.sh", cwd=checkout)
+    lock_path = checkout / "skills-lock.json"
+    previous_lock = lock_path.read_bytes()
+    shutil.rmtree(checkout / "skills/example")
+    for args in ((), ("--check",)):
+        result = run("bash", "scripts/skills-lock.sh", *args, cwd=checkout, check=False)
+        assert result.returncode != 0
+        assert lock_path.read_bytes() == previous_lock
+    if upstream_changed:
+        (upstream / "skills/example/helper.sh").write_text("upstream updated\n")
+        revision = commit(upstream, "update")
+    result = sync(checkout)
+    assert result.returncode == 0, result.stderr
+    assert (checkout / "skills/example/SKILL.md").read_text() == "first\nmiddle\nlast\n"
+    assert (checkout / "skills/example/helper.sh").read_text() == (
+        "upstream updated\n" if upstream_changed else "old helper\n"
+    )
+    assert json.loads(lock_path.read_text())["skills"]["example"]["version"] == revision
+    assert (
+        run("bash", "scripts/skills-lock.sh", "--check", cwd=checkout).returncode == 0
+    )
+
+
+def test_refuses_partial_skill_without_entrypoint(
+    repos: tuple[Path, Path, str],
+) -> None:
+    _, checkout, _ = repos
+    (checkout / "skills/example/SKILL.md").unlink()
+    result = sync(checkout)
+    assert result.returncode != 0
+    assert "SKILL.md" in result.stderr
+    assert (checkout / "skills/example/helper.sh").read_text() == "old helper\n"
+
+
+def test_refuses_symlinked_entrypoint(
+    repos: tuple[Path, Path, str], tmp_path: Path
+) -> None:
+    _, checkout, _ = repos
+    skill_file = checkout / "skills/example/SKILL.md"
+    skill_file.unlink()
+    target = tmp_path / "other-skill.md"
+    target.write_text("protected")
+    skill_file.symlink_to(target)
+    assert sync(checkout).returncode != 0
+    assert (
+        run("bash", "scripts/skills-lock.sh", cwd=checkout, check=False).returncode != 0
+    )
+    assert target.read_text() == "protected"
+
+
 def test_imports_root_skill_without_git_metadata(repos: tuple[Path, Path, str]) -> None:
     upstream, checkout, _ = repos
     (upstream / "SKILL.md").write_text("root skill\n")
@@ -686,12 +741,14 @@ def test_rejects_missing_license(repos: tuple[Path, Path, str]) -> None:
     assert "license file missing" in result.stderr.lower()
 
 
+@pytest.mark.parametrize("upstream_changed", [False, True])
 def test_rejects_local_symlink_without_modifying_target(
-    repos: tuple[Path, Path, str], tmp_path: Path
+    repos: tuple[Path, Path, str], tmp_path: Path, upstream_changed: bool
 ) -> None:
     upstream, checkout, _ = repos
-    (upstream / "skills/example/helper.sh").write_text("upstream update")
-    commit(upstream, "update")
+    if upstream_changed:
+        (upstream / "skills/example/helper.sh").write_text("upstream update")
+        commit(upstream, "update")
     target = tmp_path / "target"
     target.mkdir()
     (target / "SKILL.md").write_text("protected")
@@ -700,6 +757,9 @@ def test_rejects_local_symlink_without_modifying_target(
     result = sync(checkout)
     assert result.returncode != 0
     assert "destination is a symlink" in result.stderr.lower()
+    assert (
+        run("bash", "scripts/skills-lock.sh", cwd=checkout, check=False).returncode != 0
+    )
     assert (target / "SKILL.md").read_text() == "protected"
 
 
@@ -766,7 +826,7 @@ def test_refuses_to_leave_skill_without_entrypoint(
     commit(upstream, "update")
     result = sync(checkout)
     assert result.returncode != 0
-    assert "would remove SKILL.md" in result.stderr
+    assert "SKILL.md" in result.stderr
 
 
 def test_failed_new_import_is_rolled_back(repos: tuple[Path, Path, str]) -> None:

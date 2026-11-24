@@ -85,4 +85,6 @@ to import the complete directory and pin its commit, then review and submit
 those changes through a PR. The local sync command writes to the current
 checkout; it refuses to import over an existing directory without a base.
 Once merged, the PR command above checks it alongside the other sources.
-Uninstall discovers bundled skills from the checkout automatically.
+Uninstall discovers bundled skills from the checkout automatically. Also add
+its name to `NIBBLE_SKILLS` in `uninstall.sh` so a piped uninstall, which has no
+checkout to inspect, can remove it.

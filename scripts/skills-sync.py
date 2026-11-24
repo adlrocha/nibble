@@ -237,12 +237,23 @@ def sync() -> None:
                 else {}
             )
             new = upstream_snapshot(repo, head, skill_path, license_path)
-            if old == new:
-                print(f"{name}: up to date")
-                continue
             dest = ROOT / "skills" / name
             if dest.is_symlink():
                 raise ValueError(f"{name}: destination is a symlink")
+            if dest.exists() and (
+                not dest.is_dir()
+                or (dest / "SKILL.md").is_symlink()
+                or not (dest / "SKILL.md").is_file()
+            ):
+                raise ValueError(f"{name}: destination is missing a regular SKILL.md")
+            if revision and not dest.exists():
+                updates[name] = new
+                source["revision"] = head
+                print(f"{name}: restoring missing skill at {head}")
+                continue
+            if old == new:
+                print(f"{name}: up to date")
+                continue
             if not revision and dest.exists():
                 raise ValueError(
                     f"{name}: cannot import over an existing directory without a pinned base"
@@ -259,8 +270,6 @@ def sync() -> None:
                 )
                 if result is not None:
                     merged[path] = result
-            if "SKILL.md" not in merged:
-                raise ValueError(f"{name}: update would remove SKILL.md")
             updates[name] = merged
             source["revision"] = head
             print(f"{name}: {revision or 'new'} -> {head}")

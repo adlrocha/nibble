@@ -43,6 +43,16 @@ if ! SOURCES_JSON="$(jq -ec '
   echo "skills-sources.json is invalid" >&2
   exit 1
 fi
+# Registered skills must exist; otherwise regenerating would erase their pins.
+source_names="$(jq -r 'keys[]' <<<"$SOURCES_JSON")"
+while IFS= read -r name; do
+  [ -n "$name" ] || continue
+  skill_dir="$SKILLS_DIR/$name"
+  if [ -L "$skill_dir" ] || [ -L "$skill_dir/SKILL.md" ] || [ ! -f "$skill_dir/SKILL.md" ]; then
+    echo "registered skill $name is missing a regular SKILL.md" >&2
+    exit 1
+  fi
+done <<<"$source_names"
 
 build_skill_object() {
   local name="$1" hash="$2"
