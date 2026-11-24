@@ -21,16 +21,34 @@ command -v jq >/dev/null 2>&1 || { echo "jq is required" >&2; exit 1; }
 # External skill provenance lives in skills-sources.json. Other skills are
 # maintained in this checkout. Keep this compatible with macOS's Bash 3.
 SOURCES="$REPO_DIR/skills-sources.json"
+[ -f "$SOURCES" ] || { echo "skills-sources.json is missing" >&2; exit 1; }
+# Parse once and fail before writing anything if provenance is malformed.
+if ! SOURCES_JSON="$(jq -ec '
+  select(type == "object" and .version == 1 and (.skills | type == "object") and
+    all(.skills[];
+      type == "object" and
+      (.repository | type == "string" and length > 0) and
+      (.branch | type == "string" and length > 0) and
+      (.path | type == "string" and length > 0) and
+      (.revision | type == "string") and
+      (.license | type == "string" and length > 0) and
+      ((has("license_file") | not) or (.license_file | type == "string" and length > 0))
+    )) | .skills' "$SOURCES")"; then
+  echo "skills-sources.json is invalid" >&2
+  exit 1
+fi
 
 build_skill_object() {
   local name="$1" hash="$2"
   local source sourceType version license
-  if [ -f "$SOURCES" ] && jq -e --arg name "$name" '.skills[$name] != null' "$SOURCES" >/dev/null; then
-    source="$(jq -r --arg name "$name" '.skills[$name].repository' "$SOURCES")"
+  if jq -e --arg name "$name" 'has($name)' <<<"$SOURCES_JSON" >/dev/null; then
+    source="$(jq -r --arg name "$name" '.[$name].repository' <<<"$SOURCES_JSON")"
     sourceType="git"
-    version="$(jq -r --arg name "$name" '.skills[$name].revision' "$SOURCES")"
-    license="$(jq -r --arg name "$name" '.skills[$name].license' "$SOURCES")"
+    version="$(jq -r --arg name "$name" '.[$name].revision' <<<"$SOURCES_JSON")"
+    license="$(jq -r --arg name "$name" '.[$name].license' <<<"$SOURCES_JSON")"
   else
+    local status=$?
+    [ "$status" -eq 1 ] || { echo "could not read skill provenance for $name" >&2; return 1; }
     source="vendored:local"
     sourceType="local"
     version="unpinned"

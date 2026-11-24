@@ -62,16 +62,20 @@ temporary worktree, runs the checks and opens a PR only when content changed.
 It does not touch the calling worktree or merge the PR. An existing branch for
 the same update must be resolved or removed before trying again.
 
-Local edits to a vendored skill are merged against its pinned upstream base;
-conflicts stop the update without changing the calling worktree. If an upstream
-is unavailable, the bundled copy remains usable. After the PR is reviewed and
-merged, update the nibble checkout and run its installer to apply the copies.
+Edits to a vendored skill already in `origin/main` are merged against its pinned
+upstream base; conflicts stop the update. Files containing NULs or non-UTF-8
+bytes are not line-merged when both sides change their content. Uncommitted or
+unpushed edits in the calling worktree stay untouched and are not included in
+the update PR. If an upstream is unavailable, the bundled copy remains usable.
+After the PR is reviewed and merged, update the nibble checkout and run its
+installer to apply the copies.
 
 ## Adding a skill
 
 For a nibble-owned skill, create `skills/<name>/SKILL.md` (frontmatter: `name`,
-`description`), add any references or scripts inside the directory, then run
-`scripts/skills-lock.sh`.
+`description`) and add any references or scripts inside the directory. Add its
+license to the local-skill `case` in `scripts/skills-lock.sh`, then run that
+script to update the lock.
 
 For an external skill, add an entry to `skills-sources.json` with `repository`,
 `branch`, the repository-relative `path` to the skill directory, an empty

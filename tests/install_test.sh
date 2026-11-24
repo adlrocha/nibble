@@ -291,6 +291,18 @@ uninstall "$WORK/bin/uninstall.sh" || fail "symlinked uninstall: $(cat "$WORK/ou
 [ ! -e "$WORK/home/.claude/skills/future-skill" ] || fail "symlinked uninstall left a discovered skill"
 pass "uninstall discovers bundled skills through a symlink"
 
+# A piped uninstaller must not treat the caller's project as its own checkout.
+mkdir -p "$WORK/foreign/skills/third-party" "$WORK/home/.claude/skills/third-party" "$WORK/home/.pi/agent/skills/third-party"
+printf '%s\n' '---' >"$WORK/foreign/skills/third-party/SKILL.md"
+(cd "$WORK/foreign" && env -u XDG_DATA_HOME -u XDG_CONFIG_HOME -u XDG_STATE_HOME -u XDG_CACHE_HOME \
+    HOME="$WORK/home" PATH="$STUBS:$PATH" NIBBLE_SRC_DIR="$WORK/no-checkout" \
+    bash -s -- --keep-config <"$ROOT/uninstall.sh" >"$WORK/out" 2>&1) \
+    || fail "piped uninstall: $(cat "$WORK/out")"
+[ -d "$WORK/home/.claude/skills/third-party" ] || fail "piped uninstall deleted a Claude skill from the caller's project"
+[ -d "$WORK/home/.pi/agent/skills/third-party" ] || fail "piped uninstall deleted a Pi skill from the caller's project"
+grep -q 'raw.githubusercontent.com/adlrocha/nibble/main/install.sh | bash' "$WORK/out" || fail "piped uninstall reinstall hint"
+pass "piped uninstall leaves caller project skills alone"
+
 # A checkout installed to a custom NIBBLE_SRC_DIR is removed by its own
 # uninstall.sh without setting the variable again.
 export NIBBLE_SRC_DIR="$WORK/custom/src"

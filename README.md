@@ -651,6 +651,8 @@ Network is host-mode, so services started inside the container (e.g. `npm run de
 ```bash
 cargo test               # unit and integration tests
 tests/install_test.sh    # install.sh / uninstall.sh end-to-end (no real install)
+pytest -q tests/skills_sync_test.py  # skill sync and PR tests
+scripts/skills-lock.sh --check      # skill manifest drift
 cargo build         # dev build
 cargo build --release
 ```

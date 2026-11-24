@@ -151,19 +151,23 @@ step "Removing nibble-installed skills"
 # discover additional bundled skills from the checkout next to this script.
 NIBBLE_SKILLS="engineering git-commit-pr inference-optimisation nibble-memory nibble-pr-review \
 nibble-no-ai-slop nibble-sdlc omarchy-migration skill-distill"
-SELF="${BASH_SOURCE[0]}"
-while [ -L "$SELF" ]; do
-    LINK="$(readlink "$SELF")"
-    case "$LINK" in
-        /*) SELF="$LINK" ;;
-        *) SELF="$(dirname "$SELF")/$LINK" ;;
-    esac
-done
-SELF_DIR="$(cd "$(dirname "$SELF")" && pwd)"
-for skill_dir in "$SELF_DIR"/skills/*/; do
-    [ -f "$skill_dir/SKILL.md" ] || continue
-    NIBBLE_SKILLS="$NIBBLE_SKILLS $(basename "$skill_dir")"
-done
+SELF="${BASH_SOURCE[0]:-}"
+SELF_DIR=""
+# A script read from stdin has no checkout; never use the caller's directory.
+if [ -n "$SELF" ] && [ -f "$SELF" ]; then
+    while [ -L "$SELF" ]; do
+        LINK="$(readlink "$SELF")"
+        case "$LINK" in
+            /*) SELF="$LINK" ;;
+            *) SELF="$(dirname "$SELF")/$LINK" ;;
+        esac
+    done
+    SELF_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+    for skill_dir in "$SELF_DIR"/skills/*/; do
+        [ -f "$skill_dir/SKILL.md" ] || continue
+        NIBBLE_SKILLS="$NIBBLE_SKILLS $(basename "$skill_dir")"
+    done
+fi
 STALE_SKILLS="factory-pipeline factory-spec factory-verify factory-qa-gate \
 factory-lessons fable5-emulation"
 
@@ -281,7 +285,7 @@ fi
 # Whether this nibble came from the one-command install, for the reinstall
 # hint at the end; a clone's own install.sh otherwise.
 INSTALLED_BY_PIPE=false
-if [ -f "$SELF_DIR/.git/nibble-installer-managed" ]; then
+if [ -n "$SELF_DIR" ] && [ -f "$SELF_DIR/.git/nibble-installer-managed" ]; then
     NIBBLE_SRC_DIR="$SELF_DIR"
     INSTALLED_BY_PIPE=true
 else
@@ -314,7 +318,7 @@ echo ""
 echo -e "${BOLD}${GREEN}Done!${NC} nibble has been uninstalled."
 echo ""
 echo "  Reinstall anytime with:"
-if [ "$INSTALLED_BY_PIPE" = true ]; then
+if [ "$INSTALLED_BY_PIPE" = true ] || [ -z "$SELF_DIR" ]; then
     echo "    curl -fsSL https://raw.githubusercontent.com/adlrocha/nibble/main/install.sh | bash"
 else
     echo "    $(printf '%q' "$SELF_DIR/install.sh")"

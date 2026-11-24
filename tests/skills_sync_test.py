@@ -150,6 +150,46 @@ def test_removes_deleted_upstream_files_but_keeps_local_files(
     assert (checkout / "skills/example/local.txt").read_text() == "local"
 
 
+def test_sync_refreshes_lock_after_registry_only_edit(
+    repos: tuple[Path, Path, str],
+) -> None:
+    _, checkout, revision = repos
+    run("bash", "scripts/skills-lock.sh", cwd=checkout)
+    path = checkout / "skills-sources.json"
+    registry = json.loads(path.read_text())
+    registry["skills"]["example"]["license"] = "Apache-2.0"
+    path.write_text(json.dumps(registry))
+    result = sync(checkout)
+    assert result.returncode == 0, result.stderr
+    lock = json.loads((checkout / "skills-lock.json").read_text())
+    assert lock["skills"]["example"]["license"] == "Apache-2.0"
+    assert lock["skills"]["example"]["version"] == revision
+    assert (
+        run("bash", "scripts/skills-lock.sh", "--check", cwd=checkout).returncode == 0
+    )
+
+
+@pytest.mark.parametrize(
+    "broken", [None, "{,}", "null", '{"version":1,"skills":{"example":null}}']
+)
+def test_lock_rejects_bad_registry_without_modifying_lock(
+    repos: tuple[Path, Path, str], broken: str | None
+) -> None:
+    _, checkout, _ = repos
+    run("bash", "scripts/skills-lock.sh", cwd=checkout)
+    lock = checkout / "skills-lock.json"
+    before = lock.read_bytes()
+    registry_path = checkout / "skills-sources.json"
+    if broken is None:
+        registry_path.unlink()
+    else:
+        registry_path.write_text(broken)
+    for args in ((), ("--check",)):
+        result = run("bash", "scripts/skills-lock.sh", *args, cwd=checkout, check=False)
+        assert result.returncode != 0
+        assert lock.read_bytes() == before
+
+
 def test_ignores_unrelated_upstream_commit(repos: tuple[Path, Path, str]) -> None:
     upstream, checkout, revision = repos
     (upstream / "unrelated").write_text("change")
@@ -279,6 +319,58 @@ def test_binary_conflicts_do_not_overwrite_local_changes(
     assert local.read_bytes() == b"local\x00binary"
 
 
+@pytest.mark.parametrize("mode_side", ["local", "upstream", "both"])
+def test_merges_independent_binary_content_and_mode_changes(
+    repos: tuple[Path, Path, str], mode_side: str
+) -> None:
+    upstream, checkout, _ = repos
+    remote = upstream / "skills/example/helper.sh"
+    remote.write_bytes(b"\xfforiginal")
+    revision = commit(upstream, "add binary")
+    local = checkout / "skills/example/helper.sh"
+    local.write_bytes(b"\xfforiginal")
+    path = checkout / "skills-sources.json"
+    registry = json.loads(path.read_text())
+    registry["skills"]["example"]["revision"] = revision
+    path.write_text(json.dumps(registry))
+    if mode_side == "local":
+        local.chmod(0o644)
+        remote.write_bytes(b"\xffupdated")
+    else:
+        remote.chmod(0o644)
+        local.write_bytes(b"\xffupdated")
+        if mode_side == "both":
+            remote.write_bytes(b"\xffupdated")
+    commit(upstream, "update binary")
+    result = sync(checkout)
+    assert result.returncode == 0, result.stderr
+    assert local.read_bytes() == b"\xffupdated"
+    assert not os.access(local, os.X_OK)
+
+
+def test_non_utf8_binary_changes_do_not_get_line_merged(
+    repos: tuple[Path, Path, str],
+) -> None:
+    upstream, checkout, _ = repos
+    original = b"\xfffirst\nmiddle\nlast\n"
+    remote = upstream / "skills/example/helper.sh"
+    remote.write_bytes(original)
+    revision = commit(upstream, "add binary")
+    local = checkout / "skills/example/helper.sh"
+    local.write_bytes(original)
+    path = checkout / "skills-sources.json"
+    registry = json.loads(path.read_text())
+    registry["skills"]["example"]["revision"] = revision
+    path.write_text(json.dumps(registry))
+    local.write_bytes(b"\xfflocal\nmiddle\nlast\n")
+    remote.write_bytes(b"\xfffirst\nmiddle\nupstream\n")
+    commit(upstream, "change binary")
+    result = sync(checkout)
+    assert result.returncode != 0
+    assert "conflict" in result.stderr.lower()
+    assert local.read_bytes() == b"\xfflocal\nmiddle\nlast\n"
+
+
 def test_missing_source_leaves_vendor_untouched(repos: tuple[Path, Path, str]) -> None:
     upstream, checkout, revision = repos
     shutil.rmtree(upstream)
@@ -392,6 +484,49 @@ def test_locally_triggered_pr_leaves_worktree_untouched(
     assert again.returncode != 0
     assert "already exists" in again.stderr
     assert (checkout / "skills/example/SKILL.md").read_text() == "local work\n"
+
+
+def test_pr_command_refreshes_metadata_only_lock(
+    repos: tuple[Path, Path, str], tmp_path: Path
+) -> None:
+    _, checkout, _ = repos
+    run("bash", "scripts/skills-lock.sh", cwd=checkout)
+    path = checkout / "skills-sources.json"
+    registry = json.loads(path.read_text())
+    registry["skills"]["example"]["license"] = "Apache-2.0"
+    path.write_text(json.dumps(registry))
+    run("git", "init", "-q", "-b", "main", cwd=checkout)
+    run("git", "config", "user.name", "Test", cwd=checkout)
+    run("git", "config", "user.email", "test@example.com", cwd=checkout)
+    (checkout / "tests").mkdir()
+    (checkout / "tests/skills_sync_test.py").write_text("# fixture\n")
+    commit(checkout, "registry metadata with stale lock")
+    remote = tmp_path / "remote.git"
+    run("git", "init", "-q", "--bare", str(remote), cwd=tmp_path)
+    run("git", "remote", "add", "origin", str(remote), cwd=checkout)
+    run("git", "push", "-q", "-u", "origin", "main", cwd=checkout)
+    stubs = tmp_path / "bin"
+    stubs.mkdir()
+    for name in ("gh", "cargo", "pytest"):
+        stub = stubs / name
+        stub.write_text("#!/bin/sh\nexit 0\n")
+        stub.chmod(0o755)
+    result = subprocess.run(
+        ["bash", "scripts/skills-update-pr.sh"],
+        cwd=checkout,
+        env=os.environ | {"PATH": f"{stubs}:{os.environ['PATH']}"},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    branch = run(
+        "git", "ls-remote", "--heads", "origin", "sync/skills-*", cwd=checkout
+    ).stdout.split()[0]
+    lock = json.loads(
+        run("git", "show", f"{branch}:skills-lock.json", cwd=checkout).stdout
+    )
+    assert lock["skills"]["example"]["license"] == "Apache-2.0"
 
 
 def test_pr_command_reports_missing_dependency(

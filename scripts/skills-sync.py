@@ -99,6 +99,19 @@ def merge_file(
     if base is None or local is None or remote is None:
         raise ValueError(f"conflict in {name}: file added or removed on both sides")
     executable = remote[1] if local[1] == base[1] else local[1]
+    if local[0] == base[0]:
+        return remote[0], executable
+    if remote[0] == base[0] or remote[0] == local[0]:
+        return local[0], executable
+    for contents in (base[0], local[0], remote[0]):
+        if b"\x00" in contents:
+            raise ValueError(f"conflict in {name}: both sides changed a binary file")
+        try:
+            contents.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ValueError(
+                f"conflict in {name}: both sides changed a binary file"
+            ) from error
     for filename, contents in (
         ("local", local[0]),
         ("base", base[0]),
@@ -253,6 +266,9 @@ def sync() -> None:
             print(f"{name}: {revision or 'new'} -> {head}")
         if updates:
             apply_updates(updates, json.dumps(registry, indent=2) + "\n")
+        else:
+            # Metadata may have changed even when upstream skill files did not.
+            command("bash", str(ROOT / "scripts" / "skills-lock.sh"), cwd=ROOT)
 
 
 def main() -> int:
