@@ -28,6 +28,9 @@ pub(super) struct Record {
     pub decided: Decided,
     /// True when a judge decided, false when a fixed rule did.
     pub judged: bool,
+    /// True when land then merged this commit.
+    #[serde(default)]
+    pub merged: bool,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub impact: Option<Level>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -86,11 +89,17 @@ pub(super) fn parse_flag(body: &str) -> Option<&str> {
     text.strip_prefix("Land ")
 }
 
+/// Whether a comment is one of land's own records or flags.
+pub(super) fn is_ours(body: &str) -> bool {
+    body.starts_with(MARKER) || body.starts_with(FLAG_MARKER)
+}
+
 /// Makes model or user text safe to post from the owner's account.
 ///
 /// It must not mention anyone, trigger the reviewer by name, or hide a record.
 pub(super) fn plain(text: &str) -> String {
     text.trim()
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
         .replace('@', "@\u{200b}")
-        .replace("<!--", "&lt;!--")
 }

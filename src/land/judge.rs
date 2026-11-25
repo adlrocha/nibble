@@ -9,7 +9,7 @@ use std::fmt::Write as _;
 pub(super) const SYSTEM_PROMPT: &str = include_str!("judge.md");
 
 /// Past this much evidence a judge would read only part of it, so a person decides.
-pub(super) const MAX_PROMPT_CHARS: usize = 600_000;
+pub(super) const MAX_PROMPT_CHARS: usize = 400_000;
 
 /// JSON schema of the answer, for agents that can enforce one.
 pub(super) const SCHEMA: &str = r#"{"type":"object","additionalProperties":false,"required":["decision","impact","reversible","likelihood","summary","reasons","question","fixes"],"properties":{"decision":{"type":"string","enum":["merge","fix","ask"]},"impact":{"type":"string","enum":["low","medium","high"]},"reversible":{"type":"boolean"},"likelihood":{"type":"string","enum":["low","medium","high"]},"summary":{"type":"string"},"reasons":{"type":"array","items":{"type":"string"}},"question":{"type":"string"},"fixes":{"type":"array","items":{"type":"string"}}}}"#;
@@ -60,18 +60,56 @@ pub(super) struct Verdict {
 }
 
 impl Verdict {
-    /// Reads an answer, refusing one that decides something without saying what.
+    /// Reads an answer. One that can't be read is an error, unless it clearly
+    /// holds the change back: a hold stays a hold however badly it is written.
     pub(super) fn parse(text: &str) -> Result<Verdict> {
-        let verdict: Verdict = serde_json::from_str(unfenced(text))
-            .context("the judge's answer is not the JSON object it was asked for")?;
-        if verdict.decision == Choice::Ask && verdict.question.trim().is_empty() {
-            bail!("the judge asked for a person without a question");
+        let text = unfenced(text);
+        let problem = match serde_json::from_str::<Verdict>(text) {
+            Ok(verdict) if verdict.is_complete() => return Ok(verdict),
+            Ok(_) => None,
+            Err(error) => Some(error),
+        };
+        if let Some(held) = Verdict::badly_written_hold(text) {
+            return Ok(held);
         }
-        if verdict.decision == Choice::Fix && verdict.fixes.iter().all(|fix| fix.trim().is_empty())
-        {
-            bail!("the judge asked for a fix without naming one");
+        match problem {
+            Some(error) => {
+                Err(error).context("the judge's answer is not the JSON object it was asked for")
+            }
+            None => bail!("the judge's answer is incomplete"),
         }
-        Ok(verdict)
+    }
+
+    /// Whether a decision carries what makes it usable.
+    fn is_complete(&self) -> bool {
+        match self.decision {
+            Choice::Merge => true,
+            Choice::Ask => !self.question.trim().is_empty(),
+            Choice::Fix => self.fixes.iter().any(|fix| !fix.trim().is_empty()),
+        }
+    }
+
+    fn badly_written_hold(text: &str) -> Option<Verdict> {
+        let value: serde_json::Value = serde_json::from_str(text).ok()?;
+        let decision = value["decision"].as_str()?;
+        if decision != "ask" && decision != "fix" {
+            return None;
+        }
+        let summary = value["summary"].as_str().unwrap_or("").trim().to_string();
+        Some(Verdict {
+            decision: Choice::Ask,
+            impact: Level::High,
+            reversible: false,
+            likelihood: Level::High,
+            question: format!(
+                "The judge held this back without saying clearly why. Should it merge? {summary}"
+            )
+            .trim()
+            .to_string(),
+            summary,
+            reasons: Vec::new(),
+            fixes: Vec::new(),
+        })
     }
 
     /// Turns a merge into an ask when the risk is above what the profile allows.
@@ -116,10 +154,11 @@ fn above_appetite(profile: Profile, verdict: &Verdict) -> bool {
     }
 }
 
-/// Asks again after an answer that couldn't be read, saying what was wrong with it.
-pub(super) fn retry(prompt: &str, problem: &anyhow::Error) -> String {
+/// Asks again after an answer that couldn't be read. It doesn't quote the
+/// answer, which evidence can influence.
+pub(super) fn retry(prompt: &str) -> String {
     format!(
-        "{prompt}\nYour previous answer could not be used: {problem:#}. Reply with the complete JSON object only.\n"
+        "{prompt}\nYour previous answer could not be read. Reply with the complete JSON object only.\n"
     )
 }
 
@@ -217,6 +256,8 @@ pub(super) fn prompt(bundle: &Bundle, history: &[String], nonce: &str) -> Result
         );
     }
     out.push_str("Judge this pull request. Reply with the JSON object only.\n");
+    // An agent may read a file named as `@path`, so no `@` stands before a name.
+    let out = out.replace('@', "@\u{200b}");
     Ok((out.chars().count() <= MAX_PROMPT_CHARS).then_some(out))
 }
 

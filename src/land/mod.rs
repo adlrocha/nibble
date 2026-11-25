@@ -12,6 +12,7 @@ mod agent;
 mod bundle;
 mod github;
 mod history;
+mod holds;
 mod judge;
 mod record;
 mod run;
@@ -25,6 +26,7 @@ use anyhow::{bail, Context, Result};
 use bundle::{Bundle, Mode, Outcome};
 use chrono::DateTime;
 use github::GitHub;
+use holds::Holds;
 use judge::{Choice, Verdict};
 use record::{Decided, Record};
 use run::RealRunner;
@@ -40,6 +42,9 @@ const DONE: i32 = 0;
 const CALL_HUMAN: i32 = 10;
 const KEEP_WORKING: i32 = 11;
 
+/// Posting a decision is worth a few tries: an unposted one is easy to miss.
+const POST_TRIES: u32 = 3;
+
 /// GitHub computes mergeability after it is first asked for.
 const MERGEABLE_TRIES: u32 = 5;
 const MERGEABLE_WAIT: Duration = Duration::from_secs(4);
@@ -53,9 +58,12 @@ pub(crate) fn cmd_land(action: LandAction) -> Result<i32> {
         .join("nibble/land");
     let runner = RealRunner;
     let land = Land {
+        holds: Holds {
+            dir: cache.join("holds"),
+        },
         github: GitHub {
             runner: &runner,
-            cache,
+            cache: cache.join("rules"),
             env: &env,
         },
         env: &env,
@@ -66,6 +74,7 @@ pub(crate) fn cmd_land(action: LandAction) -> Result<i32> {
 
 struct Land<'a> {
     github: GitHub<'a>,
+    holds: Holds,
     env: &'a BTreeMap<String, String>,
     wait: Duration,
 }
@@ -162,24 +171,26 @@ impl Land<'_> {
         dry_run: bool,
         out: &mut dyn Write,
     ) -> Result<i32> {
+        match self.github.state(repo, number)?.as_str() {
+            "OPEN" => {}
+            "MERGED" => {
+                writeln!(out, "MERGED: {repo}#{number} is already merged.")?;
+                return Ok(DONE);
+            }
+            _ => {
+                writeln!(
+                    out,
+                    "CALL THE HUMAN: {repo}#{number} was closed without merging. Don't reopen it; tell the user and stop."
+                )?;
+                return Ok(CALL_HUMAN);
+            }
+        }
         let Some(bundle) = self.settled_bundle(repo, number)? else {
             writeln!(out, "Land is off in {repo}. Leave the merge to the user.")?;
             return Ok(CALL_HUMAN);
         };
         let decision = self.decide(&bundle, agent)?;
-        let sha = bundle.pull_request.head_sha.clone();
-        let publish = |decided: Decided, text: &str| -> Result<()> {
-            if dry_run {
-                return Ok(());
-            }
-            let body = comment(&sha, decided, &decision, text, agent)?;
-            self.github.comment(repo, number, &body)?;
-            match decided {
-                Decided::Ask => self.github.add_label(repo, number),
-                Decided::Merge | Decided::Fix => self.github.remove_label(repo, number),
-            }
-        };
-
+        let sha = bundle.pull_request.head_sha.as_str();
         match &decision {
             Decision::NotReady(blockers) => {
                 writeln!(
@@ -190,69 +201,152 @@ impl Land<'_> {
                 Ok(KEEP_WORKING)
             }
             Decision::Rule(asks) => {
-                let text = format!("A fixed rule needs you:\n\n{}", bullets(asks));
-                publish(Decided::Ask, &text)?;
                 writeln!(
                     out,
                     "CALL THE HUMAN: {repo}#{number} at {sha} needs its owner. Tell them this and stop:\n{}",
                     bullets(asks)
                 )?;
+                // A rule asks every time it is run, and saying so once is enough.
+                let said = bundle.comments.iter().any(|comment| {
+                    record::trusted(&comment.association)
+                        && record::parse(&comment.body).is_some_and(|record| {
+                            record.sha == sha && !record.judged && record.decided == Decided::Ask
+                        })
+                });
+                if !dry_run && !said {
+                    let report = Report {
+                        bundle: &bundle,
+                        agent,
+                        verdict: None,
+                        decided: Decided::Ask,
+                        merged: false,
+                        text: format!("A fixed rule needs you:\n\n{}", bullets(asks)),
+                    };
+                    self.publish(&report, out)?;
+                }
                 Ok(CALL_HUMAN)
             }
             Decision::Standing(Decided::Fix) => {
                 writeln!(
                     out,
-                    "FIX FIRST: the judge already asked for fixes on {sha}, in its comment on {repo}#{number}. Push them, or reply there with evidence and push, then run this again."
+                    "FIX FIRST: the judge already asked for fixes on {sha}. Push them and run this again. If you believe it is wrong, ask the user with both sides and stop."
                 )?;
                 Ok(KEEP_WORKING)
             }
             Decision::Standing(_) => {
                 writeln!(
                     out,
-                    "CALL THE HUMAN: {sha} was already sent to its owner, in the comment on {repo}#{number}. Only they can merge this commit."
+                    "CALL THE HUMAN: {sha} was already held for its owner, see the comments on {repo}#{number}. Only they can merge this commit."
                 )?;
+                if !dry_run {
+                    self.label(repo, number, true, out)?;
+                }
                 Ok(CALL_HUMAN)
             }
-            Decision::Judged(verdict) => {
-                let text = explain(verdict);
-                match verdict.decision {
-                    Choice::Fix => {
-                        publish(Decided::Fix, &text)?;
-                        writeln!(
-                            out,
-                            "FIX FIRST: {repo}#{number} at {sha}. Fix this, get a new LGTM, then run this again:\n{}",
-                            bullets(&verdict.fixes)
-                        )?;
-                        Ok(KEEP_WORKING)
-                    }
-                    Choice::Ask => {
-                        publish(Decided::Ask, &text)?;
-                        writeln!(
-                            out,
-                            "CALL THE HUMAN: {repo}#{number} at {sha}. Ask them this and stop:\n{}",
-                            verdict.question.trim()
-                        )?;
-                        Ok(CALL_HUMAN)
-                    }
-                    Choice::Merge if dry_run || bundle.mode != Mode::Enforce => {
-                        publish(Decided::Merge, &text)?;
-                        writeln!(
-                            out,
-                            "WOULD MERGE: {repo}#{number} at {sha}. Nothing was merged ({}). Tell the user.",
-                            if dry_run { "dry run" } else { "shadow mode" }
-                        )?;
-                        Ok(CALL_HUMAN)
-                    }
-                    Choice::Merge => {
-                        self.confirm(repo, number, &sha)?;
-                        publish(Decided::Merge, &text)?;
-                        self.github.merge(repo, number, &sha)?;
-                        writeln!(out, "MERGED: {repo}#{number} at {sha}.")?;
-                        Ok(DONE)
-                    }
-                }
-            }
+            Decision::Judged(verdict) => self.act(&bundle, verdict, agent, dry_run, out),
         }
+    }
+
+    /// Carries out a judge's answer.
+    fn act(
+        &self,
+        bundle: &Bundle,
+        verdict: &Verdict,
+        agent: &Agent,
+        dry_run: bool,
+        out: &mut dyn Write,
+    ) -> Result<i32> {
+        let pr = &bundle.pull_request;
+        let (repo, number, sha) = (pr.repository.as_str(), pr.number, pr.head_sha.as_str());
+        let report = |decided, merged| Report {
+            bundle,
+            agent,
+            verdict: Some(verdict),
+            decided,
+            merged,
+            text: explain(verdict),
+        };
+        let (decided, code) = match verdict.decision {
+            Choice::Fix => (Decided::Fix, KEEP_WORKING),
+            Choice::Ask => (Decided::Ask, CALL_HUMAN),
+            Choice::Merge if dry_run || bundle.mode != Mode::Enforce => {
+                writeln!(
+                    out,
+                    "WOULD MERGE: {repo}#{number} at {sha}. Nothing was merged ({}). Tell the user.",
+                    if dry_run { "dry run" } else { "shadow mode" }
+                )?;
+                if !dry_run {
+                    self.publish(&report(Decided::Merge, false), out)?;
+                }
+                return Ok(CALL_HUMAN);
+            }
+            Choice::Merge => {
+                self.confirm(bundle)?;
+                self.github.merge(repo, number, sha)?;
+                writeln!(out, "MERGED: {repo}#{number} at {sha}.")?;
+                self.publish(&report(Decided::Merge, true), out)?;
+                return Ok(DONE);
+            }
+        };
+        // Remembered first, and on a dry run too, so nothing that fails from
+        // here on gives this commit another chance.
+        self.holds.put(repo, sha, decided)?;
+        if decided == Decided::Fix {
+            writeln!(
+                out,
+                "FIX FIRST: {repo}#{number} at {sha}. Fix this, get a new LGTM, then run this again. If you believe it is wrong, ask the user with both sides and stop.\n{}",
+                bullets(&verdict.fixes)
+            )?;
+        } else {
+            writeln!(
+                out,
+                "CALL THE HUMAN: {repo}#{number} at {sha}. Ask them this and stop:\n{}",
+                verdict.question.trim()
+            )?;
+        }
+        if !dry_run {
+            self.publish(&report(decided, false), out)?;
+        }
+        Ok(code)
+    }
+
+    /// Posts a decision and sets the label. The decision already stands, so a
+    /// failure here is reported and changes nothing.
+    fn publish(&self, report: &Report, out: &mut dyn Write) -> Result<()> {
+        let pr = &report.bundle.pull_request;
+        let decided = report.decided;
+        let body = report.comment()?;
+        let mut attempt = self.github.comment(&pr.repository, pr.number, &body);
+        for _ in 1..POST_TRIES {
+            if attempt.is_ok() {
+                break;
+            }
+            thread::sleep(self.wait);
+            attempt = self.github.comment(&pr.repository, pr.number, &body);
+        }
+        if let Err(error) = attempt {
+            writeln!(
+                out,
+                "Could not post this on the pull request, so tell the user: {error:#}"
+            )?;
+        }
+        self.label(&pr.repository, pr.number, decided == Decided::Ask, out)
+    }
+
+    fn label(&self, repo: &str, number: u64, wanted: bool, out: &mut dyn Write) -> Result<()> {
+        let changed = if wanted {
+            self.github.add_label(repo, number)
+        } else {
+            self.github.remove_label(repo, number)
+        };
+        if let Err(error) = changed {
+            writeln!(
+                out,
+                "Could not change the {} label: {error:#}",
+                github::LABEL
+            )?;
+        }
+        Ok(())
     }
 
     /// Reads the bundle, giving GitHub time to work out whether it merges cleanly.
@@ -284,13 +378,23 @@ impl Land<'_> {
         }
         // Asking a judge again about the same commit until it says yes would
         // defeat it, so a held commit stays held.
-        if let Some(decided) = standing(bundle) {
+        if let Some(decided) = self.standing(bundle)? {
             return Ok(Decision::Standing(decided));
         }
-        self.ask_judge(bundle, agent)
+        self.ask_judge(bundle, agent, false)
     }
 
-    fn ask_judge(&self, bundle: &Bundle, agent: &Agent) -> Result<Decision> {
+    /// The decision that already holds this exact commit, here or on GitHub.
+    fn standing(&self, bundle: &Bundle) -> Result<Option<Decided>> {
+        let pr = &bundle.pull_request;
+        Ok(self
+            .holds
+            .get(&pr.repository, &pr.head_sha)?
+            .or_else(|| held(bundle)))
+    }
+
+    /// Has the judge read the change. `replayed` hides how it turned out.
+    fn ask_judge(&self, bundle: &Bundle, agent: &Agent, replayed: bool) -> Result<Decision> {
         let pr = &bundle.pull_request;
         let files: Vec<&str> = bundle
             .files
@@ -298,7 +402,7 @@ impl Land<'_> {
             .map(|file| file.filename.as_str())
             .collect();
         let history = self.github.history(&pr.repository)?;
-        let lessons = history::lessons(&history, pr.number, &files);
+        let lessons = history::lessons(&history, pr.number, &files, replayed);
         let nonce = uuid::Uuid::new_v4().simple().to_string();
         let Some(prompt) = judge::prompt(bundle, &lessons, &nonce)? else {
             return Ok(Decision::Rule(vec![
@@ -307,8 +411,8 @@ impl Land<'_> {
         };
         let verdict = match self.answer(agent, prompt.clone())? {
             Ok(verdict) => verdict,
-            // Only an unreadable answer gets a second try, never an unwelcome one.
-            Err(problem) => self.answer(agent, judge::retry(&prompt, &problem))??,
+            // Only an unreadable answer gets a second try, never a hold.
+            Err(_) => self.answer(agent, judge::retry(&prompt))??,
         };
         Ok(Decision::Judged(verdict.held_to(bundle.policy.profile)))
     }
@@ -326,19 +430,23 @@ impl Land<'_> {
         Ok(Verdict::parse(&agent.answer(&printed)?))
     }
 
-    /// Checks everything again right before merging: judging takes minutes, and
-    /// the head, the threads, the checks, or the policy may have moved.
-    fn confirm(&self, repo: &str, number: u64, sha: &str) -> Result<()> {
-        let Some(now) = self.settled_bundle(repo, number)? else {
+    /// Checks everything again right before merging. Judging takes minutes, and
+    /// the judgement only covers what the judge read.
+    fn confirm(&self, judged: &Bundle) -> Result<()> {
+        let pr = &judged.pull_request;
+        let Some(now) = self.settled_bundle(&pr.repository, pr.number)? else {
             bail!("land was turned off while the judge was reading");
         };
-        if now.pull_request.head_sha != sha {
-            bail!("the pull request moved on while the judge was reading; run this again");
+        if self.standing(&now)?.is_some() {
+            bail!("another run held this commit while the judge was reading; run this again");
         }
-        if now.mode != Mode::Enforce || now.decision.outcome != Outcome::Ready {
+        if now.decision.outcome != Outcome::Ready {
             bail!(
                 "the pull request stopped being ready while the judge was reading; run this again"
             );
+        }
+        if !judged.same_evidence(&now) {
+            bail!("the pull request or its policy changed while the judge was reading; run this again");
         }
         Ok(())
     }
@@ -371,9 +479,13 @@ impl Land<'_> {
         if let Some(risk_map) = trial.risk_map {
             bundle.risk_map = Some(risk_map.to_string());
         }
+        // What land and the owner said about it is the answer being tested.
+        bundle
+            .comments
+            .retain(|comment| !record::is_ours(&comment.body));
         // Whether it was ready is history. What the rules and the judge say isn't.
         let rules = bundle.decision.asks.join("; ");
-        let judged = match self.ask_judge(&bundle, agent)? {
+        let judged = match self.ask_judge(&bundle, agent, true)? {
             Decision::Judged(verdict) => {
                 let detail = match verdict.decision {
                     Choice::Merge => verdict.summary.clone(),
@@ -421,19 +533,25 @@ impl Land<'_> {
         let mut entries: Vec<(Option<Record>, &github::Merged)> = merged
             .iter()
             .map(|pr| {
-                let record = pr
+                // Only a record of the commit that merged says anything about it.
+                let mut records = pr
                     .comments
                     .iter()
-                    .rev()
                     .filter(|comment| record::trusted(&comment.author_association))
-                    .find_map(|comment| record::parse(&comment.body));
-                (record, pr)
+                    .filter_map(|comment| record::parse(&comment.body))
+                    .filter(|record| record.sha == pr.head_ref_oid)
+                    .collect::<Vec<_>>();
+                let merge = records.iter().rposition(|record| record.merged);
+                let found = match merge {
+                    Some(at) => Some(records.remove(at)),
+                    None => records.pop(),
+                };
+                (found, pr)
             })
             .collect();
-        // Nothing recorded means land never saw it, which is worth a look first.
+        // What land didn't merge comes first: it may have gone around land.
         entries.sort_by_key(|(record, _)| match record {
-            None => (0, 0),
-            Some(record) => (
+            Some(record) if record.merged => (
                 1 + usize::from(record.reversible != Some(false)),
                 match record.impact {
                     Some(judge::Level::High) => 0,
@@ -441,12 +559,15 @@ impl Land<'_> {
                     Some(judge::Level::Low) => 2,
                 },
             ),
+            _ => (0, usize::from(record.is_none())),
         });
         writeln!(out, "{} merged in {repo} since {since}", entries.len())?;
+        if entries.len() >= github::DIGEST_LIMIT {
+            writeln!(out, "Only the newest {} are listed.", github::DIGEST_LIMIT)?;
+        }
         for (record, pr) in entries {
             let risk = match &record {
-                None => "no land record".to_string(),
-                Some(record) if record.decided == Decided::Merge => format!(
+                Some(record) if record.merged => format!(
                     "merged by land, impact {}, {}",
                     record.impact.map_or("unknown", judge::Level::as_str),
                     if record.reversible == Some(false) {
@@ -455,7 +576,11 @@ impl Land<'_> {
                         "reversible"
                     }
                 ),
-                Some(_) => "merged by a person after land held it".to_string(),
+                Some(record) if record.decided == Decided::Merge => {
+                    "not merged by land, which would have merged it".to_string()
+                }
+                Some(_) => "not merged by land, which held it".to_string(),
+                None => "not merged by land, which has no record of it".to_string(),
             };
             writeln!(out, "#{} {} ({risk})\n  {}", pr.number, pr.title, pr.url)?;
         }
@@ -463,17 +588,17 @@ impl Land<'_> {
     }
 }
 
-/// The decision that already holds this exact commit, if any.
-fn standing(bundle: &Bundle) -> Option<Decided> {
+/// The hold recorded on GitHub for this exact commit. A later record of
+/// anything else doesn't lift it.
+fn held(bundle: &Bundle) -> Option<Decided> {
     bundle
         .comments
         .iter()
-        .rev()
         .filter(|comment| record::trusted(&comment.association))
         .filter_map(|comment| record::parse(&comment.body))
-        .find(|record| record.judged && record.sha == bundle.pull_request.head_sha)
+        .filter(|record| record.judged && record.sha == bundle.pull_request.head_sha)
         .map(|record| record.decided)
-        .filter(|decided| *decided != Decided::Merge)
+        .rfind(|decided| *decided != Decided::Merge)
 }
 
 fn bullets(lines: &[String]) -> String {
@@ -514,40 +639,50 @@ fn explain(verdict: &Verdict) -> String {
     parts.join("\n\n")
 }
 
-/// The comment that explains a decision and records it.
-fn comment(
-    sha: &str,
+/// One decision to post on its pull request.
+struct Report<'a> {
+    bundle: &'a Bundle,
+    agent: &'a Agent,
+    /// Missing when a fixed rule decided.
+    verdict: Option<&'a Verdict>,
     decided: Decided,
-    decision: &Decision,
-    text: &str,
-    agent: &Agent,
-) -> Result<String> {
-    let verdict = match decision {
-        Decision::Judged(verdict) => Some(verdict),
-        _ => None,
-    };
-    let marker = record::marker(&Record {
-        sha: sha.to_string(),
-        decided,
-        judged: verdict.is_some(),
-        impact: verdict.map(|verdict| verdict.impact),
-        reversible: verdict.map(|verdict| verdict.reversible),
-    })
-    .context("failed to write the land record")?;
-    let heading = match decided {
-        Decided::Merge => "Land: merge",
-        Decided::Fix => "Land: fix first",
-        Decided::Ask => "Land: needs you",
-    };
-    let by = match verdict {
-        Some(_) => format!("Judged by {} with {}", agent.kind.as_str(), agent.model),
-        None => "Decided by a fixed rule".to_string(),
-    };
-    Ok(format!(
-        "{marker}\n## {heading}\n\n{}\n\n{} at {sha}.",
-        record::plain(text),
-        record::plain(&by)
-    ))
+    merged: bool,
+    text: String,
+}
+
+impl Report<'_> {
+    /// The comment that explains the decision and records it.
+    fn comment(&self) -> Result<String> {
+        let sha = &self.bundle.pull_request.head_sha;
+        let marker = record::marker(&Record {
+            sha: sha.clone(),
+            decided: self.decided,
+            judged: self.verdict.is_some(),
+            merged: self.merged,
+            impact: self.verdict.map(|verdict| verdict.impact),
+            reversible: self.verdict.map(|verdict| verdict.reversible),
+        })
+        .context("failed to write the land record")?;
+        let heading = match self.decided {
+            Decided::Merge if self.merged => "Land: merged",
+            Decided::Merge => "Land: would merge",
+            Decided::Fix => "Land: fix first",
+            Decided::Ask => "Land: needs you",
+        };
+        let by = match self.verdict {
+            Some(_) => format!(
+                "Judged by {} with {}",
+                self.agent.kind.as_str(),
+                self.agent.model
+            ),
+            None => "Decided by a fixed rule".to_string(),
+        };
+        Ok(format!(
+            "{marker}\n## {heading}\n\n{}\n\n{} at {sha}.",
+            record::plain(&self.text),
+            record::plain(&by)
+        ))
+    }
 }
 
 #[cfg(test)]

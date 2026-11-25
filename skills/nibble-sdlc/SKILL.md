@@ -47,9 +47,9 @@ Run `nibble land pr <number>` from the repository and do what it says:
 | It says | Do |
 | --- | --- |
 | `MERGED` | Report it and stop |
-| `NOT READY` or `FIX FIRST` | Do the listed work, get a new LGTM, and run it again |
+| `NOT READY` or `FIX FIRST` | Do the listed work, get a new LGTM, and run it again. If the judge is wrong, ask the user with both sides and stop |
 | `CALL THE HUMAN` | Ask the user exactly what it lists, with the PR link, and stop |
 | `WOULD MERGE` | Nothing merged. Report it and stop |
-| An error | Run it once more. If it fails again, tell the user and stop |
+| An error | Check whether the PR is still open, then run it once more. If it fails again, tell the user and stop |
 
-It runs a judge with the same agent and model as you. Don't pick another with `--agent` or `--model`, brief it, or push an empty change to get a second opinion: a commit it has held stays held until the user merges it. Don't merge any other way, enable auto-merge, edit `.nibble/sdlc.toml` to get past it, or use `nibble land flag`. Flags are the user's.
+It runs a judge with the same agent and model as you. Don't pick another with `--agent` or `--model`, run it with `--dry-run`, brief it, or push an empty change to get a second opinion: a commit it has held stays held until the user merges it. Don't merge any other way, enable auto-merge, edit `.nibble/sdlc.toml` to get past it, or use `nibble land flag`. Flags are the user's.

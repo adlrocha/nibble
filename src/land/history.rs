@@ -98,11 +98,27 @@ impl Past {
 ///
 /// A merge that nobody complained about teaches nothing, because owners merge
 /// most things out of habit and agents merge without one.
-pub(super) fn lessons(response: &Response, number: u64, files: &[&str]) -> Vec<String> {
+///
+/// `replayed` keeps only what was known when pull request `number` was opened,
+/// so a backtest can't see how it turned out.
+pub(super) fn lessons(
+    response: &Response,
+    number: u64,
+    files: &[&str],
+    replayed: bool,
+) -> Vec<String> {
     let changed: HashSet<&str> = files.iter().copied().collect();
-    let past = &response.data.repository.pull_requests.nodes;
+    let all = &response.data.repository.pull_requests.nodes;
+    let opened = all
+        .iter()
+        .find(|pr| pr.number == number)
+        .map(|pr| pr.created_at.as_str());
+    let past: Vec<&Past> = all
+        .iter()
+        .filter(|pr| !replayed || opened.is_some_and(|opened| pr.created_at.as_str() < opened))
+        .collect();
     let mut lessons = Vec::new();
-    for pr in past.iter().filter(|pr| pr.number != number) {
+    for pr in past.iter().copied().filter(|pr| pr.number != number) {
         let name = format!("#{} \"{}\"", pr.number, pr.title);
         let trusted = || {
             pr.comments

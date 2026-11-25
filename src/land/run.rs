@@ -1,10 +1,12 @@
 //! Runs external programs with a timeout, so tests can stand in for all of them.
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -12,6 +14,9 @@ use std::time::{Duration, Instant};
 pub(super) const SHORT: Duration = Duration::from_secs(120);
 
 const POLL: Duration = Duration::from_millis(50);
+
+/// How long output may stay open after a program exits, held by its children.
+const LINGER: Duration = Duration::from_secs(10);
 
 /// The variables a program sees.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,7 +72,9 @@ impl Runner for RealRunner {
                 Stdio::null()
             })
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            // Its own group, so a timeout stops its children too.
+            .process_group(0);
         match &invocation.env {
             Env::Inherit(extra) => command.envs(extra),
             Env::Only(all) => command.env_clear().envs(all),
@@ -92,14 +99,15 @@ impl Runner for RealRunner {
         let stderr = drain(child.stderr.take());
         let status =
             wait(&mut child, invocation.timeout).with_context(|| format!("{name} was stopped"))?;
-        let collect = |handle: thread::JoinHandle<Vec<u8>>| {
-            handle
-                .join()
-                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-                .map_err(|_| anyhow!("failed to read the output of {name}"))
+        let collect = |output: &mpsc::Receiver<Vec<u8>>| match output.recv_timeout(LINGER) {
+            Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
+            Err(_) => {
+                stop_group(&child);
+                bail!("{name} exited but left something running that holds its output open")
+            }
         };
-        let (stdout, stderr) = (collect(stdout)?, collect(stderr)?);
-        let _ = writer.join();
+        let (stdout, stderr) = (collect(&stdout)?, collect(&stderr)?);
+        drop(writer);
         if !status {
             let shown = invocation.args.first().map_or("", String::as_str);
             // Agents report failures on either stream.
@@ -117,15 +125,27 @@ impl Runner for RealRunner {
     }
 }
 
-fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> thread::JoinHandle<Vec<u8>> {
+fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> mpsc::Receiver<Vec<u8>> {
+    let (sender, output) = mpsc::channel();
     thread::spawn(move || {
         let mut bytes = Vec::new();
         if let Some(mut pipe) = pipe {
             // A broken pipe ends the output; the exit status says whether that matters.
             let _ = pipe.read_to_end(&mut bytes);
         }
-        bytes
-    })
+        // Nobody is listening once the program was stopped.
+        let _ = sender.send(bytes);
+    });
+    output
+}
+
+/// Kills everything the program started.
+fn stop_group(child: &Child) {
+    if let Ok(group) = libc::pid_t::try_from(child.id()) {
+        // SAFETY: a plain system call on the group this program was started in.
+        // One that is already gone is fine.
+        unsafe { libc::killpg(group, libc::SIGKILL) };
+    }
 }
 
 /// Waits for the child, killing it at the deadline. Returns whether it succeeded.
@@ -136,7 +156,7 @@ fn wait(child: &mut Child, timeout: Duration) -> Result<bool> {
             return Ok(status.success());
         }
         if Instant::now() >= deadline {
-            child.kill()?;
+            stop_group(child);
             child.wait()?;
             bail!("it took longer than {}s", timeout.as_secs());
         }

@@ -47,7 +47,7 @@ pub(super) struct Header {
     pub mode: Mode,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct Bundle {
     pub mode: Mode,
@@ -64,15 +64,34 @@ pub(super) struct Bundle {
     pub comments: Vec<Comment>,
 }
 
+impl Bundle {
+    /// Whether a judgement of `self` still holds for `now`.
+    ///
+    /// Checks and mergeability may move, because the rules look at them again.
+    /// Everything the judge read must be the same.
+    pub(super) fn same_evidence(&self, now: &Bundle) -> bool {
+        self.mode == now.mode
+            && self.policy == now.policy
+            && self.pull_request == now.pull_request
+            && self.files == now.files
+            && self.diff == now.diff
+            && self.risk_map == now.risk_map
+            && self.issues == now.issues
+            && self.reviews == now.reviews
+            && self.threads == now.threads
+            && self.comments == now.comments
+    }
+}
+
 /// The `[land]` table. Unknown keys are kept, so the judge sees the whole policy.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(super) struct Policy {
     pub profile: Profile,
     #[serde(flatten)]
     pub rest: BTreeMap<String, serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct PullRequest {
     pub repository: String,
@@ -84,7 +103,7 @@ pub(super) struct PullRequest {
     pub head_sha: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub(super) struct Decision {
     pub outcome: Outcome,
     pub blockers: Vec<String>,
@@ -92,7 +111,7 @@ pub(super) struct Decision {
     pub signals: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub(super) struct File {
     pub filename: String,
     pub status: String,
@@ -100,14 +119,14 @@ pub(super) struct File {
     pub deletions: u64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub(super) struct Issue {
     pub number: u64,
     pub title: String,
     pub body: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub(super) struct Review {
     pub author: String,
     pub state: String,
@@ -115,7 +134,7 @@ pub(super) struct Review {
     pub body: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct Thread {
     pub path: Option<String>,
@@ -124,13 +143,13 @@ pub(super) struct Thread {
     pub comments: Vec<ThreadComment>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub(super) struct ThreadComment {
     pub author: String,
     pub body: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub(super) struct Comment {
     pub author: String,
     pub association: String,

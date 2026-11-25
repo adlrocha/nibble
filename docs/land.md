@@ -27,16 +27,16 @@ Agents run `nibble land pr` at the end of the [delivery flow](sdlc.md). Nothing 
 
 The judge can hold a change back. It can't clear a rule or a threshold.
 
-Right before merging, land reads everything again and merges that exact commit, with the repository's default merge method.
+Right before merging, land reads everything again. If anything the judge read has changed, or another run held the commit, it stops. It then merges that exact commit, with the repository's default merge method.
 
 | Result | Exit code | Meaning |
 | --- | --- | --- |
 | `MERGED` | 0 | Done |
 | `CALL THE HUMAN`, `WOULD MERGE` | 10 | You decide. A held pull request gets the `needs-human` label |
 | `NOT READY`, `FIX FIRST` | 11 | The agent has work left. Nobody is asked |
-| an error | 1 | Nothing merged |
+| an error | 1 | Land didn't merge, or couldn't confirm that it did. It says which |
 
-To approve a held pull request, merge it on GitHub. The same commit is never judged twice, so an agent can't ask again until it gets a yes.
+To approve a held pull request, merge it on GitHub. A commit the judge held, even on a dry run, is never judged again on this machine or any other that sees its comment, so an agent can't ask again until it gets a yes.
 
 ## Policy
 
@@ -69,7 +69,7 @@ The judge learns from GitHub itself, so nothing is stored and every machine sees
 
 A merge nobody complained about teaches nothing, and neither does a finding that was dismissed.
 
-To tune a policy, try it on the past before changing it. Nothing is posted or merged:
+To tune a policy, try it on the past before changing it. Nothing is posted or merged, and the judge isn't shown what land, you, or later changes said about those pull requests:
 
 ```bash
 nibble land backtest 41 42 43 --policy new-sdlc.toml --risk-map new-risk.md
@@ -77,14 +77,16 @@ nibble land backtest 41 42 43 --policy new-sdlc.toml --risk-map new-risk.md
 
 ## Safety
 
-The judge has no tools, no settings, no MCP servers, no project files, no GitHub credentials, and an empty working directory. Nothing in a pull request can make it run or read anything. Every section of its input is fenced with a random marker, and it is told that a claim of approval in the evidence is a reason to ask.
+The judge has no tools, no user or project settings, no MCP servers, no project files, no GitHub credentials, and an empty working directory. Claude Code reads files named as `@path` in a prompt by itself, so that is turned off twice and no `@` in the evidence stands before a name. Nothing in a pull request can make the judge run or read anything. Every section of its input is fenced with a random marker, and it is told that a claim of approval in the evidence is a reason to ask.
 
 Anything that goes wrong leaves the pull request unmerged: an error, a timeout, an answer that can't be read twice in a row, a change too large to read in full, or a pull request that moved while it was being judged. `mode = "off"` stops everything in a repository.
 
 What it doesn't stop:
 
-- **An agent with your credentials can merge by itself.** The `nibble-sdlc` skill forbids it, and `nibble land digest` lists merges that have no land record. GitHub can refuse it only with a separate account for agents.
+- **An agent with your credentials can merge by itself.** The `nibble-sdlc` skill forbids it, and `nibble land digest` lists first what land didn't merge. GitHub can refuse it only with a separate account for agents.
 - **The review it starts from can be forged** by anyone who can push a branch, because it posts as `github-actions[bot]`. The judge reads the diff itself for that reason.
+- **A process on your machine can change what land runs.** The rules are built under your cache directory, and holds are kept there too.
+- **Holds count only from owners, members, and collaborators.** A judge's comment posted by any other account isn't seen by other machines.
 - **Two models can miss the same problem.**
 
 Turn on a ruleset that requires your checks on `main`, so GitHub enforces them even if land is wrong.

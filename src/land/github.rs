@@ -39,10 +39,15 @@ struct State {
     state: String,
 }
 
+/// Most merged pull requests a digest lists.
+pub(super) const DIGEST_LIMIT: usize = 200;
+
 /// One merged pull request, for a release digest.
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct Merged {
     pub number: u64,
+    pub head_ref_oid: String,
     pub title: String,
     pub url: String,
     pub comments: Vec<MergedComment>,
@@ -329,26 +334,35 @@ impl GitHub<'_> {
             "REBASE" => "--rebase",
             other => bail!("unknown merge method {other}"),
         };
-        let number = number.to_string();
-        self.gh(&[
+        let attempt = self.gh(&[
             "pr",
             "merge",
-            &number,
+            &number.to_string(),
             "--repo",
             repo,
             flag,
             "--match-head-commit",
             sha,
-        ])?;
-        let printed = self.gh(&["pr", "view", &number, "--repo", repo, "--json", "state"])?;
-        let after: State = serde_json::from_str(&printed).context("failed to read the state")?;
-        if after.state != "MERGED" {
-            bail!(
-                "gh accepted the merge, but the pull request is {}",
-                after.state
-            );
+        ]);
+        // gh can fail after GitHub merged, so only GitHub says what happened.
+        match (self.state(repo, number), attempt) {
+            (Ok(state), _) if state == "MERGED" => Ok(()),
+            (Ok(_), Err(error)) => Err(error),
+            (Ok(state), Ok(_)) => bail!(
+                "GitHub accepted the merge but the pull request is {state}, so it may merge later; tell the user"
+            ),
+            (Err(error), _) => Err(error).context(
+                "could not confirm whether the pull request merged; check it before anything else",
+            ),
         }
-        Ok(())
+    }
+
+    /// Whether the pull request is OPEN, CLOSED or MERGED.
+    pub(super) fn state(&self, repo: &str, number: u64) -> Result<String> {
+        let number = number.to_string();
+        let printed = self.gh(&["pr", "view", &number, "--repo", repo, "--json", "state"])?;
+        let state: State = serde_json::from_str(&printed).context("failed to read the state")?;
+        Ok(state.state)
     }
 
     /// The caller's open pull requests that wait for a person, in every repository.
@@ -401,9 +415,9 @@ impl GitHub<'_> {
             "--search",
             &format!("merged:>{since}"),
             "--limit",
-            "200",
+            &DIGEST_LIMIT.to_string(),
             "--json",
-            "number,title,url,comments",
+            "number,title,url,headRefOid,comments",
         ])?;
         serde_json::from_str(&printed).context("failed to read the merged pull requests")
     }

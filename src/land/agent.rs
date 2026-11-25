@@ -75,9 +75,9 @@ impl Agent {
 
     /// A headless run of this agent that can only read its prompt and answer.
     ///
-    /// It gets no tools, no settings, no MCP servers, no project files, an
-    /// empty directory, and no GitHub credentials, so nothing in the pull
-    /// request can make it run or read anything.
+    /// It gets no tools, no MCP servers, no user or project settings, no
+    /// project files, an empty directory, and no GitHub credentials, so nothing
+    /// in the pull request can make it run or read anything.
     pub(super) fn judge(
         &self,
         env: &BTreeMap<String, String>,
@@ -101,6 +101,10 @@ impl Agent {
                 "json",
                 "--json-schema",
                 schema,
+                // Claude Code expands `@path` in a prompt by reading the file
+                // itself, whatever tools the model has.
+                "--settings",
+                r#"{"permissions":{"deny":["Read"]}}"#,
             ]
             .map(String::from)
             .to_vec(),
@@ -130,7 +134,16 @@ impl Agent {
             program: self.program.clone(),
             args,
             stdin: Some(prompt),
-            env: Env::Only(judge_env(env, self.kind)),
+            env: Env::Only(
+                judge_env(env, self.kind)
+                    .into_iter()
+                    // The same expansion, off a second way.
+                    .chain([(
+                        "CLAUDE_CODE_DISABLE_ATTACHMENTS".to_string(),
+                        "1".to_string(),
+                    )])
+                    .collect(),
+            ),
             dir: Some(dir),
             timeout: JUDGE_TIMEOUT,
         }
@@ -238,6 +251,9 @@ fn judge_env(env: &BTreeMap<String, String>, kind: AgentKind) -> BTreeMap<String
         "HTTP_PROXY",
         "HTTPS_PROXY",
         "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
     ];
     let wanted = |name: &str| {
         SHARED.contains(&name)
