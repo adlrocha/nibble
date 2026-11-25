@@ -6,8 +6,9 @@
 # Each skill records: source, sourceType, skillPath, version, license, and a
 # sha256 of its SKILL.md (computedHash) so drift is detectable.
 #
-# Usage: scripts/skills-lock.sh          # write skills-lock.json
-#        scripts/skills-lock.sh --check  # exit non-zero if locked hashes differ
+# Usage: scripts/skills-lock.sh                    # write skills-lock.json
+#        scripts/skills-lock.sh --check            # exit non-zero if locked hashes differ
+#        scripts/skills-lock.sh --validate-sources # print validated source registry
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -23,7 +24,7 @@ command -v jq >/dev/null 2>&1 || { echo "jq is required" >&2; exit 1; }
 SOURCES="$REPO_DIR/skills-sources.json"
 [ -f "$SOURCES" ] || { echo "skills-sources.json is missing" >&2; exit 1; }
 # Parse once and fail before writing anything if provenance is malformed.
-if ! SOURCES_JSON="$(jq -ec '
+if ! REGISTRY_JSON="$(jq -ec '
   def relative_path:
     type == "string" and length > 0 and (startswith("/") | not) and
     (split("/") | all(.[]; . != ".."));
@@ -39,10 +40,15 @@ if ! SOURCES_JSON="$(jq -ec '
         (.license | type == "string" and length > 0) and
         ((has("license_file") | not) or (.license_file | relative_path))
       )
-    )) | .skills' "$SOURCES")"; then
+    ))' "$SOURCES")"; then
   echo "skills-sources.json is invalid" >&2
   exit 1
 fi
+if [ "${1:-}" = "--validate-sources" ]; then
+  printf '%s\n' "$REGISTRY_JSON"
+  exit 0
+fi
+SOURCES_JSON="$(jq -c '.skills' <<<"$REGISTRY_JSON")"
 # Registered skills must exist; otherwise regenerating would erase their pins.
 source_names="$(jq -r 'keys[]' <<<"$SOURCES_JSON")"
 while IFS= read -r name; do

@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import json
-import re
 import shutil
 import subprocess
 import sys
@@ -12,6 +11,7 @@ import tempfile
 from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parent.parent
+# Each file is represented by its contents and executable bit.
 File = tuple[bytes, bool]
 
 
@@ -23,16 +23,9 @@ def command(*args: str, cwd: Path) -> str:
     return result.stdout.strip()
 
 
-def safe_path(value: str) -> Path:
-    """Reject absolute and escaping paths in the source registry."""
-    path = PurePosixPath(value)
-    if (
-        not value
-        or path.is_absolute()
-        or any(part in ("..", ".") for part in path.parts)
-    ):
-        raise ValueError(f"invalid source path: {value!r}")
-    return Path(*path.parts)
+def source_relative_path(value: str) -> Path:
+    """Normalize a repository-relative path validated by the lock script."""
+    return Path(*PurePosixPath(value).parts)
 
 
 def source_path(repo: Path, path: Path) -> Path:
@@ -192,31 +185,25 @@ def apply_updates(updates: dict[str, dict[str, File]], registry_json: str) -> No
 
 def sync() -> None:
     """Stage all updates before changing the checkout."""
-    registry_path = ROOT / "skills-sources.json"
-    registry = json.loads(registry_path.read_text())
-    if (
-        not isinstance(registry, dict)
-        or registry.get("version") != 1
-        or not isinstance(registry.get("skills"), dict)
-    ):
-        raise ValueError("invalid skills-sources.json")
+    registry = json.loads(
+        command(
+            "bash",
+            str(ROOT / "scripts" / "skills-lock.sh"),
+            "--validate-sources",
+            cwd=ROOT,
+        )
+    )
     updates: dict[str, dict[str, File]] = {}
     with tempfile.TemporaryDirectory(prefix="nibble-skills-") as temp:
         work = Path(temp)
         for index, (name, source) in enumerate(registry["skills"].items()):
-            if not isinstance(source, dict):
-                raise TypeError(f"invalid source for {name}")
-            if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", name):
-                raise ValueError(f"invalid skill name: {name!r}")
-            skill_path = safe_path(source["path"])
+            skill_path = source_relative_path(source["path"])
             license_path = (
-                safe_path(source["license_file"])
-                if source.get("license_file")
+                source_relative_path(source["license_file"])
+                if "license_file" in source
                 else None
             )
             revision = source["revision"]
-            if revision and not re.fullmatch(r"[0-9a-f]{40}", revision):
-                raise ValueError(f"invalid revision for {name}")
             repo = work / f"repo-{index}"
             command(
                 "git",

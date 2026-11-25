@@ -36,7 +36,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ADAPTERS = HERE.parent / "adapters"
-TEMPLATE = HERE.parent / "templates" / "student-skill" / "SKILL.md"
+TEMPLATE = HERE.parent / "templates" / "student-skill" / "SKILL.md.tmpl"
 EXTRACT = HERE / "extract_session.py"
 SKILL_POINTER = ("\n\n---\nA skill for this task is at `.skill/{name}/SKILL.md` in this folder. "
                  "Read all of it before you start, and follow it.\n")

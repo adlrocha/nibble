@@ -70,7 +70,7 @@ python3 scripts/distill.py evidence runs/<task> --reference
 
 ## 4. Write the first version of the student skill
 
-Edit `runs/<task>/skill/SKILL.md` (it starts from `templates/student-skill/SKILL.md`). The student is
+Edit `runs/<task>/skill/SKILL.md` (it starts from `templates/student-skill/SKILL.md.tmpl`). The student is
 weaker than you, often has a shorter usable context, and follows text literally. Write for that reader:
 
 - **Order matters.** Number the steps in the order the reference did the work that mattered (skip its

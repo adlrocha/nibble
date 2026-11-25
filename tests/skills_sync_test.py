@@ -66,6 +66,45 @@ def sync(checkout: Path) -> subprocess.CompletedProcess[str]:
     return run("python3", "scripts/skills-sync.py", cwd=checkout, check=False)
 
 
+def fail_lock_after_validation(checkout: Path) -> None:
+    script = checkout / "scripts/skills-lock.sh"
+    shutil.copy2(script, checkout / "scripts/skills-lock-valid.sh")
+    script.write_text(
+        "#!/bin/sh\n"
+        'if [ "${1:-}" = --validate-sources ]; then\n'
+        '  exec bash "$(dirname "$0")/skills-lock-valid.sh" --validate-sources\n'
+        "fi\n"
+        'echo "simulated lock write failure" >&2\nexit 1\n'
+    )
+
+
+def test_bundled_distill_template_is_not_a_discoverable_skill() -> None:
+    skill_dir = ROOT / "skills/skill-distill"
+    assert sorted(skill_dir.rglob("SKILL.md")) == [skill_dir / "SKILL.md"]
+    assert (skill_dir / "templates/student-skill/SKILL.md.tmpl").is_file()
+
+
+def test_sync_applies_upstream_template_rename(repos: tuple[Path, Path, str]) -> None:
+    upstream, checkout, _ = repos
+    remote_dir = upstream / "skills/example/templates/student-skill"
+    remote_dir.mkdir(parents=True)
+    (remote_dir / "SKILL.md").write_text("template\n")
+    revision = commit(upstream, "add template")
+    local_dir = checkout / "skills/example/templates/student-skill"
+    local_dir.mkdir(parents=True)
+    (local_dir / "SKILL.md").write_text("template\n")
+    registry_path = checkout / "skills-sources.json"
+    registry = json.loads(registry_path.read_text())
+    registry["skills"]["example"]["revision"] = revision
+    registry_path.write_text(json.dumps(registry))
+    (remote_dir / "SKILL.md").rename(remote_dir / "SKILL.md.tmpl")
+    commit(upstream, "rename template")
+    result = sync(checkout)
+    assert result.returncode == 0, result.stderr
+    assert not (local_dir / "SKILL.md").exists()
+    assert (local_dir / "SKILL.md.tmpl").read_text() == "template\n"
+
+
 def test_updates_complete_skill_and_records_revision(
     repos: tuple[Path, Path, str],
 ) -> None:
@@ -207,6 +246,17 @@ def test_removes_deleted_upstream_files_but_keeps_local_files(
     assert (checkout / "skills/example/local.txt").read_text() == "local"
 
 
+def test_source_validation_does_not_require_an_imported_skill(
+    repos: tuple[Path, Path, str],
+) -> None:
+    _, checkout, _ = repos
+    shutil.rmtree(checkout / "skills/example")
+    result = run("bash", "scripts/skills-lock.sh", "--validate-sources", cwd=checkout)
+    registry = json.loads(result.stdout)
+    assert registry["skills"]["example"]["revision"]
+    assert not (checkout / "skills-lock.json").exists()
+
+
 def test_sync_refreshes_lock_after_registry_only_edit(
     repos: tuple[Path, Path, str],
 ) -> None:
@@ -259,10 +309,12 @@ def test_lock_rejects_bad_registry_without_modifying_lock(
         ("path", "foo/../escape"),
         ("path", "/absolute"),
         ("license_file", "../license"),
+        ("license_file", ""),
+        ("license_file", None),
     ],
 )
 def test_lock_rejects_registry_values_the_sync_rejects(
-    repos: tuple[Path, Path, str], field: str, value: str
+    repos: tuple[Path, Path, str], field: str, value: str | None
 ) -> None:
     _, checkout, _ = repos
     run("bash", "scripts/skills-lock.sh", cwd=checkout)
@@ -271,6 +323,7 @@ def test_lock_rejects_registry_values_the_sync_rejects(
     path = checkout / "skills-sources.json"
     registry = json.loads(path.read_text())
     if field == "name":
+        assert value is not None
         registry["skills"][value] = registry["skills"].pop("example")
     else:
         registry["skills"]["example"][field] = value
@@ -280,6 +333,22 @@ def test_lock_rejects_registry_values_the_sync_rejects(
         assert result.returncode != 0
         assert lock_path.read_bytes() == before
     assert sync(checkout).returncode != 0
+
+
+@pytest.mark.parametrize("license_file", ["", None])
+def test_invalid_registry_fails_before_fetching(
+    repos: tuple[Path, Path, str], tmp_path: Path, license_file: str | None
+) -> None:
+    _, checkout, _ = repos
+    path = checkout / "skills-sources.json"
+    registry = json.loads(path.read_text())
+    registry["skills"]["example"]["license_file"] = license_file
+    registry["skills"]["example"]["repository"] = (tmp_path / "missing").as_uri()
+    path.write_text(json.dumps(registry))
+    result = sync(checkout)
+    assert result.returncode != 0
+    assert "skills-sources.json is invalid" in result.stderr
+    assert "git clone" not in result.stderr
 
 
 def test_ignores_unrelated_upstream_commit(repos: tuple[Path, Path, str]) -> None:
@@ -337,9 +406,10 @@ def test_failed_lock_generation_restores_original_files(
     previous_lock = lock_path.read_bytes() if existing_lock else None
     (upstream / "skills/example/helper.sh").write_text("upstream update\n")
     commit(upstream, "update")
-    (checkout / "scripts/skills-lock.sh").write_text("#!/bin/sh\nexit 1\n")
+    fail_lock_after_validation(checkout)
     result = sync(checkout)
     assert result.returncode != 0
+    assert "simulated lock write failure" in result.stderr
     assert (checkout / "skills/example/helper.sh").read_text() == "old helper\n"
     assert (
         json.loads((checkout / "skills-sources.json").read_text())["skills"]["example"][
@@ -678,11 +748,11 @@ def test_rejects_symlinked_upstream_source(repos: tuple[Path, Path, str]) -> Non
 
 
 @pytest.mark.parametrize(
-    ("field", "value", "message"),
-    [("revision", "not-a-sha", "revision"), ("path", "../escape", "path")],
+    ("field", "value"),
+    [("revision", "not-a-sha"), ("path", "../escape")],
 )
 def test_rejects_invalid_source_metadata(
-    repos: tuple[Path, Path, str], field: str, value: str, message: str
+    repos: tuple[Path, Path, str], field: str, value: str
 ) -> None:
     _, checkout, _ = repos
     registry_file = checkout / "skills-sources.json"
@@ -691,7 +761,7 @@ def test_rejects_invalid_source_metadata(
     registry_file.write_text(json.dumps(registry))
     result = sync(checkout)
     assert result.returncode != 0
-    assert message in result.stderr.lower()
+    assert "skills-sources.json is invalid" in result.stderr
 
 
 def test_rejects_unpinned_import_over_existing_skill(
@@ -814,7 +884,7 @@ def test_rejects_invalid_skill_name(repos: tuple[Path, Path, str]) -> None:
     path.write_text(json.dumps(registry))
     result = sync(checkout)
     assert result.returncode != 0
-    assert "invalid skill name" in result.stderr
+    assert "skills-sources.json is invalid" in result.stderr
 
 
 def test_refuses_to_leave_skill_without_entrypoint(
@@ -836,9 +906,10 @@ def test_failed_new_import_is_rolled_back(repos: tuple[Path, Path, str]) -> None
     registry = json.loads(path.read_text())
     registry["skills"]["example"]["revision"] = ""
     path.write_text(json.dumps(registry))
-    (checkout / "scripts/skills-lock.sh").write_text("#!/bin/sh\nexit 1\n")
+    fail_lock_after_validation(checkout)
     result = sync(checkout)
     assert result.returncode != 0
+    assert "simulated lock write failure" in result.stderr
     assert not (checkout / "skills/example").exists()
     assert json.loads(path.read_text())["skills"]["example"]["revision"] == ""
 
@@ -851,4 +922,4 @@ def test_rejects_unsafe_source_path(repos: tuple[Path, Path, str]) -> None:
     registry_file.write_text(json.dumps(registry))
     result = sync(checkout)
     assert result.returncode != 0
-    assert "path" in result.stderr.lower()
+    assert "skills-sources.json is invalid" in result.stderr

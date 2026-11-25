@@ -69,9 +69,9 @@
       "source": "https://github.com/adlrocha/skill-distill.git",
       "sourceType": "git",
       "skillPath": "skills/skill-distill/SKILL.md",
-      "version": "014a0aea7493cd1b199aa91f2068c3c9d2b042b8",
+      "version": "9d379871f681cebefdd1ee70f72742cedf3d2213",
       "license": "MIT",
-      "computedHash": "c143b5dabcf9afea6d4e47bd099eb42b31ca17f2c63fd9fc4913cb1566c96d10"
+      "computedHash": "8c4d6e8af08b173de2582a9b197f573d1b2516866fe8c186a9c0cda46e0029b1"
     }
   }
 }
