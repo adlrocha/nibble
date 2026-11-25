@@ -32,7 +32,7 @@ Open the PR ready for review, because drafts skip the review. Then repeat until 
 - Read every finding and resolve each one, by fixing it or by replying with evidence that it doesn't apply. The reviewer can be wrong, so a well-supported reply is a valid answer.
 - A push triggers a re-review. A reply alone doesn't, so after a reply-only resolution post `@nibble-review` and wait for the result.
 
-**Stop after 5 review rounds** and hand off with what is still unresolved. More rounds usually mean the change or the spec needs rethinking. A critical finding you believe is wrong also goes to the user: reply with your evidence, then stop.
+Keep reviewing until the current head is approved; do not stop because of the number of rounds. If the feedback points to a deeper architectural or design problem, explain it and hand off for a decision.
 
 ## 5. Hand off
 
