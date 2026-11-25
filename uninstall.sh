@@ -147,21 +147,44 @@ fi
 # ── 7. Remove nibble-installed skills ─────────────────────────────────────────
 step "Removing nibble-installed skills"
 
-# Everything install.sh ships in skills/, plus legacy factory/fable5 installs.
-NIBBLE_SKILLS="engineering git-commit-pr nibble-memory nibble-pr-review \
-nibble-no-ai-slop nibble-sdlc omarchy-migration"
+# Retain known names as a fallback if the source tree is unavailable, and
+# discover additional bundled skills from the checkout next to this script.
+NIBBLE_SKILLS="engineering git-commit-pr inference-optimisation nibble-memory nibble-pr-review \
+nibble-no-ai-slop nibble-sdlc omarchy-migration skill-distill"
+SELF="${BASH_SOURCE[0]:-}"
+SELF_DIR=""
+# A script read from stdin has no checkout; never use the caller's directory.
+if [ -n "$SELF" ] && [ -f "$SELF" ]; then
+    while [ -L "$SELF" ]; do
+        LINK="$(readlink "$SELF")"
+        case "$LINK" in
+            /*) SELF="$LINK" ;;
+            *) SELF="$(dirname "$SELF")/$LINK" ;;
+        esac
+    done
+    SELF_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+fi
 STALE_SKILLS="factory-pipeline factory-spec factory-verify factory-qa-gate \
 factory-lessons fable5-emulation"
 
-for skills_dir in "$HOME/.claude/skills" "$HOME/.nibble/skills" "$HOME/.pi/agent/skills"; do
-    [ -d "$skills_dir" ] || continue
-    for skill in $NIBBLE_SKILLS $STALE_SKILLS; do
+remove_skill() {
+    local skill="$1" skills_dir
+    for skills_dir in "$HOME/.claude/skills" "$HOME/.nibble/skills" "$HOME/.pi/agent/skills"; do
         if [ -d "$skills_dir/$skill" ]; then
             rm -rf "${skills_dir:?}/$skill"
             ok "Removed $skills_dir/$skill"
         fi
     done
+}
+for skill in $NIBBLE_SKILLS $STALE_SKILLS; do
+    remove_skill "$skill"
 done
+if [ -n "$SELF_DIR" ]; then
+    for skill_dir in "$SELF_DIR"/skills/*/; do
+        [ -f "$skill_dir/SKILL.md" ] || continue
+        remove_skill "$(basename "$skill_dir")"
+    done
+fi
 
 # ── 7b. Remove nibble-installed pi/omp extensions ─────────────────────────────
 step "Removing nibble pi/omp extensions"
@@ -263,19 +286,11 @@ fi
 # The checkout to remove: the one this script is in when install.sh created
 # it (so a custom NIBBLE_SRC_DIR is found without setting it again), else
 # NIBBLE_SRC_DIR or its default.
-SELF="${BASH_SOURCE[0]}"
-while [ -L "$SELF" ]; do
-    LINK="$(readlink "$SELF")"
-    case "$LINK" in
-        /*) SELF="$LINK" ;;
-        *) SELF="$(dirname "$SELF")/$LINK" ;;
-    esac
-done
-SELF_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+# SELF_DIR was resolved before removing skills above.
 # Whether this nibble came from the one-command install, for the reinstall
 # hint at the end; a clone's own install.sh otherwise.
 INSTALLED_BY_PIPE=false
-if [ -f "$SELF_DIR/.git/nibble-installer-managed" ]; then
+if [ -n "$SELF_DIR" ] && [ -f "$SELF_DIR/.git/nibble-installer-managed" ]; then
     NIBBLE_SRC_DIR="$SELF_DIR"
     INSTALLED_BY_PIPE=true
 else
@@ -308,7 +323,7 @@ echo ""
 echo -e "${BOLD}${GREEN}Done!${NC} nibble has been uninstalled."
 echo ""
 echo "  Reinstall anytime with:"
-if [ "$INSTALLED_BY_PIPE" = true ]; then
+if [ "$INSTALLED_BY_PIPE" = true ] || [ -z "$SELF_DIR" ]; then
     echo "    curl -fsSL https://raw.githubusercontent.com/adlrocha/nibble/main/install.sh | bash"
 else
     echo "    $(printf '%q' "$SELF_DIR/install.sh")"

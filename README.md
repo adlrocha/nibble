@@ -648,9 +648,15 @@ Network is host-mode, so services started inside the container (e.g. `npm run de
 
 ## Development
 
+The skill checks need Python 3.10+ and pytest. Install pytest in your Python
+environment with `python3 -m pip install 'pytest>=8,<9'`; use a virtual
+environment if your system Python is externally managed.
+
 ```bash
 cargo test               # unit and integration tests
 tests/install_test.sh    # install.sh / uninstall.sh end-to-end (no real install)
+pytest -q tests/skills_sync_test.py  # skill sync and PR tests
+scripts/skills-lock.sh --check      # skill manifest drift
 cargo build         # dev build
 cargo build --release
 ```
