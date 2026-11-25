@@ -116,7 +116,7 @@ pub(crate) fn cmd_sdlc(action: SdlcAction) -> Result<i32> {
             let publish = Publish {
                 branch: INSTALL_BRANCH,
                 title: "ci: install the nibble sdlc flow",
-                body: "Installs nibble-review with `land` in shadow mode: each PR gets a `## Risk` comment and a `nibble-review/land` status. Nothing merges or blocks. Agents follow the global `nibble-sdlc` skill, which applies wherever `.nibble/sdlc.toml` exists. Remove it with `nibble sdlc uninstall`.",
+                body: "Installs nibble-review with `land` in shadow mode: each PR gets a `## Risk` comment and a `nibble-review/land` status. Nothing merges or blocks until `mode` is `enforce`; set `profile` and `required_checks` first. Agents follow the global `nibble-sdlc` skill, which applies wherever `.nibble/sdlc.toml` exists. Remove it with `nibble sdlc uninstall`.",
             };
             let mode = Mode { dry_run, yes };
             apply(shell, &repo, &changes, &publish, mode, &mut input, out)?;
@@ -368,15 +368,23 @@ fn push_if_changed(changes: &mut Vec<Change>, path: &str, before: Option<&str>, 
 
 fn render_config(main_is_staging: bool) -> String {
     format!(
-        "# Read by nibble-review from the default branch, and by `nibble sdlc`.\n\
+        "# Read by nibble-review from the default branch, and by `nibble land` and `nibble sdlc`.\n\
          [land]\n\
-         mode = \"shadow\"  # or \"off\"; shadow only reports and never merges or blocks\n\
+         # \"off\", \"shadow\" (decide and report) or \"enforce\" (also merge what needs no one)\n\
+         mode = \"shadow\"\n\
+         # How much merges without a person: \"side-project\", \"standard\" or \"critical\"\n\
+         profile = \"standard\"\n\
+         # Checks that must pass. Nothing merges unattended until at least one is named.\n\
+         required_checks = []\n\
          # true when main deploys to dev and a release deploys to production\n\
          main_is_staging = {main_is_staging}\n\
-         # Optional, with nibble-review's defaults when left out:\n\
-         # max_lines = 400\n\
-         # max_review_rounds = 5\n\
-         # always_human = [\"src/auth/**\"]  # extra paths that always need a person\n"
+         # Optional:\n\
+         # authors = [\"you\"]             # whose PRs may merge unattended; empty means any human\n\
+         # always_human = [\"src/auth\"]   # extra paths that always need a person\n\
+         # max_lines = 400               # a hard size limit\n\
+         #\n\
+         # [land.ask_when]               # situations the judge must send to a person\n\
+         # newsletter = \"Changes who gets an email, or when\"\n"
     )
 }
 

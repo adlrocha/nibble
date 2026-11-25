@@ -55,7 +55,7 @@
       "skillPath": "skills/nibble-sdlc/SKILL.md",
       "version": "unpinned",
       "license": "proprietary",
-      "computedHash": "9f48e63aff7a99a1552e5e343b5c150aed6a3cab5fad1dca25181eaf55fdc745"
+      "computedHash": "63d7293e46d20c9b35928b722c28f814c383e6fee84cbe39e72cdfc7d4c0b848"
     },
     "omarchy-migration": {
       "source": "vendored:local",

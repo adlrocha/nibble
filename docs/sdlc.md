@@ -1,8 +1,8 @@
 # SDLC flow
 
-`nibble sdlc` installs a delivery flow into a repository: you write a spec, an agent builds it and loops with nibble-review until LGTM, and `land` reports whether the PR could merge without you.
+`nibble sdlc` installs a delivery flow into a repository: you write a spec, an agent builds it and loops with nibble-review until LGTM, and [`nibble land`](land.md) merges it or calls you.
 
-Land is in **shadow mode**: it reports and never merges or blocks.
+A repository starts in **shadow mode**: land decides and reports, and nothing merges. Set `profile` and `required_checks`, then `mode = "enforce"`, when you trust it there.
 
 ## Requirements
 
@@ -49,7 +49,7 @@ Each repository gets a heading. `install`, `uninstall` and `check` work from a t
 nibble sdlc check        # compare the default branch with the expected setup
 ```
 
-Land's result for each PR is in its `## Risk` comment and in the `nibble-review/land` status on the commit it judged. Merging is yours: use GitHub, or `gh pr merge <pr> --match-head-commit <sha>` with the commit land judged, so a later push can't merge without a land result. nibble no longer merges on land's report. Agents are kept from merging by the `nibble-sdlc` skill and your `AGENTS.md`, which are instructions, not something nibble enforces.
+CI's check of the fixed rules is in each PR's `## Risk` comment and in the `nibble-review/land` status. The decision itself is made when an agent runs `nibble land pr`, and is in a `## Land` comment. See [land.md](land.md).
 
 A `[merge]` table in an older `.nibble/sdlc.toml` is no longer read by anything; delete it whenever you like.
 
@@ -66,4 +66,4 @@ Uninstall opens the reverse PR. It removes the `land` input, `statuses: write` a
 
 ## Settings
 
-The rules land applies are documented in the [nibble-review README](https://github.com/adlrocha/nibble-review#land).
+The rules land applies are documented in the [nibble-review README](https://github.com/adlrocha/nibble-review#land), and how it decides and merges in [land.md](land.md).

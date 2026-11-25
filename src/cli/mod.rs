@@ -49,6 +49,74 @@ pub enum SdlcAction {
 }
 
 #[derive(Subcommand)]
+pub enum LandAction {
+    /// Decide whether a finished pull request merges without its owner
+    ///
+    /// Exits 0 when it merged, 10 when the owner must act, and 11 when the
+    /// agent has work left.
+    Pr {
+        /// Pull request number
+        number: u64,
+        /// Repository as owner/name (default: the one in the current directory)
+        #[arg(long)]
+        repo: Option<String>,
+        /// Decide without posting or merging anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Agent that judges (default: the one running this command)
+        #[arg(long)]
+        agent: Option<crate::land::AgentKind>,
+        /// Model that judges (default: the one the calling agent uses)
+        #[arg(long)]
+        model: Option<String>,
+    },
+    /// Record that land decided a pull request wrongly, for later judges
+    Flag {
+        /// Pull request number
+        number: u64,
+        /// What land should have done
+        flag: crate::land::Flag,
+        /// Why, in plain words
+        why: String,
+        /// Repository as owner/name (default: the one in the current directory)
+        #[arg(long)]
+        repo: Option<String>,
+    },
+    /// Judge past pull requests without posting or merging anything
+    Backtest {
+        /// Pull request numbers
+        #[arg(required = true)]
+        numbers: Vec<u64>,
+        /// Repository as owner/name (default: the one in the current directory)
+        #[arg(long)]
+        repo: Option<String>,
+        /// Policy file to try instead of the repository's .nibble/sdlc.toml
+        #[arg(long)]
+        policy: Option<std::path::PathBuf>,
+        /// Risk map to try instead of the repository's .nibble/risk.md
+        #[arg(long)]
+        risk_map: Option<std::path::PathBuf>,
+        /// Agent that judges (default: the one running this command)
+        #[arg(long)]
+        agent: Option<crate::land::AgentKind>,
+        /// Model that judges (default: the one the calling agent uses)
+        #[arg(long)]
+        model: Option<String>,
+    },
+    /// List your pull requests that wait for you, in every repository
+    Queue,
+    /// List what merged since the last release, riskiest first
+    Digest {
+        /// Repository as owner/name (default: the one in the current directory)
+        #[arg(long)]
+        repo: Option<String>,
+        /// Start date instead of the last release
+        #[arg(long)]
+        since: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum Commands {
     // ── Sandbox subcommands ────────────────────────────────────────────────────
     /// Manage sandboxed agent containers
@@ -122,6 +190,12 @@ pub enum Commands {
     Sdlc {
         #[command(subcommand)]
         action: SdlcAction,
+    },
+
+    /// Merge finished pull requests that don't need their owner, and flag the rest
+    Land {
+        #[command(subcommand)]
+        action: LandAction,
     },
 
     /// Open a named zellij session whose agents come back after a crash
