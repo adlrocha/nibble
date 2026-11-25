@@ -7,7 +7,7 @@
 # sha256 of its SKILL.md (computedHash) so drift is detectable.
 #
 # Usage: scripts/skills-lock.sh                    # write skills-lock.json
-#        scripts/skills-lock.sh --check            # exit non-zero if locked hashes differ
+#        scripts/skills-lock.sh --check            # exit non-zero if the lock differs from skills/ and the registry
 #        scripts/skills-lock.sh --validate-sources # print validated source registry
 set -euo pipefail
 

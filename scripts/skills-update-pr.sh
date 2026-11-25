@@ -19,7 +19,10 @@ git -C "$ROOT" worktree add --quiet --detach "$WORK/checkout" origin/main
 cd "$WORK/checkout"
 python3 scripts/skills-sync.py
 bash scripts/skills-lock.sh --check
-git add -- skills skills-sources.json skills-lock.json
+# This fresh worktree contains upstream skill assets, not the caller's ignored
+# files. Include assets even when their names match nibble's ignore rules.
+git add -f -- skills
+git add -- skills-sources.json skills-lock.json
 if git diff --cached --quiet; then
     echo "All registered skills are up to date; no PR needed."
     exit 0

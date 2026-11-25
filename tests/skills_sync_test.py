@@ -557,12 +557,14 @@ def test_locally_triggered_pr_leaves_worktree_untouched(
     run("git", "config", "user.email", "test@example.com", cwd=checkout)
     (checkout / "tests").mkdir()
     (checkout / "tests/skills_sync_test.py").write_text("# fixture\n")
+    (checkout / ".gitignore").write_text("*.log\n*.db\n")
     commit(checkout, "initial nibble")
     remote = tmp_path / "remote.git"
     run("git", "init", "-q", "--bare", str(remote), cwd=tmp_path)
     run("git", "remote", "add", "origin", str(remote), cwd=checkout)
     run("git", "push", "-q", "-u", "origin", "main", cwd=checkout)
     (checkout / "skills/example/SKILL.md").write_text("local work\n")
+    (checkout / "skills/example/private.log").write_text("local private data\n")
     (checkout / "untracked").write_text("untouched\n")
     stubs = tmp_path / "bin"
     stubs.mkdir()
@@ -585,6 +587,8 @@ def test_locally_triggered_pr_leaves_worktree_untouched(
     assert unchanged.returncode == 0, unchanged.stderr
     assert "no PR needed" in unchanged.stdout
     (upstream / "skills/example/helper.sh").write_text("upstream update\n")
+    (upstream / "skills/example/reference.log").write_text("upstream reference\n")
+    (upstream / "skills/example/data.db").write_bytes(b"upstream data")
     commit(upstream, "update")
     (stubs / "pytest").write_text("#!/bin/sh\nexit 1\n")
     failed_tests = subprocess.run(
@@ -635,6 +639,28 @@ def test_locally_triggered_pr_leaves_worktree_untouched(
         run("git", "show", f"{sha}:skills/example/helper.sh", cwd=checkout).stdout
         == "upstream update\n"
     )
+    assert (
+        run("git", "show", f"{sha}:skills/example/reference.log", cwd=checkout).stdout
+        == "upstream reference\n"
+    )
+    assert (
+        run("git", "show", f"{sha}:skills/example/data.db", cwd=checkout).stdout
+        == "upstream data"
+    )
+    assert (
+        run(
+            "git",
+            "cat-file",
+            "-e",
+            f"{sha}:skills/example/private.log",
+            cwd=checkout,
+            check=False,
+        ).returncode
+        != 0
+    )
+    assert (
+        checkout / "skills/example/private.log"
+    ).read_text() == "local private data\n"
     again = subprocess.run(
         ["bash", "scripts/skills-update-pr.sh"],
         cwd=checkout,

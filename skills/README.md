@@ -59,8 +59,11 @@ source and stay in this checkout. To check upstreams and open an update PR:
 This needs git, gh (authenticated with push and PR access), Python 3.10+, pytest,
 jq and the Rust toolchain. It fetches `origin/main`, checks upstreams in a
 temporary worktree, runs the checks and opens a PR only when content changed.
-It does not touch the calling worktree or merge the PR. An existing branch for
-the same update must be resolved or removed before trying again.
+It does not touch the calling worktree or merge the PR. It includes upstream
+skill files even when their names match nibble's ignore rules, and pushes them
+to the nibble repository. Register only sources whose contents can be shared
+there. An existing branch for the same update must be resolved or removed
+before trying again.
 
 Edits to a vendored skill already in `origin/main` are merged against its pinned
 upstream base; conflicts stop the update. Files containing NULs or non-UTF-8
@@ -83,8 +86,10 @@ For an external skill, add an entry to `skills-sources.json` with `repository`,
 repository-relative license file when needed. Run `python3 scripts/skills-sync.py`
 to import the complete directory and pin its commit, then review and submit
 those changes through a PR. The local sync command writes to the current
-checkout; it refuses to import over an existing directory without a base.
+checkout; it refuses to import over an existing directory without a base. Run
+only one local sync at a time in a given checkout.
 Once merged, the PR command above checks it alongside the other sources.
-Uninstall discovers bundled skills from the checkout automatically. Also add
-its name to `NIBBLE_SKILLS` in `uninstall.sh` so a piped uninstall, which has no
-checkout to inspect, can remove it.
+
+For both nibble-owned and external skills, add the name to `NIBBLE_SKILLS` in
+`uninstall.sh`. Uninstall discovers bundled skills from a checkout, but a piped
+uninstall has no checkout to inspect.
