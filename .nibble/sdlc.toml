@@ -1,9 +1,11 @@
-# Read by nibble-review from the default branch, and by `nibble sdlc`.
+# Read by nibble-review from the default branch, and by `nibble land` and `nibble sdlc`.
+# `nibble sdlc runbook` explains every setting. `mode = "off"` stops land here.
 [land]
-mode = "shadow"  # or "off"; shadow only reports and never merges or blocks
-# true when main deploys to dev and a release deploys to production
-main_is_staging = false
-# Optional, with nibble-review's defaults when left out:
-# max_lines = 400
-# max_review_rounds = 5
-# always_human = ["src/auth/**"]  # extra paths that always need a person
+mode = "enforce"
+profile = "side-project"
+authors = ["adlrocha"]
+required_checks = ["install", "review"]
+always_human = [".nibble/risk.md", "src/land", "src/sdlc", "src/sandbox", "skills/nibble-sdlc"]
+
+[land.ask_when]
+authority = "It widens what an agent, a Slack message, or a schedule may do, or what it can reach on the host"
