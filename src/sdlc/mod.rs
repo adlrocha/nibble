@@ -9,6 +9,9 @@
 //! Its `AGENTS.md` is left alone; the config file marks the repository as using
 //! the flow, and the global `nibble-sdlc` skill carries the agent's rules.
 //!
+//! `runbook` prints how the flow works and how to configure it, followed by
+//! the current repository's settings.
+//!
 //! `install`, `uninstall` and `check` take `owner/name` arguments to
 //! act on other repositories, and default to the one in the current directory.
 
@@ -92,10 +95,48 @@ struct SdlcFile {
     land: LandSettings,
 }
 
+/// The `[land]` table, as far as `nibble sdlc` reads it. Unset values stay
+/// `None` so the runbook can tell a default from a choice; nibble-review owns
+/// the defaults and the rules. Unknown keys are refused, as nibble-review
+/// refuses them, so a misspelt setting isn't shown as its default.
 #[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct LandSettings {
+    mode: Option<LandMode>,
+    profile: Option<LandProfile>,
     #[serde(default)]
     main_is_staging: bool,
+    #[serde(default)]
+    required_checks: Vec<String>,
+    #[serde(default)]
+    authors: Vec<String>,
+    #[serde(default)]
+    always_human: Vec<String>,
+    #[serde(default)]
+    ask_when: std::collections::BTreeMap<String, String>,
+    max_lines: Option<u64>,
+    reviewer: Option<String>,
+    /// Accepted in older files and read by nothing, as in nibble-review.
+    #[serde(rename = "max_review_rounds")]
+    _max_review_rounds: Option<u64>,
+}
+
+/// What land does in a repository.
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum LandMode {
+    Off,
+    Shadow,
+    Enforce,
+}
+
+/// How much merges without a person.
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum LandProfile {
+    SideProject,
+    Standard,
+    Critical,
 }
 
 /// Entry point for `nibble sdlc`; returns the process exit code.
@@ -116,11 +157,15 @@ pub(crate) fn cmd_sdlc(action: SdlcAction) -> Result<i32> {
             let publish = Publish {
                 branch: INSTALL_BRANCH,
                 title: "ci: install the nibble sdlc flow",
-                body: "Installs nibble-review with `land` in shadow mode: each PR gets a `## Risk` comment and a `nibble-review/land` status. Nothing merges or blocks. Agents follow the global `nibble-sdlc` skill, which applies wherever `.nibble/sdlc.toml` exists. Remove it with `nibble sdlc uninstall`.",
+                body: "Installs nibble-review with `land` in shadow mode: each PR gets a `## Risk` comment and a `nibble-review/land` status. Nothing merges or blocks until `mode` is `enforce`; set `profile` and `required_checks` first (`nibble sdlc runbook` explains every setting). Agents follow the global `nibble-sdlc` skill, which applies wherever `.nibble/sdlc.toml` exists. Remove it with `nibble sdlc uninstall`.",
             };
             let mode = Mode { dry_run, yes };
             apply(shell, &repo, &changes, &publish, mode, &mut input, out)?;
             warn_missing_secret(shell, out)?;
+            writeln!(
+                out,
+                "Next: `nibble sdlc runbook` explains each setting and what to set first."
+            )?;
             Ok(0)
         }),
         SdlcAction::Uninstall {
@@ -140,6 +185,12 @@ pub(crate) fn cmd_sdlc(action: SdlcAction) -> Result<i32> {
             apply(shell, &repo, &changes, &publish, mode, &mut input, out)?;
             Ok(0)
         }),
+        SdlcAction::Runbook { repo } => runbook::run(
+            repo.as_deref(),
+            &clone_repo,
+            &RealShell::default(),
+            &mut out,
+        ),
         SdlcAction::Check { repos } => {
             for_each_repo(&repos, &mut out, &clone_repo, &mut |shell, out| {
                 let repo = load_repo(shell)?;
@@ -368,15 +419,23 @@ fn push_if_changed(changes: &mut Vec<Change>, path: &str, before: Option<&str>, 
 
 fn render_config(main_is_staging: bool) -> String {
     format!(
-        "# Read by nibble-review from the default branch, and by `nibble sdlc`.\n\
+        "# Read by nibble-review from the default branch, and by `nibble land` and `nibble sdlc`.\n\
          [land]\n\
-         mode = \"shadow\"  # or \"off\"; shadow only reports and never merges or blocks\n\
+         # \"off\", \"shadow\" (decide and report) or \"enforce\" (also merge what needs no one)\n\
+         mode = \"shadow\"\n\
+         # How much merges without a person: \"side-project\", \"standard\" or \"critical\"\n\
+         profile = \"standard\"\n\
+         # Checks that must pass. Nothing merges unattended until at least one is named.\n\
+         required_checks = []\n\
          # true when main deploys to dev and a release deploys to production\n\
          main_is_staging = {main_is_staging}\n\
-         # Optional, with nibble-review's defaults when left out:\n\
-         # max_lines = 400\n\
-         # max_review_rounds = 5\n\
-         # always_human = [\"src/auth/**\"]  # extra paths that always need a person\n"
+         # Optional:\n\
+         # authors = [\"you\"]             # whose PRs may merge unattended; empty means any human\n\
+         # always_human = [\"src/auth\"]   # extra paths that always need a person\n\
+         # max_lines = 400               # a hard size limit\n\
+         #\n\
+         # [land.ask_when]               # situations the judge must send to a person\n\
+         # newsletter = \"Changes who gets an email, or when\"\n"
     )
 }
 
@@ -811,6 +870,8 @@ fn check_repo(shell: &dyn Shell, repo: &Repo) -> Result<Vec<(bool, String)>> {
 fn parse_config(text: &str) -> Result<SdlcFile> {
     toml::from_str(text).with_context(|| format!("invalid {CONFIG_PATH}"))
 }
+
+mod runbook;
 
 #[cfg(test)]
 mod tests;

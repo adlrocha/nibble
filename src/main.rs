@@ -10,6 +10,7 @@ mod format;
 #[path = "sandbox/hermes.rs"]
 mod hermes;
 mod keybinds;
+mod land;
 mod lm;
 mod lock;
 mod memory;
@@ -99,6 +100,12 @@ fn main() -> Result<()> {
         }
         Commands::Sdlc { action } => {
             let code = sdlc::cmd_sdlc(action)?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
+        Commands::Land { action } => {
+            let code = land::cmd_land(action)?;
             if code != 0 {
                 std::process::exit(code);
             }
