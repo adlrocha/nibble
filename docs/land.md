@@ -54,7 +54,7 @@ always_human = ["src/auth"]
 newsletter = "Changes who gets an email, or when"
 ```
 
-Review rounds and size never call you.
+Review rounds never call you, and size only does when you set `max_lines`. `nibble sdlc runbook` explains every setting.
 
 ## Risk map
 
