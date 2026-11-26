@@ -778,3 +778,70 @@ jobs:
         "{fixed}"
     );
 }
+
+#[test]
+fn runbook_reads_the_policy_and_risk_map_from_the_default_branch() {
+    let mut shell = tree(&[
+        (CONFIG_PATH, "[land]\nmode = \"enforce\"\nprofile = \"standard\"\nrequired_checks = [\"test\"]\nauthors = [\"me\"]\n"),
+        (".nibble/risk.md", "# Risk map\n"),
+    ]);
+    shell
+        .answers
+        .push(("defaultBranchRef".to_string(), Ok("main".to_string())));
+    let text = runbook::report(&shell).unwrap();
+    assert!(shell.called("fetch -q origin main"));
+    assert!(text.contains("risk map         `.nibble/risk.md`"));
+    assert!(text.contains("The policy is complete."));
+
+    let mut bare = tree(&[(CONFIG_PATH, "[land]\n")]);
+    bare.answers
+        .push(("defaultBranchRef".to_string(), Ok("main".to_string())));
+    assert!(runbook::report(&bare)
+        .unwrap()
+        .contains("risk map         missing"));
+
+    let outside = FakeShell::new(&[]).failing("rev-parse");
+    let error = runbook::report(&outside).unwrap_err();
+    assert!(format!("{error:#}").contains("not inside a git repository"));
+}
+
+fn repo_tree(files: &[(&str, &str)]) -> FakeShell {
+    let mut shell = tree(files);
+    shell
+        .answers
+        .push(("defaultBranchRef".to_string(), Ok("main".to_string())));
+    shell
+}
+
+#[test]
+fn runbook_inside_a_repository_with_a_broken_policy_fails_with_the_cause() {
+    let open = |_: &str| -> Result<Workspace> { panic!("opened") };
+    let shell = repo_tree(&[(CONFIG_PATH, "[land]\nprofle = \"standard\"\n")]);
+    let mut out = Vec::new();
+    assert_eq!(runbook::run(None, &open, &shell, &mut out).unwrap(), 1);
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("✗ invalid .nibble/sdlc.toml"));
+    assert!(text.contains("profle"), "the cause is kept: {text}");
+}
+
+#[test]
+fn runbook_for_a_named_repository_reports_it_after_the_guide() {
+    let open = |name: &str| -> Result<Workspace> {
+        assert_eq!(name, "owner/name");
+        Ok(Workspace {
+            shell: Box::new(repo_tree(&[(CONFIG_PATH, "[land]\n")])),
+            _clone: None,
+        })
+    };
+    let current = FakeShell::new(&[]).failing("git");
+    let mut out = Vec::new();
+    assert_eq!(
+        runbook::run(Some("owner/name"), &open, &current, &mut out).unwrap(),
+        0
+    );
+    let text = String::from_utf8(out).unwrap();
+    let guide = text.find("## The levers").unwrap();
+    let settings = text.find("## This repository").unwrap();
+    assert!(guide < settings);
+    assert!(text.contains("profile          critical (not set)"));
+}

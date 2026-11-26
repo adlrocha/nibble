@@ -41,6 +41,14 @@ pub enum SdlcAction {
         #[arg(long)]
         remove_reviewer: bool,
     },
+    /// Explain the flow and every setting, then show this repository's settings
+    ///
+    /// Prints the runbook, then reads `.nibble/sdlc.toml` and `.nibble/risk.md`
+    /// from the default branch and says what to set next.
+    Runbook {
+        /// Repository as owner/name (default: the one in the current directory)
+        repo: Option<String>,
+    },
     /// Report drift between the default branch and the expected setup
     Check {
         /// Repositories as owner/name (default: the one in the current directory)

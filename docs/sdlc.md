@@ -2,6 +2,8 @@
 
 `nibble sdlc` installs a delivery flow into a repository: you write a spec, an agent builds it and loops with nibble-review until LGTM, and [`nibble land`](land.md) merges it or calls you.
 
+New to it? `nibble sdlc runbook` explains the flow and every setting, then shows the current repository's settings and what to set next. The same text is in [runbook.md](runbook.md).
+
 A repository starts in **shadow mode**: land decides and reports, and nothing merges. Set `profile` and `required_checks`, then `mode = "enforce"`, when you trust it there.
 
 ## Requirements
@@ -47,6 +49,7 @@ Each repository gets a heading. `install`, `uninstall` and `check` work from a t
 
 ```bash
 nibble sdlc check        # compare the default branch with the expected setup
+nibble sdlc runbook      # how it works, every setting, and what this repository should set next
 ```
 
 CI's check of the fixed rules is in each PR's `## Risk` comment and in the `nibble-review/land` status. The decision itself is made when an agent runs `nibble land pr`, and is in a `## Land` comment. See [land.md](land.md).

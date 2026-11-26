@@ -7,7 +7,7 @@ description: How code changes ship in any repository that contains `.nibble/sdlc
 
 Take a spec to a merged pull request without a person in the middle. Call the user only when this skill or `nibble land` says to. Where the repository's `AGENTS.md` is stricter, it wins.
 
-A repository uses this flow when `.nibble/sdlc.toml` is on its default branch; `nibble sdlc install` puts it there, and nothing is added to `AGENTS.md`. Read the file: `[land] mode` says whether land merges (`enforce`), only reports (`shadow`), or is off.
+A repository uses this flow when `.nibble/sdlc.toml` is on its default branch; `nibble sdlc install` puts it there, and nothing is added to `AGENTS.md`. When the user asks how the flow works or how to set it up, run `nibble sdlc runbook` and answer from it. Read the file: `[land] mode` says whether land merges (`enforce`), only reports (`shadow`), or is off.
 
 ## 1. Check the spec
 
